@@ -10,7 +10,8 @@ use crate::{
     },
 };
 
-const CONVERSATION_COLUMNS: &str = "id, title, provider_id, model_id, created_at, updated_at";
+const CONVERSATION_COLUMNS: &str =
+    "id, title, provider_id, model_id, created_at, updated_at, profile_context";
 const MESSAGE_COLUMNS: &str =
     "id, conversation_id, role, content, status, error, provider_id, model_id, created_at";
 
@@ -24,6 +25,7 @@ fn conversation_from_row(row: &Row) -> rusqlite::Result<Conversation> {
         },
         created_at: row.get(4)?,
         updated_at: row.get(5)?,
+        profile_context: row.get(6)?,
     })
 }
 
@@ -61,6 +63,15 @@ pub fn create(
         params![title, model.provider_id, model.model_id, now],
     )?;
     get(conn, conn.last_insert_rowid())
+}
+
+/// Whether the user shares their Profile in this conversation.
+pub fn set_profile_context(conn: &Connection, id: i64, enabled: bool) -> AppResult<()> {
+    conn.execute(
+        "UPDATE conversations SET profile_context = ?2 WHERE id = ?1",
+        params![id, enabled],
+    )?;
+    Ok(())
 }
 
 pub fn get(conn: &Connection, id: i64) -> AppResult<Conversation> {

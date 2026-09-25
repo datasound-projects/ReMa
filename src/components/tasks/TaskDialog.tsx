@@ -24,6 +24,8 @@ interface TaskDialogProps {
   /** Prefill for a new task (from the chat composer). */
   initialPrompt?: string;
   initialModel?: ModelRef | null;
+  /** Prefill from the composer's Profile toggle. */
+  initialUseProfile?: boolean;
   onClose: () => void;
   onSaved: (task: ScheduledTask) => void;
 }
@@ -37,11 +39,12 @@ export function TaskDialog({
   task,
   initialPrompt = '',
   initialModel = null,
+  initialUseProfile = false,
   onClose,
   onSaved,
 }: TaskDialogProps) {
   const [form, setForm] = useState<TaskForm>(() =>
-    task ? formFromTask(task) : defaultForm(initialPrompt, initialModel),
+    task ? formFromTask(task) : defaultForm(initialPrompt, initialModel, initialUseProfile),
   );
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -128,6 +131,17 @@ export function TaskDialog({
             onChange={(e) => update({ prompt: e.target.value })}
           />
         </label>
+
+        {!jobs && (
+          <label className="checkbox">
+            <input
+              type="checkbox"
+              checked={form.useProfile}
+              onChange={(e) => update({ useProfile: e.target.checked })}
+            />
+            <span>Include my Profile (skills, experience, links; no email or phone)</span>
+          </label>
+        )}
 
         {jobs && (
           <div className="job-options">

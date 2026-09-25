@@ -17,8 +17,10 @@ use tauri_specta::{collect_commands, collect_events, Builder, ErrorHandlingMode}
 use crate::{
     commands,
     models::{
+        browser::BrowserChanged,
         chat::{ChatEvent, ConversationsChanged},
         google::GoogleChanged,
+        profile::ProfileChanged,
         provider::ProvidersChanged,
         task::TasksChanged,
     },
@@ -54,6 +56,26 @@ pub fn builder() -> Builder<tauri::Wry> {
             commands::google::cancel_google_connect,
             commands::google::disconnect_google,
             commands::google::set_google_service_enabled,
+            // Profile
+            commands::profile::get_profile,
+            commands::profile::save_profile,
+            commands::profile::add_profile_document,
+            commands::profile::import_profile_document,
+            commands::profile::update_profile_document,
+            commands::profile::delete_profile_document,
+            commands::profile::open_profile_document,
+            // Browser workspace & Auto Fill
+            commands::browser::get_browser_status,
+            commands::browser::open_in_browser,
+            commands::browser::set_browser_bounds,
+            commands::browser::set_browser_visible,
+            commands::browser::browser_back,
+            commands::browser::browser_forward,
+            commands::browser::browser_reload,
+            commands::browser::close_browser,
+            commands::browser::run_autofill,
+            commands::browser::attach_profile_document,
+            commands::browser::reveal_profile_document,
             // Chat
             commands::chat::list_conversations,
             commands::chat::get_conversation,
@@ -71,9 +93,11 @@ pub fn builder() -> Builder<tauri::Wry> {
             commands::tasks::list_task_executions,
         ])
         .events(collect_events![
+            BrowserChanged,
             ChatEvent,
             ConversationsChanged,
             GoogleChanged,
+            ProfileChanged,
             ProvidersChanged,
             TasksChanged,
         ])
@@ -127,6 +151,23 @@ mod tests {
             committed == rendered,
             "src/generated/bindings.ts is out of date. Run `pnpm bindings` and commit the result."
         );
+    }
+
+    /// Every registered command is listed in `APP_COMMANDS`, which build.rs
+    /// turns into the permission set granted to the main webview only. A
+    /// command missing there would be rejected at runtime.
+    #[test]
+    fn every_command_is_permissioned() {
+        let rendered = render_bindings(&builder()).expect("render bindings");
+        let mut registered: Vec<&str> = rendered
+            .split("__TAURI_INVOKE<")
+            .skip(1)
+            .filter_map(|s| s.split("(\"").nth(1)?.split('"').next())
+            .collect();
+        let mut listed = crate::ipc_commands::APP_COMMANDS.to_vec();
+        registered.sort_unstable();
+        listed.sort_unstable();
+        assert_eq!(registered, listed);
     }
 
     /// Run via `pnpm bindings`.

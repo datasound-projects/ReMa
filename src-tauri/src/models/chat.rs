@@ -38,6 +38,8 @@ pub struct Conversation {
     pub title: String,
     /// Model used for the most recent reply.
     pub model: ModelRef,
+    /// The user shares their Profile with the model in this conversation.
+    pub profile_context: bool,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -70,6 +72,8 @@ pub struct SendMessageInput {
     pub conversation_id: Option<i64>,
     pub content: String,
     pub model: ModelRef,
+    /// Include the user's Profile (the composer's "Profile" toggle).
+    pub use_profile: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Type)]

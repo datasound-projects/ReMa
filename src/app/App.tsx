@@ -1,11 +1,13 @@
 import { useCallback, useMemo, useState } from 'react';
 
+import { BrowserProvider } from '../components/browser/BrowserProvider';
 import { ConversationList } from '../components/chat/ConversationList';
 import { AppShell } from '../components/layout/AppShell';
 import { Sidebar } from '../components/layout/Sidebar';
 import { dataOr } from '../hooks/useAsyncData';
 import { useConversations } from '../hooks/useConversations';
 import { ChatPage } from '../pages/ChatPage';
+import { ProfilePage } from '../pages/ProfilePage';
 import { ScheduledTasksPage } from '../pages/ScheduledTasksPage';
 import { SettingsPage } from '../pages/SettingsPage';
 import { deleteConversation } from '../services/chatService';
@@ -33,6 +35,7 @@ export function App() {
 
   return (
     <NavigationContext value={navigation}>
+      <BrowserProvider>
       <AppShell
         sidebar={
           <Sidebar items={MAIN_NAV} footerItems={FOOTER_NAV} activeId={view.page} onSelect={selectPage}>
@@ -55,8 +58,10 @@ export function App() {
       >
         {view.page === 'chat' && <ChatPage conversationId={view.conversationId} />}
         {view.page === 'tasks' && <ScheduledTasksPage />}
+        {view.page === 'profile' && <ProfilePage />}
         {view.page === 'settings' && <SettingsPage />}
       </AppShell>
+      </BrowserProvider>
     </NavigationContext>
   );
 }

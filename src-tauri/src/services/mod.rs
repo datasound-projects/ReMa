@@ -1,4 +1,8 @@
 pub mod chat;
+pub mod documents;
+pub mod profile;
+pub mod profile_context;
+pub mod profile_import;
 pub mod providers;
 pub mod schedule;
 pub mod scheduler;

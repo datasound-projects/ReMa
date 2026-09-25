@@ -36,10 +36,32 @@
   letter-spacing: -0.02em;
 }
 
+.app-shell__tools {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin-left: auto;
+}
+
 .app-shell__body {
   display: flex;
   flex: 1;
   min-height: 0;
+}
+
+/* Content plus, on demand, the browser docked on either side. */
+.app-shell__workspace {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+}
+
+.app-shell__workspace--left {
+  flex-direction: row-reverse;
+}
+
+.app-shell__main[hidden] {
+  display: none;
 }
 
 .app-shell__main {
@@ -47,6 +69,8 @@
   flex: 1;
   min-width: 0;
   overflow-y: auto;
+  /* Pages adapt to the width left next to the browser workspace. */
+  container-type: inline-size;
 }
 
 /* ── Sidebar ───────────────────────────────────────────── */
@@ -288,4 +312,16 @@
   padding: var(--space-8) 0;
   color: var(--color-text-secondary);
   text-align: center;
+}
+
+/* Narrow content (e.g. next to a docked browser). */
+@container (max-width: 720px) {
+  .page {
+    padding: var(--space-6) var(--space-5) var(--space-10);
+  }
+
+  .page__header {
+    flex-wrap: wrap;
+    gap: var(--space-3);
+  }
 }

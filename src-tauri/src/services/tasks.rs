@@ -35,6 +35,7 @@ const START_GRACE_MS: i64 = 60_000;
 struct Definition {
     name: String,
     kind: TaskKind,
+    use_profile: bool,
     prompt: String,
     schedule: Schedule,
     timezone: String,
@@ -124,6 +125,8 @@ fn parse_input(conn: &rusqlite::Connection, input: &TaskInput) -> AppResult<Defi
     Ok(Definition {
         name,
         kind,
+        // Job tasks read email, not the profile.
+        use_profile: kind == TaskKind::Prompt && input.use_profile,
         prompt: prompt.to_string(),
         schedule: input.schedule.clone(),
         timezone: input.timezone.clone(),
@@ -176,6 +179,7 @@ pub async fn create(state: &AppState, input: TaskInput) -> AppResult<ScheduledTa
                 id: 0,
                 name: definition.name,
                 kind: definition.kind,
+                use_profile: definition.use_profile,
                 prompt: definition.prompt,
                 model: input.model.clone(),
                 schedule: definition.schedule,
@@ -219,6 +223,7 @@ pub async fn update(state: &AppState, id: i64, input: TaskInput) -> AppResult<Sc
         }
         task.name = definition.name;
         task.kind = definition.kind;
+        task.use_profile = definition.use_profile;
         task.prompt = definition.prompt;
         task.model = input.model.clone();
         task.schedule = definition.schedule;
@@ -322,6 +327,7 @@ fn to_view(state: &AppState, row: TaskRow) -> AppResult<ScheduledTask> {
         name: row.name,
         kind: row.kind,
         prompt: row.prompt,
+        use_profile: row.use_profile,
         model: row.model,
         schedule: row.schedule,
         timezone: row.timezone,
@@ -371,6 +377,7 @@ mod tests {
             name: String::new(),
             kind: TaskKind::Prompt,
             prompt: "Research new AI engineering jobs in Vienna".into(),
+            use_profile: false,
             model: ModelRef {
                 provider_id: "anthropic".into(),
                 model_id: "model-a".into(),

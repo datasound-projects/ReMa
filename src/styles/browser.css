@@ -1,0 +1,295 @@
+/* ── Browser workspace ─────────────────────────────────── */
+
+.browser {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  min-width: 340px;
+  /* Always leave room for ReMa's own content. */
+  max-width: calc(100% - 360px);
+  background: var(--color-surface);
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.browser--right {
+  border-left: 1px solid var(--color-border);
+}
+
+.browser--left {
+  border-right: 1px solid var(--color-border);
+}
+
+.browser--maximized {
+  flex: 1;
+  max-width: none;
+  border: none;
+}
+
+.browser--collapsed {
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-2) 0;
+  background: var(--color-surface-sunken);
+}
+
+.browser__collapsed-title {
+  writing-mode: vertical-rl;
+  max-height: 60%;
+  overflow: hidden;
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.browser__resize {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 2;
+  width: 8px;
+  cursor: col-resize;
+}
+
+.browser--right .browser__resize {
+  left: -4px;
+}
+
+.browser--left .browser__resize {
+  right: -4px;
+}
+
+.browser__resize:hover {
+  background: linear-gradient(90deg, transparent 3px, var(--color-brand-bright) 3px 5px, transparent 5px);
+}
+
+.browser__header,
+.browser__toolbar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 var(--space-2);
+}
+
+.browser__header {
+  height: 34px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface-sunken);
+}
+
+.browser__header-icon {
+  width: 15px;
+  height: 15px;
+  margin: 0 var(--space-1);
+  color: var(--color-text-tertiary);
+}
+
+.browser__title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.browser__toolbar {
+  height: 42px;
+  gap: 2px;
+  border-bottom: 1px solid var(--color-border);
+  container: browser-toolbar / inline-size;
+}
+
+.browser__address {
+  flex: 1;
+  min-width: 64px;
+  margin: 0 var(--space-1);
+}
+
+/* A narrow panel keeps every control inside it. */
+@container browser-toolbar (max-width: 460px) {
+  .autofill-button__brand {
+    display: none;
+  }
+}
+
+.browser__address-input {
+  width: 100%;
+  height: 28px;
+  padding: 0 var(--space-3);
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-sunken);
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--text-sm);
+  text-overflow: ellipsis;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.browser__address-input:focus {
+  border-color: var(--color-brand);
+  outline: none;
+  background: var(--color-surface);
+  box-shadow: var(--focus-ring);
+}
+
+.autofill-button {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  margin-left: var(--space-1);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--color-brand-subtle-border);
+  border-radius: var(--radius-pill);
+  background: var(--color-brand-subtle);
+  color: var(--color-brand-hover);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.autofill-button:hover:not(:disabled) {
+  border-color: var(--color-brand-bright);
+}
+
+.autofill-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.browser__progress {
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--color-brand-bright), transparent);
+  background-size: 200% 100%;
+  animation: browser-progress 1.1s linear infinite;
+}
+
+@keyframes browser-progress {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: -100% 0;
+  }
+}
+
+/* The native web page is placed exactly over this area. */
+.browser__viewport {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  background: var(--color-surface);
+}
+
+.browser__message {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  height: 100%;
+  padding: var(--space-6);
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  text-align: center;
+}
+
+.browser__message-icon {
+  width: 32px;
+  height: 32px;
+  color: var(--color-text-tertiary);
+}
+
+.browser__footnote {
+  padding: 4px var(--space-3);
+  border-top: 1px solid var(--color-border);
+  background: var(--color-surface-sunken);
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
+}
+
+.browser__footnote .link-button {
+  font-size: var(--text-xs);
+}
+
+/* ── ReMa Auto Fill report ─────────────────────────────── */
+
+.autofill {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 40%;
+  padding: var(--space-2) var(--space-3);
+  overflow-y: auto;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-brand-subtle);
+  font-size: var(--text-sm);
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.autofill__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.autofill__icon {
+  width: 16px;
+  height: 16px;
+  color: var(--color-brand);
+}
+
+.autofill__title {
+  flex: 1;
+  font-weight: 600;
+}
+
+.autofill__line {
+  color: var(--color-text);
+}
+
+.autofill__line--muted {
+  color: var(--color-text-secondary);
+}
+
+.autofill__line--error {
+  color: var(--color-danger);
+}
+
+.autofill__file {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.autofill__file-label {
+  font-weight: 600;
+}
+
+.autofill__select {
+  height: 28px;
+  font-size: var(--text-sm);
+}
+
+.autofill__attach {
+  height: 28px;
+}
+
+.autofill__attached {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--color-success);
+  font-weight: 600;
+}

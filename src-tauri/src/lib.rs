@@ -4,6 +4,7 @@
 //!
 //! ```text
 //! ipc       — the command list and generated TypeScript bindings
+//! browser   — the isolated built-in browser workspace and Auto Fill
 //! commands  — thin Tauri IPC adapters: extract state/args, call a service
 //! services  — deterministic business logic (chat, providers, tasks, scheduler)
 //! llm       — provider adapters behind one `LanguageModel` interface
@@ -16,12 +17,14 @@
 //! error     — the single error type returned across the IPC boundary
 //! ```
 
+pub mod browser;
 pub mod commands;
 pub mod db;
 pub mod error;
 pub mod events;
 pub mod integrations;
 pub mod ipc;
+pub mod ipc_commands;
 pub mod jobs;
 pub mod llm;
 pub mod models;
@@ -58,6 +61,8 @@ pub fn run() {
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        // Used from Rust only; no dialog permission is granted to any webview.
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(ipc.invoke_handler())
         .setup(move |app| {
             ipc.mount_events(app);
@@ -94,6 +99,7 @@ fn init_state(app: &App) -> Result<AppState, Box<dyn std::error::Error>> {
 
     Ok(AppState {
         info: Arc::new(AppInfo::from_package(app.package_info())),
+        data_dir: Arc::new(data_dir),
         db,
         vault: SecretVault::new(Arc::new(KeyringStore)),
         llm: Arc::new(HttpLanguageModel::new()),
@@ -101,5 +107,6 @@ fn init_state(app: &App) -> Result<AppState, Box<dyn std::error::Error>> {
         generations: Generations::default(),
         scheduler: SchedulerHandle::default(),
         google: GoogleContext::new(GoogleEndpoints::from_env()),
+        browser: Default::default(),
     })
 }

@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Permissions for the main ReMa window.",
-  "windows": ["main"],
-  "permissions": ["core:default", "core:window:allow-start-dragging"]
+  "description": "ReMa's own interface: the local frontend in the main webview. Web pages in the browser workspace (webview `browser`) get no capability, so they cannot call any command or plugin.",
+  "webviews": ["main"],
+  "permissions": ["core:default", "core:window:allow-start-dragging", "app-commands"]
 }

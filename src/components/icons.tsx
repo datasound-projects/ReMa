@@ -141,3 +141,121 @@ export function TrashIcon(props: IconProps) {
     </Icon>
   );
 }
+
+export function ChevronUpIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="m6 12 4-4 4 4" />
+    </Icon>
+  );
+}
+
+export function ProfileIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <circle cx="10" cy="7" r="3" />
+      <path d="M4.5 16.5c.8-2.8 3-4.3 5.5-4.3s4.7 1.5 5.5 4.3" />
+    </Icon>
+  );
+}
+
+export function GlobeIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <circle cx="10" cy="10" r="7" />
+      <path d="M3 10h14M10 3c2 2.2 2.8 4.5 2.8 7s-.8 4.8-2.8 7c-2-2.2-2.8-4.5-2.8-7S8 5.2 10 3Z" />
+    </Icon>
+  );
+}
+
+export function ArrowLeftIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M15.5 10h-11M9 5.5 4.5 10 9 14.5" />
+    </Icon>
+  );
+}
+
+export function ArrowRightIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M4.5 10h11M11 5.5l4.5 4.5-4.5 4.5" />
+    </Icon>
+  );
+}
+
+export function ReloadIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M15.5 10a5.5 5.5 0 1 1-1.6-3.9" />
+      <path d="M15.5 4v3h-3" />
+    </Icon>
+  );
+}
+
+export function CloseIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="m5.5 5.5 9 9M14.5 5.5l-9 9" />
+    </Icon>
+  );
+}
+
+export function ExternalIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M11 4.5h4.5V9M15.5 4.5 9 11M13.5 12v3a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1h3" />
+    </Icon>
+  );
+}
+
+export function MaximizeIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M11.5 4.5h4v4M8.5 15.5h-4v-4M15.5 4.5 11 9M4.5 15.5 9 11" />
+    </Icon>
+  );
+}
+
+export function RestoreIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M15.5 8.5h-4v-4M4.5 11.5h4v4M11.5 8.5 16 4M8.5 11.5 4 16" />
+    </Icon>
+  );
+}
+
+/** A panel with its edge on the given side (dock / collapse controls). */
+export function PanelIcon({ side = 'right', ...props }: IconProps & { side?: 'left' | 'right' }) {
+  return (
+    <Icon {...props}>
+      <rect x="3.5" y="4.5" width="13" height="11" rx="1.5" />
+      <path d={side === 'right' ? 'M12 4.5v11' : 'M8 4.5v11'} />
+    </Icon>
+  );
+}
+
+export function SparkleIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M10 3.5c.5 3 1.9 4.6 5 5-3.1.5-4.5 2-5 5-.5-3-1.9-4.5-5-5 3.1-.4 4.5-2 5-5ZM15 13.5c.2 1.2.8 1.8 2 2-1.2.2-1.8.8-2 2-.2-1.2-.8-1.8-2-2 1.2-.2 1.8-.8 2-2Z" />
+    </Icon>
+  );
+}
+
+export function FileIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M11.5 3.5H6a1 1 0 0 0-1 1v11a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V7l-3.5-3.5Z" />
+      <path d="M11.5 3.5V7H15" />
+    </Icon>
+  );
+}
+
+export function UploadIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M10 13V4.5M6.5 8 10 4.5 13.5 8M4.5 13.5v2h11v-2" />
+    </Icon>
+  );
+}

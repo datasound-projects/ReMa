@@ -300,3 +300,16 @@
   font-size: var(--text-sm);
   color: var(--color-text-secondary);
 }
+
+/* Narrow content: task, status and actions only. */
+@container (max-width: 720px) {
+  .task-table__head,
+  .task-table__row {
+    grid-template-columns: minmax(0, 1fr) 104px 40px;
+  }
+
+  .task-table__head > :nth-child(-n + 4):not(:first-child),
+  .task-table__row > :nth-child(-n + 4):not(:first-child) {
+    display: none;
+  }
+}

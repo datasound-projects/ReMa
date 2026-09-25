@@ -6,6 +6,7 @@
 
 pub mod conversations;
 pub mod jobs;
+pub mod profile;
 pub mod providers;
 pub mod tasks;
 
@@ -22,6 +23,7 @@ use crate::error::{AppError, AppResult};
 const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0001_initial.sql"),
     include_str!("migrations/0002_google_jobs.sql"),
+    include_str!("migrations/0003_profile.sql"),
 ];
 
 #[derive(Clone)]

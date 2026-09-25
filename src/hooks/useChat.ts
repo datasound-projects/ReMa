@@ -21,6 +21,8 @@ interface Pending {
 
 interface ChatState {
   conversationId: number | null;
+  /** The conversation shares the user's Profile with the model. */
+  profileContext: boolean;
   messages: Message[];
   loading: boolean;
   error: ApiError | null;
@@ -28,6 +30,7 @@ interface ChatState {
 
 const initial = (conversationId: number | null): ChatState => ({
   conversationId,
+  profileContext: false,
   messages: [],
   loading: conversationId !== null,
   error: null,
@@ -62,7 +65,13 @@ export function useChat(conversationId: number | null, onCreated: (id: number) =
         if (!active) return;
         loadedId.current = conversationId;
         pending.current.clear();
-        setChat({ conversationId, messages: detail.messages, loading: false, error: null });
+        setChat({
+          conversationId,
+          profileContext: detail.conversation.profileContext,
+          messages: detail.messages,
+          loading: false,
+          error: null,
+        });
       })
       .catch((error: unknown) => {
         if (active) {
@@ -105,20 +114,25 @@ export function useChat(conversationId: number | null, onCreated: (id: number) =
   });
 
   const send = useCallback(
-    async (content: string, model: ModelRef) => {
-      const result = await sendMessage({ conversationId, content, model });
+    async (content: string, model: ModelRef, useProfile: boolean) => {
+      const result = await sendMessage({ conversationId, content, model, useProfile });
       const added = [result.userMessage, applyPending(result.assistantMessage)];
       loadedId.current = result.conversation.id;
       if (conversationId === null) {
         setChat({
           conversationId: result.conversation.id,
+          profileContext: result.conversation.profileContext,
           messages: added,
           loading: false,
           error: null,
         });
         onCreated(result.conversation.id);
       } else {
-        setChat((c) => ({ ...c, messages: [...c.messages, ...added] }));
+        setChat((c) => ({
+          ...c,
+          profileContext: result.conversation.profileContext,
+          messages: [...c.messages, ...added],
+        }));
       }
     },
     [conversationId, onCreated, applyPending],
@@ -153,6 +167,7 @@ export function useChat(conversationId: number | null, onCreated: (id: number) =
     messages,
     loading: chat.loading,
     loadError: chat.error,
+    profileContext: chat.conversationId === conversationId && chat.profileContext,
     send,
     stop,
     retry,

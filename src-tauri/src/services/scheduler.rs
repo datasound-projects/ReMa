@@ -31,7 +31,7 @@ use crate::{
         task::{ExecutionStatus, ExecutionTrigger, TaskExecution, TaskKind},
     },
     services::{
-        chat::system_prompt,
+        chat::{system_prompt, with_profile},
         providers,
         schedule::{self, Limits},
     },
@@ -312,11 +312,15 @@ async fn run_task(
     match task.kind {
         TaskKind::Prompt => {
             let request = ChatRequest {
-                system: Some(format!(
-                    "{} This request is a scheduled task running automatically; \
-                     reply with the finished result.",
-                    system_prompt(started_at)
-                )),
+                system: Some(with_profile(
+                    state,
+                    format!(
+                        "{} This request is a scheduled task running automatically; \
+                         reply with the finished result.",
+                        system_prompt(started_at)
+                    ),
+                    task.use_profile,
+                )?),
                 turns: vec![Turn {
                     role: MessageRole::User,
                     content: task.prompt.clone(),
@@ -415,6 +419,7 @@ mod tests {
         TaskInput {
             name: "Market summary".into(),
             kind: crate::models::task::TaskKind::Prompt,
+            use_profile: false,
             prompt: "Summarize the market".into(),
             model: ModelRef {
                 provider_id: "anthropic".into(),

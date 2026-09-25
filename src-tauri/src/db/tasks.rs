@@ -18,6 +18,7 @@ pub struct TaskRow {
     pub name: String,
     pub kind: TaskKind,
     pub prompt: String,
+    pub use_profile: bool,
     pub model: ModelRef,
     pub schedule: Schedule,
     pub timezone: String,
@@ -36,7 +37,7 @@ pub struct TaskRow {
 
 const TASK_COLUMNS: &str = "id, name, prompt, provider_id, model_id, schedule, timezone, start_at,
     end_at, max_runs, run_count, enabled, status, last_run_at, next_run_at, created_at, updated_at,
-    kind";
+    kind, use_profile";
 
 const EXECUTION_COLUMNS: &str = "id, task_id, trigger, scheduled_for, started_at, finished_at,
     status, provider_id, model_id, result, error, report";
@@ -51,6 +52,7 @@ fn task_from_row(row: &Row) -> rusqlite::Result<TaskRow> {
         kind: serde_json::from_str(&kind).map_err(|e| {
             rusqlite::Error::FromSqlConversionFailure(17, rusqlite::types::Type::Text, Box::new(e))
         })?,
+        use_profile: row.get(18)?,
         prompt: row.get(2)?,
         model: ModelRef {
             provider_id: row.get(3)?,
@@ -106,8 +108,8 @@ pub fn insert(conn: &Connection, task: &TaskRow) -> AppResult<i64> {
     conn.execute(
         "INSERT INTO scheduled_tasks (name, prompt, provider_id, model_id, schedule, timezone,
              start_at, end_at, max_runs, run_count, enabled, status, last_run_at, next_run_at,
-             created_at, updated_at, kind)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+             created_at, updated_at, kind, use_profile)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         params![
             task.name,
             task.prompt,
@@ -130,6 +132,7 @@ pub fn insert(conn: &Connection, task: &TaskRow) -> AppResult<i64> {
             task.created_at,
             task.updated_at,
             to_json(&task.kind)?,
+            task.use_profile,
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -141,7 +144,7 @@ pub fn save(conn: &Connection, task: &TaskRow) -> AppResult<()> {
         "UPDATE scheduled_tasks SET name = ?2, prompt = ?3, provider_id = ?4, model_id = ?5,
              schedule = ?6, timezone = ?7, start_at = ?8, end_at = ?9, max_runs = ?10,
              run_count = ?11, enabled = ?12, status = ?13, last_run_at = ?14, next_run_at = ?15,
-             updated_at = ?16, kind = ?17
+             updated_at = ?16, kind = ?17, use_profile = ?18
          WHERE id = ?1",
         params![
             task.id,
@@ -165,6 +168,7 @@ pub fn save(conn: &Connection, task: &TaskRow) -> AppResult<()> {
             task.next_run_at,
             task.updated_at,
             to_json(&task.kind)?,
+            task.use_profile,
         ],
     )?;
     if updated == 0 {
@@ -365,6 +369,7 @@ mod tests {
             name: "Jobs".into(),
             kind: TaskKind::Prompt,
             prompt: "Find jobs".into(),
+            use_profile: true,
             model: ModelRef {
                 provider_id: "anthropic".into(),
                 model_id: "claude-test".into(),

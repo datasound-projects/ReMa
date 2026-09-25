@@ -29,6 +29,51 @@ export const commands = {
 	/**  Revokes ReMa's access at Google and removes the stored tokens. */
 	disconnectGoogle: () => __TAURI_INVOKE<GoogleStatus>("disconnect_google"),
 	setGoogleServiceEnabled: (service: GoogleService, enabled: boolean) => __TAURI_INVOKE<GoogleStatus>("set_google_service_enabled", { service, enabled }),
+	getProfile: () => __TAURI_INVOKE<ProfileView>("get_profile"),
+	saveProfile: (profile: Profile) => __TAURI_INVOKE<ProfileView>("save_profile", { profile }),
+	/**
+	 *  Lets the user pick a file with the system file dialog, then stores it.
+	 *  The dialog runs in Rust, so the frontend never handles file paths.
+	 *  Returns `None` if the user cancelled.
+	 */
+	addProfileDocument: (kind: "cv" | "certificate" | "portfolio" | "other" | null) => __TAURI_INVOKE<{
+	id: number,
+	name: string,
+	kind: DocumentKind,
+	format: DocumentFormat,
+	/**  File name as uploaded. */
+	originalName: string,
+	/**  Bytes. */
+	size: number,
+	/**  Readable text was extracted (it can be imported into the profile). */
+	hasText: boolean,
+	createdAt: number,
+	updatedAt: number,
+} | null>("add_profile_document", { kind }),
+	/**  Reads profile details from a stored document, for the user to review. */
+	importProfileDocument: (documentId: number) => __TAURI_INVOKE<ProfileImport>("import_profile_document", { documentId }),
+	updateProfileDocument: (id: number, name: string, kind: DocumentKind) => __TAURI_INVOKE<ProfileDocument>("update_profile_document", { id, name, kind }),
+	deleteProfileDocument: (id: number) => __TAURI_INVOKE<null>("delete_profile_document", { id }),
+	/**  Opens the stored file in the system's default app. */
+	openProfileDocument: (id: number) => __TAURI_INVOKE<null>("open_profile_document", { id }),
+	getBrowserStatus: () => __TAURI_INVOKE<BrowserStatus>("get_browser_status"),
+	/**  Opens a web page in the browser workspace at `bounds`. */
+	openInBrowser: (url: string, bounds: BrowserBounds) => __TAURI_INVOKE<BrowserStatus>("open_in_browser", { url, bounds }),
+	setBrowserBounds: (bounds: BrowserBounds) => __TAURI_INVOKE<null>("set_browser_bounds", { bounds }),
+	setBrowserVisible: (visible: boolean) => __TAURI_INVOKE<null>("set_browser_visible", { visible }),
+	browserBack: () => __TAURI_INVOKE<null>("browser_back"),
+	browserForward: () => __TAURI_INVOKE<null>("browser_forward"),
+	browserReload: () => __TAURI_INVOKE<null>("browser_reload"),
+	closeBrowser: () => __TAURI_INVOKE<null>("close_browser"),
+	/**  Fills the current page's form from the profile. Never submits. */
+	runAutofill: () => __TAURI_INVOKE<AutofillResult>("run_autofill"),
+	/**  Puts a profile document into an upload field found by Auto Fill. */
+	attachProfileDocument: (field: number, documentId: number) => __TAURI_INVOKE<null>("attach_profile_document", { field, documentId }),
+	/**
+	 *  Shows a profile document in the system file manager, so the user can
+	 *  choose it in a website's own upload dialog.
+	 */
+	revealProfileDocument: (id: number) => __TAURI_INVOKE<null>("reveal_profile_document", { id }),
 	listConversations: () => __TAURI_INVOKE<Conversation[]>("list_conversations"),
 	getConversation: (id: number) => __TAURI_INVOKE<ConversationDetail>("get_conversation", { id }),
 	sendMessage: (input: SendMessageInput) => __TAURI_INVOKE<SendMessageResult>("send_message", { input }),
@@ -46,9 +91,11 @@ export const commands = {
 
 /** Events */
 export const events = {
+	browserChanged: makeEvent<BrowserChanged>("browser-changed"),
 	chatEvent: makeEvent<ChatEvent>("chat-event"),
 	conversationsChanged: makeEvent<ConversationsChanged>("conversations-changed"),
 	googleChanged: makeEvent<GoogleChanged>("google-changed"),
+	profileChanged: makeEvent<ProfileChanged>("profile-changed"),
 	providersChanged: makeEvent<ProvidersChanged>("providers-changed"),
 	tasksChanged: makeEvent<TasksChanged>("tasks-changed"),
 };
@@ -92,8 +139,44 @@ export type ApplicationStatus =
 
 export type AuthMethod = "none" | "api_key" | "oauth";
 
+/**  What ReMa Auto Fill did. Nothing is ever submitted. */
+export type AutofillResult = {
+	filled: FilledField[],
+	/**  Recognized fields that already had a value (left unchanged). */
+	kept: number,
+	/**  Recognized fields the profile has no value for, e.g. "Phone". */
+	missing: string[],
+	files: FileField[],
+	/**  Other questions left for the user. */
+	questions: string[],
+	/**
+	 *  Forms embedded from another site, which Auto Fill cannot reach here.
+	 *  Opening one directly lets Auto Fill work on it.
+	 */
+	embeddedForms: string[],
+};
+
 /**  Health of the backend core. */
 export type BackendStatus = "ready";
+
+/**  Where the web page is drawn, in CSS pixels of ReMa's window. */
+export type BrowserBounds = {
+	x: number | null,
+	y: number | null,
+	width: number | null,
+	height: number | null,
+};
+
+/**  The browser's page or state changed. */
+export type BrowserChanged = BrowserStatus;
+
+/**  What the browser workspace shows. Contains no page content. */
+export type BrowserStatus = {
+	open: boolean,
+	url: string | null,
+	title: string | null,
+	loading: boolean,
+};
 
 export type CalendarItem = {
 	company: string,
@@ -144,6 +227,8 @@ export type Conversation = {
 	title: string,
 	/**  Model used for the most recent reply. */
 	model: ModelRef,
+	/**  The user shares their Profile with the model in this conversation. */
+	profileContext: boolean,
 	createdAt: number,
 	updatedAt: number,
 };
@@ -156,6 +241,20 @@ export type ConversationDetail = {
 /**  The conversation list changed (created, renamed, updated, deleted). */
 export type ConversationsChanged = null;
 
+/**  A field the user defines, e.g. "Research profile" → URL. */
+export type CustomField = {
+	label: string,
+	kind: CustomFieldKind,
+	/**  Text or URL (empty for files). */
+	value: string,
+	/**  For `File` fields. */
+	documentId: number | null,
+};
+
+export type CustomFieldKind = "text" | "url" | 
+/**  A Profile document (certificate, portfolio, …). */
+"file";
+
 /**  Create or update an OpenAI-compatible endpoint. */
 export type CustomProviderInput = {
 	/**  `None` creates a new endpoint. */
@@ -165,6 +264,20 @@ export type CustomProviderInput = {
 	model: string,
 	/**  `None` keeps the stored key; an empty string removes it. */
 	apiKey: string | null,
+};
+
+/**  File formats ReMa accepts. Text is extracted from all but images. */
+export type DocumentFormat = "pdf" | "docx" | "text" | "markdown" | "png" | "jpeg";
+
+export type DocumentKind = "cv" | "certificate" | "portfolio" | "other";
+
+export type Education = {
+	school: string,
+	degree: string,
+	field: string,
+	start: string,
+	end: string,
+	description: string,
 };
 
 /**  When a recurring task stops. */
@@ -188,6 +301,36 @@ export type ExecutionStatus = "running" | "succeeded" | "failed";
 export type ExecutionTrigger = "scheduled" | 
 /**  Started with "Run now". */
 "manual";
+
+export type Experience = {
+	title: string,
+	company: string,
+	location: string,
+	/**  Free text as written by the user or the CV, e.g. "2021-03" or "Mar 2021". */
+	start: string,
+	end: string,
+	/**  Still in this position (`end` is ignored). */
+	current: boolean,
+	description: string,
+};
+
+/**  A file upload field on the page. */
+export type FileField = {
+	/**  Identifies the field for `attach_profile_document`. */
+	field: number,
+	label: string,
+	kind: FileFieldKind,
+};
+
+export type FileFieldKind = "resume" | "cover_letter" | "other";
+
+/**  A form field ReMa filled from the profile. */
+export type FilledField = {
+	/**  The field's label on the page. */
+	label: string,
+	/**  Which profile value was used, e.g. "Email". */
+	source: string,
+};
 
 /**  The Google connection changed. */
 export type GoogleChanged = null;
@@ -249,6 +392,12 @@ export type JobRunReport = {
 	issues: string[],
 };
 
+export type Language = {
+	name: string,
+	/**  E.g. "Native", "C1", "Fluent". */
+	level: string,
+};
+
 export type Message = {
 	id: number,
 	conversationId: number,
@@ -287,6 +436,77 @@ export type ModelOption = {
 export type ModelRef = {
 	providerId: string,
 	modelId: string,
+};
+
+/**  The structured profile. Every field is optional (empty) and editable. */
+export type Profile = {
+	firstName: string,
+	lastName: string,
+	email: string,
+	phone: string,
+	location: string,
+	/**  Professional title, e.g. "Data Engineer". */
+	title: string,
+	summary: string,
+	skills: string[],
+	experience: Experience[],
+	education: Education[],
+	languages: Language[],
+	website: string,
+	/**  A resume or portfolio website, usable instead of a CV file. */
+	resumeWebsite: string,
+	github: string,
+	linkedin: string,
+	otherLinks: ProfileLink[],
+	customFields: CustomField[],
+};
+
+/**  The profile or its documents changed. */
+export type ProfileChanged = null;
+
+/**
+ *  A file stored in ReMa's application data folder. The file itself never
+ *  leaves Rust except when the user attaches it to an application form.
+ */
+export type ProfileDocument = {
+	id: number,
+	name: string,
+	kind: DocumentKind,
+	format: DocumentFormat,
+	/**  File name as uploaded. */
+	originalName: string,
+	/**  Bytes. */
+	size: number,
+	/**  Readable text was extracted (it can be imported into the profile). */
+	hasText: boolean,
+	createdAt: number,
+	updatedAt: number,
+};
+
+/**
+ *  Profile details read from a document, for the user to review. Nothing is
+ *  saved until the user accepts it.
+ */
+export type ProfileImport = {
+	document: ProfileDocument,
+	extracted: Profile,
+	/**  The model that read the document, if one was used. */
+	model: string | null,
+	/**  What could not be read, and why. */
+	notes: string[],
+};
+
+/**  A link beyond the standard ones (website, GitHub, LinkedIn). */
+export type ProfileLink = {
+	label: string,
+	url: string,
+};
+
+export type ProfileView = {
+	profile: Profile,
+	documents: ProfileDocument[],
+	/**  When the profile was last saved; `None` if never. */
+	updatedAt: number | null,
 };
 
 /**  The API family a provider speaks. Each kind has one adapter in `llm/`. */
@@ -343,6 +563,7 @@ export type ScheduledTask = {
 	name: string,
 	kind: TaskKind,
 	prompt: string,
+	useProfile: boolean,
 	model: ModelRef,
 	schedule: Schedule,
 	timezone: string,
@@ -370,6 +591,8 @@ export type SendMessageInput = {
 	conversationId: number | null,
 	content: string,
 	model: ModelRef,
+	/**  Include the user's Profile (the composer's "Profile" toggle). */
+	useProfile: boolean,
 };
 
 export type SendMessageResult = {
@@ -400,6 +623,8 @@ export type TaskInput = {
 	name: string,
 	kind: TaskKind,
 	prompt: string,
+	/**  Give the model the user's Profile (prompt tasks). */
+	useProfile: boolean,
 	model: ModelRef,
 	/**  IANA timezone, e.g. `Europe/Vienna`. */
 	timezone: string,

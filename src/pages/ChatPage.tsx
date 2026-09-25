@@ -43,6 +43,14 @@ export function ChatPage({ conversationId }: ChatPageProps) {
       catalog?.models[0]?.model,
     ].find(available) ?? null;
 
+  // Profile context: the user's choice for this chat, else what the
+  // conversation used last. New chats start with it off.
+  const [profileChoice, setProfileChoice] = useState<{ conversationId: number | null; on: boolean } | null>(
+    null,
+  );
+  const profileOn =
+    profileChoice?.conversationId === conversationId ? profileChoice.on : chat.profileContext;
+
   const [schedulePrompt, setSchedulePrompt] = useState<string | null>(null);
   const [scheduled, setScheduled] = useState<ScheduledTask | null>(null);
   const [clearSignal, setClearSignal] = useState(0);
@@ -71,8 +79,10 @@ export function ChatPage({ conversationId }: ChatPageProps) {
       catalog={catalog}
       model={model}
       onModelChange={(m) => setPicked({ conversationId, model: m })}
+      profileOn={profileOn}
+      onProfileChange={(on) => setProfileChoice({ conversationId, on })}
       streaming={!!chat.streamingMessage}
-      onSend={(text) => (model ? chat.send(text, model) : Promise.resolve())}
+      onSend={(text) => (model ? chat.send(text, model, profileOn) : Promise.resolve())}
       onStop={() => {
         if (chat.streamingMessage) void chat.stop(chat.streamingMessage.id);
       }}
@@ -136,6 +146,7 @@ export function ChatPage({ conversationId }: ChatPageProps) {
           timezone={timezone}
           initialPrompt={schedulePrompt}
           initialModel={model}
+          initialUseProfile={profileOn}
           onClose={() => setSchedulePrompt(null)}
           onSaved={(task) => {
             setSchedulePrompt(null);

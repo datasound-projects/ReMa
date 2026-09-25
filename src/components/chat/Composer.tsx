@@ -2,13 +2,16 @@ import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 
 import { toApiError } from '../../services/ipc';
 import type { ModelCatalog, ModelRef } from '../../services/providerService';
-import { ArrowUpIcon, ClockIcon, StopIcon } from '../icons';
+import { ArrowUpIcon, ClockIcon, ProfileIcon, StopIcon } from '../icons';
 import { ModelSelector } from './ModelSelector';
 
 interface ComposerProps {
   catalog: ModelCatalog | null;
   model: ModelRef | null;
   onModelChange: (model: ModelRef) => void;
+  /** Share the user's Profile with the model (explicit opt-in). */
+  profileOn: boolean;
+  onProfileChange: (on: boolean) => void;
   /** The message currently streaming, if any (shows Stop instead of Send). */
   streaming: boolean;
   onSend: (text: string) => Promise<void>;
@@ -27,6 +30,8 @@ export function Composer({
   catalog,
   model,
   onModelChange,
+  profileOn,
+  onProfileChange,
   streaming,
   onSend,
   onStop,
@@ -99,7 +104,24 @@ export function Composer({
           onKeyDown={onKeyDown}
         />
         <div className="composer__bar">
-          <ModelSelector catalog={catalog} value={model} onChange={onModelChange} />
+          <div className="composer__tools">
+            <ModelSelector catalog={catalog} value={model} onChange={onModelChange} />
+            <button
+              type="button"
+              className={profileOn ? 'tool-toggle tool-toggle--on' : 'tool-toggle'}
+              aria-pressed={profileOn}
+              title={
+                profileOn
+                  ? 'Profile ON: ReMa gives the model your Profile (no email or phone). Click to turn off.'
+                  : 'Profile OFF: the model gets no Profile details. Click to share your Profile in this chat.'
+              }
+              onClick={() => onProfileChange(!profileOn)}
+            >
+              <ProfileIcon className="button__icon" />
+              Profile
+              <span className="tool-toggle__state">{profileOn ? 'On' : 'Off'}</span>
+            </button>
+          </div>
           <div className="composer__actions">
             <button
               type="button"

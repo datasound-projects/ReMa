@@ -27,6 +27,8 @@ export interface TaskForm {
   syncCalendar: boolean;
   detectConflicts: boolean;
   prompt: string;
+  /** Prompt tasks: give the model the user's Profile. */
+  useProfile: boolean;
   model: ModelRef | null;
   startDate: string;
   startTime: string;
@@ -54,7 +56,7 @@ function weekdayOf(dateInput: string): Weekday {
 }
 
 /** A new task starting at the next quarter hour. */
-export function defaultForm(prompt: string, model: ModelRef | null): TaskForm {
+export function defaultForm(prompt: string, model: ModelRef | null, useProfile = false): TaskForm {
   const start = new Date();
   start.setSeconds(0, 0);
   start.setMinutes(Math.ceil((start.getMinutes() + 1) / 15) * 15);
@@ -69,6 +71,7 @@ export function defaultForm(prompt: string, model: ModelRef | null): TaskForm {
     syncCalendar: true,
     detectConflicts: true,
     prompt,
+    useProfile,
     model,
     startDate,
     startTime: `${pad(start.getHours())}:${pad(start.getMinutes())}`,
@@ -84,7 +87,7 @@ export function defaultForm(prompt: string, model: ModelRef | null): TaskForm {
 }
 
 export function formFromTask(task: ScheduledTask): TaskForm {
-  const form = defaultForm(task.prompt, task.model);
+  const form = defaultForm(task.prompt, task.model, task.useProfile);
   form.name = task.name;
   if (task.kind.type === 'job_applications') {
     const days = task.kind.lookbackDays;
@@ -180,6 +183,7 @@ export function formToInput(form: TaskForm, timezone: string): TaskInput | strin
     name: form.name.trim(),
     kind,
     prompt: form.prompt.trim(),
+    useProfile: form.type === 'prompt' && form.useProfile,
     model: form.model,
     timezone,
     startDate: form.startDate,

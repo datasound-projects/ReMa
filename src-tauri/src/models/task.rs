@@ -114,6 +114,8 @@ pub struct TaskInput {
     pub name: String,
     pub kind: TaskKind,
     pub prompt: String,
+    /// Give the model the user's Profile (prompt tasks).
+    pub use_profile: bool,
     pub model: ModelRef,
     /// IANA timezone, e.g. `Europe/Vienna`.
     pub timezone: String,
@@ -132,6 +134,7 @@ pub struct ScheduledTask {
     pub name: String,
     pub kind: TaskKind,
     pub prompt: String,
+    pub use_profile: bool,
     pub model: ModelRef,
     pub schedule: Schedule,
     pub timezone: String,

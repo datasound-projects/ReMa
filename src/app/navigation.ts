@@ -4,6 +4,7 @@ import { createContext, useContext } from 'react';
 export type View =
   | { page: 'chat'; conversationId: number | null }
   | { page: 'tasks' }
+  | { page: 'profile' }
   | { page: 'settings' };
 
 export type PageId = View['page'];

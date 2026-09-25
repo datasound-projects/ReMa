@@ -9,8 +9,10 @@ use tauri::AppHandle;
 use tauri_specta::Event;
 
 use crate::models::{
+    browser::{BrowserChanged, BrowserStatus},
     chat::{ChatEvent, ConversationsChanged},
     google::GoogleChanged,
+    profile::ProfileChanged,
     provider::ProvidersChanged,
     task::TasksChanged,
 };
@@ -21,6 +23,8 @@ pub trait EventSink: Send + Sync {
     fn providers_changed(&self);
     fn tasks_changed(&self);
     fn google_changed(&self);
+    fn profile_changed(&self);
+    fn browser_changed(&self, status: BrowserStatus);
 }
 
 pub struct TauriEvents(pub AppHandle);
@@ -46,6 +50,14 @@ impl EventSink for TauriEvents {
     fn google_changed(&self) {
         let _ = GoogleChanged.emit(&self.0);
     }
+
+    fn profile_changed(&self) {
+        let _ = ProfileChanged.emit(&self.0);
+    }
+
+    fn browser_changed(&self, status: BrowserStatus) {
+        let _ = BrowserChanged(status).emit(&self.0);
+    }
 }
 
 /// Collects events for assertions in tests.
@@ -56,6 +68,8 @@ pub struct RecordingEvents {
     pub providers: Mutex<usize>,
     pub tasks: Mutex<usize>,
     pub google: Mutex<usize>,
+    pub profile: Mutex<usize>,
+    pub browser: Mutex<Vec<BrowserStatus>>,
 }
 
 impl EventSink for RecordingEvents {
@@ -77,5 +91,13 @@ impl EventSink for RecordingEvents {
 
     fn google_changed(&self) {
         *self.google.lock().unwrap() += 1;
+    }
+
+    fn profile_changed(&self) {
+        *self.profile.lock().unwrap() += 1;
+    }
+
+    fn browser_changed(&self, status: BrowserStatus) {
+        self.browser.lock().unwrap().push(status);
     }
 }

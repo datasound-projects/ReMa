@@ -1,5 +1,7 @@
 import { useEffect, useRef, type ReactNode } from 'react';
 
+import { useCoverBrowser } from '../../app/browser';
+
 interface DialogProps {
   title: string;
   onClose: () => void;
@@ -11,6 +13,8 @@ interface DialogProps {
 /** A small modal dialog built on the native `<dialog>` element. */
 export function Dialog({ title, onClose, children, actions }: DialogProps) {
   const ref = useRef<HTMLDialogElement>(null);
+  // Web pages are drawn natively above ReMa; hide the page meanwhile.
+  useCoverBrowser();
 
   useEffect(() => {
     const dialog = ref.current;

@@ -1,0 +1,66 @@
+// Every IPC command ReMa exposes, by name.
+//
+// `build.rs` includes this file to generate the permission set
+// `app-commands`, which `capabilities/default.json` grants to the `main`
+// webview only. Because the app declares these commands in its ACL
+// manifest, Tauri checks every call against that capability: content in any
+// other webview (the browser workspace) cannot call a single command.
+// `ipc::tests::every_command_is_permissioned` keeps this list in sync.
+
+pub const APP_COMMANDS: &[&str] = &[
+    // System
+    "get_app_status",
+    "get_system_timezone",
+    "open_external_url",
+    // Providers & models
+    "get_provider_settings",
+    "get_model_catalog",
+    "connect_provider",
+    "disconnect_provider",
+    "save_custom_provider",
+    "refresh_provider_models",
+    "set_model_enabled",
+    "set_default_model",
+    // Google Workspace
+    "get_google_status",
+    "save_google_client",
+    "connect_google",
+    "cancel_google_connect",
+    "disconnect_google",
+    "set_google_service_enabled",
+    // Profile
+    "get_profile",
+    "save_profile",
+    "add_profile_document",
+    "import_profile_document",
+    "update_profile_document",
+    "delete_profile_document",
+    "open_profile_document",
+    // Browser workspace & Auto Fill
+    "get_browser_status",
+    "open_in_browser",
+    "set_browser_bounds",
+    "set_browser_visible",
+    "browser_back",
+    "browser_forward",
+    "browser_reload",
+    "close_browser",
+    "run_autofill",
+    "attach_profile_document",
+    "reveal_profile_document",
+    // Chat
+    "list_conversations",
+    "get_conversation",
+    "send_message",
+    "retry_message",
+    "stop_generation",
+    "delete_conversation",
+    // Scheduled tasks
+    "list_tasks",
+    "create_task",
+    "update_task",
+    "set_task_enabled",
+    "delete_task",
+    "run_task_now",
+    "list_task_executions",
+];

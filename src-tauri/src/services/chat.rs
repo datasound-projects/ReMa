@@ -23,7 +23,7 @@ use crate::{
         },
         provider::ModelRef,
     },
-    services::providers,
+    services::{profile_context, providers},
     state::AppState,
     time::now_ms,
 };
@@ -164,6 +164,8 @@ pub async fn send_message(
             }
             None => repo::create(&tx, &make_title(content), &model, now)?,
         };
+        repo::set_profile_context(&tx, conversation.id, input.use_profile)?;
+        let conversation = repo::get(&tx, conversation.id)?;
         let user_message = repo::insert_message(
             &tx,
             NewMessage {
@@ -268,6 +270,24 @@ pub fn make_title(content: &str) -> String {
     title
 }
 
+/// Appends the Profile Context to a system prompt when the user turned it
+/// on. Every provider receives the same text.
+pub fn with_profile(state: &AppState, mut system: String, use_profile: bool) -> AppResult<String> {
+    if use_profile {
+        match profile_context::load(state)? {
+            Some(context) => {
+                system.push_str("\n\n");
+                system.push_str(&context);
+            }
+            None => system.push_str(
+                "\n\nThe user turned on their ReMa Profile, but it is empty. If personal \
+                 details matter, suggest filling in the Profile page.",
+            ),
+        }
+    }
+    Ok(system)
+}
+
 /// The system prompt: identity plus the current local date and time.
 pub fn system_prompt(now: i64) -> String {
     let zoned = jiff::Timestamp::from_millisecond(now)
@@ -300,9 +320,18 @@ async fn generate(
     cancel: CancellationToken,
 ) {
     let outcome = async {
-        let history = state.db.call(|c| repo::list_messages(c, conversation_id))?;
+        let (conversation, history) = state.db.call(|c| {
+            Ok((
+                repo::get(c, conversation_id)?,
+                repo::list_messages(c, conversation_id)?,
+            ))
+        })?;
         let request = ChatRequest {
-            system: Some(system_prompt(now_ms())),
+            system: Some(with_profile(
+                state,
+                system_prompt(now_ms()),
+                conversation.profile_context,
+            )?),
             turns: history
                 .into_iter()
                 .filter(|m| m.id < message_id)
@@ -397,6 +426,7 @@ mod tests {
             conversation_id,
             content: content.into(),
             model: model(),
+            use_profile: false,
         }
     }
 
@@ -409,6 +439,61 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("generation did not finish");
+    }
+
+    #[tokio::test]
+    async fn profile_context_is_sent_only_when_turned_on() {
+        let (state, _, llm) = setup(FakeLanguageModel::replying(&["ok"])).await;
+        crate::services::profile::save(
+            &state,
+            crate::models::profile::Profile {
+                first_name: "Ana".into(),
+                title: "Data Engineer".into(),
+                email: "ana@example.com".into(),
+                skills: vec!["Kubernetes".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let system_of = |i: usize| {
+            llm.requests.lock().unwrap()[i]
+                .1
+                .system
+                .clone()
+                .unwrap_or_default()
+        };
+
+        // OFF (default): nothing about the profile reaches the model.
+        let off = send_message(&state, send(None, "Find AI jobs"))
+            .await
+            .unwrap();
+        wait_until_done(&state, off.assistant_message.id).await;
+        assert!(!off.conversation.profile_context);
+        assert!(!system_of(0).contains("user_profile"));
+        assert!(!system_of(0).contains("Kubernetes"));
+
+        // ON: the structured profile is included, without contact details.
+        let mut input = send(Some(off.conversation.id), "Use my profile");
+        input.use_profile = true;
+        let on = send_message(&state, input).await.unwrap();
+        wait_until_done(&state, on.assistant_message.id).await;
+        assert!(on.conversation.profile_context);
+        let system = system_of(1);
+        assert!(system.contains("<user_profile>"), "{system}");
+        assert!(system.contains("Skills: Kubernetes"));
+        assert!(!system.contains("ana@example.com"));
+
+        // Retrying keeps the conversation's choice; turning it off stops it.
+        retry(&state, on.assistant_message.id, model())
+            .await
+            .unwrap();
+        wait_until_done(&state, on.assistant_message.id).await;
+        assert!(system_of(2).contains("<user_profile>"));
+        let again = send_message(&state, send(Some(off.conversation.id), "Thanks"))
+            .await
+            .unwrap();
+        wait_until_done(&state, again.assistant_message.id).await;
+        assert!(!system_of(3).contains("user_profile"));
     }
 
     #[tokio::test]
@@ -518,6 +603,7 @@ mod tests {
                 provider_id: "gemini".into(),
                 model_id: "x".into(),
             },
+            use_profile: false,
         };
         assert!(matches!(
             send_message(&state, unknown).await,
