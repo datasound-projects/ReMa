@@ -258,6 +258,7 @@ The look is defined once, in `src/styles/tokens.css`, and every stylesheet uses 
 - **Space and shape**: a 4px grid; 28, 32 and 36px controls; 8px radius for inputs, 12px for cards, 16px for dialogs; pill buttons.
 - **Depth**: hairline borders carry separation; shadows stay light and are stronger only for popovers and dialogs.
 - **Motion**: 110–220ms with ease-out curves, used for hover and press states, popovers, dialogs, panels and page changes. Everything is off with "Reduce motion".
+- **Launch intro**: each start of ReMa opens with "ReMa — Your Career Agent" on warm white (about 3 seconds, `src/components/layout/LaunchIntro.tsx`) while the app loads underneath. It plays once per launch (in-memory, nothing is stored); any key or click skips it.
 - **Desktop conventions**: buttons keep the arrow cursor (only text links show the hand), and there is one focus ring for keyboard users everywhere. Thin scrollbars appear outside macOS, which keeps its native overlay scrollbars.
 
 Shared building blocks live in `src/styles/components.css` (buttons, inputs and styled native selects, switches, badges, menus, dialogs, data tables, empty and loading states) and `src/components/ui/` (`Dialog`, `Menu`, `Switch`, `EmptyState`, `StatusIndicator`, `IconButton`).

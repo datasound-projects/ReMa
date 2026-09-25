@@ -1,0 +1,152 @@
+/* ── Launch intro ──────────────────────────────────────── */
+
+/*
+ * Timeline (≈ 3 s):
+ *   0 ms      warm-white canvas (opaque from the first frame; the app loads underneath)
+ *   0–1200    a soft white glow fades in, then settles ("flash in")
+ *   200       ReMa (mark + wordmark) rises in
+ *   650       "Your Career" rises in
+ *   1050      "Agent" rises in, in ReMa blue
+ *   ~1800     everything is in place: a brief hold
+ *   2350      the words fade first, then the canvas (600 ms in all; faster if
+ *             skipped), so text never lies over the app; then it is removed
+ */
+
+.launch-intro {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-intro);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background: var(--color-warm-white);
+  opacity: 1;
+  /* --intro-fade (set by the component) is the whole exit: words, then canvas. */
+  transition: opacity calc(var(--intro-fade, 600ms) * 0.7) var(--ease-standard)
+    calc(var(--intro-fade, 600ms) * 0.3);
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.launch-intro--leaving {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* The soft flash: a white glow that brightens, then settles. */
+.launch-intro__glow {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse 58% 52% at 50% 46%, #ffffff 0%, rgba(255, 255, 255, 0) 72%);
+  opacity: 0;
+  animation: intro-glow 1200ms var(--ease-out) forwards;
+}
+
+@keyframes intro-glow {
+  35% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0.7;
+  }
+}
+
+.launch-intro__content {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: clamp(28px, 5vh, 44px);
+  margin-bottom: 4vh;
+  text-align: center;
+  transition:
+    opacity calc(var(--intro-fade, 600ms) * 0.45) var(--ease-standard),
+    transform var(--intro-fade, 600ms) var(--ease-standard);
+}
+
+.launch-intro--leaving .launch-intro__content {
+  opacity: 0;
+  transform: translateY(-6px);
+}
+
+.launch-intro__brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  animation: intro-rise 700ms var(--ease-out) 200ms both;
+}
+
+.launch-intro__wordmark {
+  font-size: 30px;
+  font-weight: var(--weight-bold);
+  line-height: 1;
+  letter-spacing: -0.035em;
+  color: var(--color-text);
+}
+
+.launch-intro__headline {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  font-size: clamp(52px, 9vw, 104px);
+  font-weight: 800;
+  line-height: 1.02;
+  letter-spacing: -0.05em;
+  color: var(--color-text);
+}
+
+.launch-intro__line {
+  display: block;
+  animation: intro-rise 750ms var(--ease-out) 650ms both;
+}
+
+.launch-intro__line--accent {
+  /* Room for the descender of the "g". */
+  padding-bottom: 0.06em;
+  color: var(--color-brand);
+  animation-delay: 1050ms;
+}
+
+/* Rise into place and come into focus: no bounce, no zoom. */
+@keyframes intro-rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+    filter: blur(8px);
+  }
+}
+
+/* Reduced motion: the whole picture simply appears, holds and fades out. */
+.launch-intro--reduced .launch-intro__glow,
+.launch-intro--reduced .launch-intro__brand,
+.launch-intro--reduced .launch-intro__line {
+  animation: none;
+}
+
+.launch-intro--reduced .launch-intro__glow {
+  opacity: 0.7;
+}
+
+.launch-intro--reduced .launch-intro__content {
+  animation: intro-appear 250ms linear both !important;
+  animation-duration: 250ms !important;
+}
+
+/* One plain fade of the whole picture. */
+.launch-intro--reduced.launch-intro--leaving .launch-intro__content {
+  opacity: 1;
+  transform: none;
+}
+
+/* Opacity fades stay, even with the system's "reduce motion" on. */
+.launch-intro.launch-intro--reduced {
+  transition-duration: 300ms !important;
+  transition-delay: 0ms !important;
+}
+
+@keyframes intro-appear {
+  from {
+    opacity: 0;
+  }
+}

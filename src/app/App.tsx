@@ -4,6 +4,7 @@ import { AnalyticsProvider } from '../components/analytics/AnalyticsProvider';
 import { BrowserProvider } from '../components/browser/BrowserProvider';
 import { ConversationList } from '../components/chat/ConversationList';
 import { AppShell } from '../components/layout/AppShell';
+import { LaunchIntro } from '../components/layout/LaunchIntro';
 import { Sidebar } from '../components/layout/Sidebar';
 import { dataOr } from '../hooks/useAsyncData';
 import { useConversations } from '../hooks/useConversations';
@@ -63,6 +64,8 @@ export function App() {
         {view.page === 'profile' && <ProfilePage />}
         {view.page === 'settings' && <SettingsPage />}
       </AppShell>
+      {/* Above the app, which loads underneath; plays once per launch. */}
+      <LaunchIntro />
       </AnalyticsProvider>
       </BrowserProvider>
     </NavigationContext>

@@ -19,6 +19,8 @@
   --color-brand-ring: rgba(10, 102, 194, 0.3);
 
   /* Neutrals */
+  /* The launch intro's canvas (also the window's first frame). */
+  --color-warm-white: #f8f7f4;
   --color-bg: #f4f4f2;
   --color-surface: #ffffff;
   --color-surface-sunken: #f8f8f7;
@@ -138,4 +140,5 @@
   --z-sticky: 5;
   --z-toast: 30;
   --z-popover: 50;
+  --z-intro: 1000;
 }
