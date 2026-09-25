@@ -2,12 +2,19 @@ import { useState } from 'react';
 
 import { dataOr } from '../../hooks/useAsyncData';
 import { useTaskExecutions } from '../../hooks/useTasks';
-import { describeSchedule, formatDateTime, formatDuration, modelName } from '../../lib/format';
+import {
+  describeSchedule,
+  describeTaskKind,
+  formatDateTime,
+  formatDuration,
+  modelName,
+} from '../../lib/format';
 import { toApiError } from '../../services/ipc';
 import type { ModelCatalog } from '../../services/providerService';
 import { runTaskNow, type ScheduledTask, type TaskExecution } from '../../services/taskService';
 import { Markdown } from '../chat/Markdown';
 import { ChevronLeftIcon, ChevronRightIcon } from '../icons';
+import { JobReport } from './JobReport';
 import { StatusIndicator } from '../ui/StatusIndicator';
 import { TaskActions } from './TaskActions';
 import { TaskStatusLabel } from './TaskStatus';
@@ -65,10 +72,26 @@ export function TaskDetail({ task, catalog, onBack, onEdit }: TaskDetailProps) {
           </p>
         )}
 
-        <section>
-          <h2 className="section-title">Prompt</h2>
-          <p className="prompt-box">{task.prompt}</p>
-        </section>
+        {task.kind.type === 'job_applications' ? (
+          <section>
+            <h2 className="section-title">Job applications</h2>
+            <p className="prompt-box">
+              {describeTaskKind(task.kind)}
+              {task.kind.detectConflicts && ' · Conflicts reported'}
+              {task.prompt && (
+                <>
+                  <br />
+                  {task.prompt}
+                </>
+              )}
+            </p>
+          </section>
+        ) : (
+          <section>
+            <h2 className="section-title">Prompt</h2>
+            <p className="prompt-box">{task.prompt}</p>
+          </section>
+        )}
 
         <section>
           <h2 className="section-title">History</h2>
@@ -131,6 +154,8 @@ function HistoryRow({
         <div className="history__result">
           {execution.error ? (
             <p className="message__error">{execution.error}</p>
+          ) : execution.report ? (
+            <JobReport report={execution.report} />
           ) : (
             <Markdown source={execution.result ?? ''} />
           )}

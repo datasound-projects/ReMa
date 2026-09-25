@@ -10,6 +10,7 @@ use tauri_specta::Event;
 
 use crate::models::{
     chat::{ChatEvent, ConversationsChanged},
+    google::GoogleChanged,
     provider::ProvidersChanged,
     task::TasksChanged,
 };
@@ -19,6 +20,7 @@ pub trait EventSink: Send + Sync {
     fn conversations_changed(&self);
     fn providers_changed(&self);
     fn tasks_changed(&self);
+    fn google_changed(&self);
 }
 
 pub struct TauriEvents(pub AppHandle);
@@ -40,6 +42,10 @@ impl EventSink for TauriEvents {
     fn tasks_changed(&self) {
         let _ = TasksChanged.emit(&self.0);
     }
+
+    fn google_changed(&self) {
+        let _ = GoogleChanged.emit(&self.0);
+    }
 }
 
 /// Collects events for assertions in tests.
@@ -49,6 +55,7 @@ pub struct RecordingEvents {
     pub conversations: Mutex<usize>,
     pub providers: Mutex<usize>,
     pub tasks: Mutex<usize>,
+    pub google: Mutex<usize>,
 }
 
 impl EventSink for RecordingEvents {
@@ -66,5 +73,9 @@ impl EventSink for RecordingEvents {
 
     fn tasks_changed(&self) {
         *self.tasks.lock().unwrap() += 1;
+    }
+
+    fn google_changed(&self) {
+        *self.google.lock().unwrap() += 1;
     }
 }

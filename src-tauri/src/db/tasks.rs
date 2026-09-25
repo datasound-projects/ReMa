@@ -5,8 +5,9 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 use crate::{
     error::{AppError, AppResult},
     models::{
+        jobs::JobRunReport,
         provider::ModelRef,
-        task::{ExecutionStatus, ExecutionTrigger, Schedule, TaskExecution},
+        task::{ExecutionStatus, ExecutionTrigger, Schedule, TaskExecution, TaskKind},
     },
 };
 
@@ -15,6 +16,7 @@ use crate::{
 pub struct TaskRow {
     pub id: i64,
     pub name: String,
+    pub kind: TaskKind,
     pub prompt: String,
     pub model: ModelRef,
     pub schedule: Schedule,
@@ -33,17 +35,22 @@ pub struct TaskRow {
 }
 
 const TASK_COLUMNS: &str = "id, name, prompt, provider_id, model_id, schedule, timezone, start_at,
-    end_at, max_runs, run_count, enabled, status, last_run_at, next_run_at, created_at, updated_at";
+    end_at, max_runs, run_count, enabled, status, last_run_at, next_run_at, created_at, updated_at,
+    kind";
 
 const EXECUTION_COLUMNS: &str = "id, task_id, trigger, scheduled_for, started_at, finished_at,
-    status, provider_id, model_id, result, error";
+    status, provider_id, model_id, result, error, report";
 
 fn task_from_row(row: &Row) -> rusqlite::Result<TaskRow> {
     let schedule: String = row.get(5)?;
     let status: String = row.get(12)?;
+    let kind: String = row.get(17)?;
     Ok(TaskRow {
         id: row.get(0)?,
         name: row.get(1)?,
+        kind: serde_json::from_str(&kind).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(17, rusqlite::types::Type::Text, Box::new(e))
+        })?,
         prompt: row.get(2)?,
         model: ModelRef {
             provider_id: row.get(3)?,
@@ -83,11 +90,15 @@ fn execution_from_row(row: &Row) -> rusqlite::Result<TaskExecution> {
         },
         result: row.get(9)?,
         error: row.get(10)?,
+        // An unreadable report (older format) is shown as text only.
+        report: row
+            .get::<_, Option<String>>(11)?
+            .and_then(|r| serde_json::from_str(&r).ok()),
     })
 }
 
-fn schedule_json(schedule: &Schedule) -> AppResult<String> {
-    serde_json::to_string(schedule).map_err(|e| AppError::internal(e.to_string()))
+fn to_json(value: &impl serde::Serialize) -> AppResult<String> {
+    serde_json::to_string(value).map_err(|e| AppError::internal(e.to_string()))
 }
 
 /// Inserts a task (its `id` is ignored) and returns the new id.
@@ -95,14 +106,14 @@ pub fn insert(conn: &Connection, task: &TaskRow) -> AppResult<i64> {
     conn.execute(
         "INSERT INTO scheduled_tasks (name, prompt, provider_id, model_id, schedule, timezone,
              start_at, end_at, max_runs, run_count, enabled, status, last_run_at, next_run_at,
-             created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+             created_at, updated_at, kind)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![
             task.name,
             task.prompt,
             task.model.provider_id,
             task.model.model_id,
-            schedule_json(&task.schedule)?,
+            to_json(&task.schedule)?,
             task.timezone,
             task.start_at,
             task.end_at,
@@ -118,6 +129,7 @@ pub fn insert(conn: &Connection, task: &TaskRow) -> AppResult<i64> {
             task.next_run_at,
             task.created_at,
             task.updated_at,
+            to_json(&task.kind)?,
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -129,7 +141,7 @@ pub fn save(conn: &Connection, task: &TaskRow) -> AppResult<()> {
         "UPDATE scheduled_tasks SET name = ?2, prompt = ?3, provider_id = ?4, model_id = ?5,
              schedule = ?6, timezone = ?7, start_at = ?8, end_at = ?9, max_runs = ?10,
              run_count = ?11, enabled = ?12, status = ?13, last_run_at = ?14, next_run_at = ?15,
-             updated_at = ?16
+             updated_at = ?16, kind = ?17
          WHERE id = ?1",
         params![
             task.id,
@@ -137,7 +149,7 @@ pub fn save(conn: &Connection, task: &TaskRow) -> AppResult<()> {
             task.prompt,
             task.model.provider_id,
             task.model.model_id,
-            schedule_json(&task.schedule)?,
+            to_json(&task.schedule)?,
             task.timezone,
             task.start_at,
             task.end_at,
@@ -152,6 +164,7 @@ pub fn save(conn: &Connection, task: &TaskRow) -> AppResult<()> {
             task.last_run_at,
             task.next_run_at,
             task.updated_at,
+            to_json(&task.kind)?,
         ],
     )?;
     if updated == 0 {
@@ -275,18 +288,28 @@ pub fn get_execution(conn: &Connection, id: i64) -> AppResult<TaskExecution> {
     .ok_or_else(|| AppError::not_found("Execution not found"))
 }
 
-pub fn finish_execution(
-    conn: &Connection,
-    id: i64,
-    status: ExecutionStatus,
-    result: Option<&str>,
-    error: Option<&str>,
-    finished_at: i64,
-) -> AppResult<()> {
+/// How a run ended.
+pub struct Finished<'a> {
+    pub status: ExecutionStatus,
+    pub result: Option<&'a str>,
+    pub error: Option<&'a str>,
+    pub report: Option<&'a JobRunReport>,
+    pub finished_at: i64,
+}
+
+pub fn finish_execution(conn: &Connection, id: i64, finished: Finished) -> AppResult<()> {
+    let report = finished.report.map(to_json).transpose()?;
     conn.execute(
-        "UPDATE task_executions SET status = ?2, result = ?3, error = ?4, finished_at = ?5
+        "UPDATE task_executions SET status = ?2, result = ?3, error = ?4, report = ?5, finished_at = ?6
          WHERE id = ?1",
-        params![id, status.as_str(), result, error, finished_at],
+        params![
+            id,
+            finished.status.as_str(),
+            finished.result,
+            finished.error,
+            report,
+            finished.finished_at
+        ],
     )?;
     Ok(())
 }
@@ -340,6 +363,7 @@ mod tests {
         TaskRow {
             id: 0,
             name: "Jobs".into(),
+            kind: TaskKind::Prompt,
             prompt: "Find jobs".into(),
             model: ModelRef {
                 provider_id: "anthropic".into(),
@@ -380,6 +404,11 @@ mod tests {
             task.enabled = false;
             task.completed = true;
             task.schedule = Schedule::Once;
+            task.kind = TaskKind::JobApplications {
+                lookback_days: 7,
+                sync_calendar: true,
+                detect_conflicts: false,
+            };
             save(c, &task)?;
             assert_eq!(get(c, id)?, task);
             assert_eq!(list(c)?.len(), 1);
@@ -448,10 +477,16 @@ mod tests {
             finish_execution(
                 c,
                 first.id,
-                ExecutionStatus::Succeeded,
-                Some("done"),
-                None,
-                1_500,
+                Finished {
+                    status: ExecutionStatus::Succeeded,
+                    result: Some("done"),
+                    error: None,
+                    report: Some(&JobRunReport {
+                        emails_checked: 3,
+                        ..JobRunReport::default()
+                    }),
+                    finished_at: 1_500,
+                },
             )?;
 
             let second = insert_execution(
@@ -472,6 +507,11 @@ mod tests {
             assert_eq!(history[0].id, second.id);
             assert_eq!(history[0].status, ExecutionStatus::Failed);
             assert_eq!(history[1].result.as_deref(), Some("done"));
+            assert_eq!(
+                history[1].report.as_ref().map(|r| r.emails_checked),
+                Some(3)
+            );
+            assert_eq!(history[0].report, None);
             assert_eq!(last_execution_status(c, id)?, Some(ExecutionStatus::Failed));
             Ok(())
         })

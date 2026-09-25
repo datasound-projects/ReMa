@@ -20,6 +20,15 @@ export const commands = {
 	refreshProviderModels: (providerId: string) => __TAURI_INVOKE<ProviderView>("refresh_provider_models", { providerId }),
 	setModelEnabled: (model: ModelRef, enabled: boolean) => __TAURI_INVOKE<null>("set_model_enabled", { model, enabled }),
 	setDefaultModel: (model: ModelRef) => __TAURI_INVOKE<null>("set_default_model", { model }),
+	getGoogleStatus: () => __TAURI_INVOKE<GoogleStatus>("get_google_status"),
+	/**  Stores the user's own Google Cloud "Desktop app" OAuth client. */
+	saveGoogleClient: (clientId: string, clientSecret: string) => __TAURI_INVOKE<GoogleStatus>("save_google_client", { clientId, clientSecret }),
+	/**  Opens Google's consent page in the browser and waits for the redirect. */
+	connectGoogle: () => __TAURI_INVOKE<GoogleStatus>("connect_google"),
+	cancelGoogleConnect: () => __TAURI_INVOKE<null>("cancel_google_connect"),
+	/**  Revokes ReMa's access at Google and removes the stored tokens. */
+	disconnectGoogle: () => __TAURI_INVOKE<GoogleStatus>("disconnect_google"),
+	setGoogleServiceEnabled: (service: GoogleService, enabled: boolean) => __TAURI_INVOKE<GoogleStatus>("set_google_service_enabled", { service, enabled }),
 	listConversations: () => __TAURI_INVOKE<Conversation[]>("list_conversations"),
 	getConversation: (id: number) => __TAURI_INVOKE<ConversationDetail>("get_conversation", { id }),
 	sendMessage: (input: SendMessageInput) => __TAURI_INVOKE<SendMessageResult>("send_message", { input }),
@@ -39,6 +48,7 @@ export const commands = {
 export const events = {
 	chatEvent: makeEvent<ChatEvent>("chat-event"),
 	conversationsChanged: makeEvent<ConversationsChanged>("conversations-changed"),
+	googleChanged: makeEvent<GoogleChanged>("google-changed"),
 	providersChanged: makeEvent<ProvidersChanged>("providers-changed"),
 	tasksChanged: makeEvent<TasksChanged>("tasks-changed"),
 };
@@ -51,10 +61,69 @@ export type AppStatus = {
 	version: string,
 };
 
+/**  One row of the application overview. */
+export type ApplicationRow = {
+	id: number,
+	company: string,
+	role: string | null,
+	status: ApplicationStatus,
+	/**  Received time of the latest email about this application. */
+	lastUpdateAt: number,
+	nextAction: string | null,
+	/**  For upcoming interviews: when it starts (epoch ms). */
+	interviewAt: number | null,
+	interviewTimezone: string | null,
+};
+
+/**
+ *  Where a job application stands. Stored as text and validated in Rust;
+ *  new statuses (Offer, Assessment, Withdrawn, …) can be added as variants
+ *  without a database migration.
+ */
+export type ApplicationStatus = 
+/**  The company confirmed it received the application. */
+"confirmed" | 
+/**  Under review / waiting for news. */
+"in_process" | 
+/**  The user has to do something (reply, assessment, pick a slot). */
+"needs_action" | 
+/**  A confirmed interview is coming up. */
+"upcoming_interview" | "rejected";
+
 export type AuthMethod = "none" | "api_key" | "oauth";
 
 /**  Health of the backend core. */
 export type BackendStatus = "ready";
+
+export type CalendarItem = {
+	company: string,
+	role: string | null,
+	outcome: CalendarOutcome,
+	startAt: number | null,
+	endAt: number | null,
+	timezone: string | null,
+	conflicts: ConflictingEvent[],
+	/**  Why it needs review, or other context. */
+	note: string | null,
+};
+
+export type CalendarOutcome = "created" | "updated" | "unchanged" | 
+/**  The interview was cancelled; the event was marked as cancelled. */
+"cancelled" | 
+/**  The user deleted ReMa's event in Calendar; it is not recreated. */
+"removed" | 
+/**  Details are missing or unclear; nothing was written to Calendar. */
+"needs_review";
+
+export type CalendarReport = {
+	created: number,
+	updated: number,
+	unchanged: number,
+	cancelled: number,
+	conflicts: number,
+	needsReview: number,
+	items: CalendarItem[],
+};
 
 /**  Streaming updates for an assistant message, emitted by the backend. */
 export type ChatEvent = 
@@ -62,6 +131,13 @@ export type ChatEvent =
 { type: "delta"; conversationId: number; messageId: number; text: string } | 
 /**  The message reached a final state (complete, stopped or error). */
 { type: "finished"; message: Message };
+
+/**  An existing Calendar event overlapping an interview. */
+export type ConflictingEvent = {
+	title: string,
+	startAt: number,
+	endAt: number,
+};
 
 export type Conversation = {
 	id: number,
@@ -113,7 +189,65 @@ export type ExecutionTrigger = "scheduled" |
 /**  Started with "Run now". */
 "manual";
 
+/**  The Google connection changed. */
+export type GoogleChanged = null;
+
+export type GoogleClientSource = 
+/**  Compiled into this build of ReMa. */
+"builtin" | 
+/**  Entered by the user in Settings. */
+"custom";
+
+/**  A Google Workspace capability ReMa can use. */
+export type GoogleService = "gmail" | "calendar";
+
+export type GoogleServiceStatus = {
+	/**  The user wants ReMa to use this service. */
+	enabled: boolean,
+	/**  Google granted the permission this service needs. */
+	granted: boolean,
+};
+
+/**  Google Workspace connection as shown in Settings. Never contains tokens. */
+export type GoogleStatus = {
+	client: GoogleClientSource | null,
+	connected: boolean,
+	/**  Google rejected the stored authorization; the user must reconnect. */
+	needsReconnect: boolean,
+	email: string | null,
+	gmail: GoogleServiceStatus,
+	calendar: GoogleServiceStatus,
+	/**  A sign-in is waiting for the browser. */
+	connecting: boolean,
+};
+
 export type IntervalUnit = "minutes" | "hours";
+
+/**
+ *  Structured result of one job-application monitoring run. Built from
+ *  stored state by Rust, never from free-form model text.
+ */
+export type JobRunReport = {
+	windowStart: number,
+	windowEnd: number,
+	/**  Candidate emails found by the Gmail search. */
+	emailsChecked: number,
+	/**  Candidates not processed in an earlier run. */
+	newEmails: number,
+	/**  New emails identified as job-application related. */
+	relevantEmails: number,
+	applicationsUpdated: number,
+	newApplications: number,
+	upcomingInterviews: number,
+	needsAction: number,
+	newRejections: number,
+	/**  Relevant emails left for the next run (per-run limit). */
+	deferredEmails: number,
+	applications: ApplicationRow[],
+	calendar: CalendarReport | null,
+	/**  Problems with individual emails (never email content). */
+	issues: string[],
+};
 
 export type Message = {
 	id: number,
@@ -207,6 +341,7 @@ export type Schedule =
 export type ScheduledTask = {
 	id: number,
 	name: string,
+	kind: TaskKind,
 	prompt: string,
 	model: ModelRef,
 	schedule: Schedule,
@@ -253,13 +388,17 @@ export type TaskExecution = {
 	finishedAt: number | null,
 	status: ExecutionStatus,
 	model: ModelRef,
+	/**  The answer (prompt tasks) or a plain-text summary (job tasks). */
 	result: string | null,
 	error: string | null,
+	/**  Structured result of a job-application run. */
+	report: JobRunReport | null,
 };
 
 /**  Create or edit a task. Dates and times are local to `timezone`. */
 export type TaskInput = {
 	name: string,
+	kind: TaskKind,
 	prompt: string,
 	model: ModelRef,
 	/**  IANA timezone, e.g. `Europe/Vienna`. */
@@ -271,6 +410,22 @@ export type TaskInput = {
 	schedule: Schedule,
 	end: EndCondition,
 };
+
+/**  What a task does when it runs. */
+export type TaskKind = 
+/**  Sends the prompt to the model and keeps its answer. */
+{ type: "prompt" } | 
+/**
+ *  Checks Gmail for job-application emails, keeps the application
+ *  overview up to date and can sync confirmed interviews to Calendar.
+ *  The prompt adds the user's instructions.
+ */
+{ type: "job_applications"; 
+/**
+ *  Days of email to check on every run (1–90). Each run also
+ *  covers everything since the previous successful run.
+ */
+lookbackDays: number; syncCalendar: boolean; detectConflicts: boolean };
 
 /**  Lifecycle of a task as shown to the user. */
 export type TaskStatus = 

@@ -112,3 +112,12 @@
 .about__sep {
   color: var(--color-text-tertiary);
 }
+
+.settings-note {
+  margin-top: var(--space-3);
+}
+
+.google__client-link {
+  align-self: flex-start;
+  font-size: var(--text-sm);
+}

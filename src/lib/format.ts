@@ -1,5 +1,6 @@
+import type { ApplicationStatus } from '../generated/bindings';
 import type { ModelCatalog, ModelRef } from '../services/providerService';
-import type { Schedule, Weekday } from '../services/taskService';
+import type { Schedule, TaskKind, Weekday } from '../services/taskService';
 
 const time = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' });
 const dayMonth = new Intl.DateTimeFormat(undefined, { day: 'numeric', month: 'short' });
@@ -84,4 +85,49 @@ export function modelName(catalog: ModelCatalog | null, model: ModelRef): string
     (o) => o.model.providerId === model.providerId && o.model.modelId === model.modelId,
   );
   return option?.displayName ?? model.modelId;
+}
+
+export const APPLICATION_STATUS_LABELS: Record<ApplicationStatus, string> = {
+  confirmed: 'Confirmed',
+  in_process: 'Application in Process',
+  needs_action: 'Needs Your Action',
+  upcoming_interview: 'Upcoming Interview',
+  rejected: 'Rejected',
+};
+
+/** "Job applications · 7 days · Calendar sync". */
+export function describeTaskKind(kind: TaskKind): string {
+  if (kind.type === 'prompt') return 'Prompt';
+  const days = kind.lookbackDays === 1 ? '1 day' : `${kind.lookbackDays} days`;
+  return ['Job applications', days, kind.syncCalendar && 'Calendar sync'].filter(Boolean).join(' · ');
+}
+
+/** "14:30–15:30" in `timezone` (local time without one). */
+export function formatTimeRange(start: number, end: number, timezone: string | null): string {
+  const options: Intl.DateTimeFormatOptions = { hour: '2-digit', minute: '2-digit' };
+  let format = time;
+  try {
+    if (timezone) format = new Intl.DateTimeFormat(undefined, { ...options, timeZone: timezone });
+  } catch {
+    // Unknown zone: fall back to local time.
+  }
+  return `${format.format(new Date(start))}–${format.format(new Date(end))}`;
+}
+
+/** A time shown in the timezone it was stated in, e.g. "Thu, 24 Sep, 14:00 (Europe/Vienna)". */
+export function formatInTimezone(ms: number, timezone: string | null): string {
+  if (!timezone) return formatDateTime(ms);
+  try {
+    const text = new Intl.DateTimeFormat(undefined, {
+      timeZone: timezone,
+      weekday: 'short',
+      day: 'numeric',
+      month: 'short',
+      hour: '2-digit',
+      minute: '2-digit',
+    }).format(new Date(ms));
+    return `${text} (${timezone})`;
+  } catch {
+    return formatDateTime(ms);
+  }
 }

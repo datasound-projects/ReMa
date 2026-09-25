@@ -16,7 +16,7 @@ pub async fn list_tasks(state: State<'_, AppState>) -> AppResult<Vec<ScheduledTa
 #[tauri::command]
 #[specta::specta]
 pub async fn create_task(state: State<'_, AppState>, input: TaskInput) -> AppResult<ScheduledTask> {
-    tasks::create(&state, input)
+    tasks::create(&state, input).await
 }
 
 #[tauri::command]
@@ -26,7 +26,7 @@ pub async fn update_task(
     id: i64,
     input: TaskInput,
 ) -> AppResult<ScheduledTask> {
-    tasks::update(&state, id, input)
+    tasks::update(&state, id, input).await
 }
 
 #[tauri::command]

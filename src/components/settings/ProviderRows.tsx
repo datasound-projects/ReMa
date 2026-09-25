@@ -1,6 +1,6 @@
 import { useState } from 'react';
 
-import { toApiError } from '../../services/ipc';
+import { useAction } from '../../hooks/useAction';
 import {
   connectProvider,
   disconnectProvider,
@@ -12,27 +12,7 @@ import {
 import { ChevronDownIcon } from '../icons';
 import { StatusIndicator } from '../ui/StatusIndicator';
 
-const KEY_NOTE = 'Stored in your system keychain, never in ReMa’s files.';
-
-/** Runs an action, tracking busy state and a readable error. */
-function useAction() {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const run = async (action: () => Promise<unknown>): Promise<boolean> => {
-    setBusy(true);
-    setError(null);
-    try {
-      await action();
-      return true;
-    } catch (err) {
-      setError(toApiError(err).message);
-      return false;
-    } finally {
-      setBusy(false);
-    }
-  };
-  return { busy, error, run, clearError: () => setError(null) };
-}
+export const KEY_NOTE = 'Stored in your system keychain, never in ReMa’s files.';
 
 /** OpenAI, Anthropic or Gemini. */
 export function CloudProviderRow({ provider }: { provider: ProviderView }) {

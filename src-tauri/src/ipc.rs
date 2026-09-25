@@ -18,6 +18,7 @@ use crate::{
     commands,
     models::{
         chat::{ChatEvent, ConversationsChanged},
+        google::GoogleChanged,
         provider::ProvidersChanged,
         task::TasksChanged,
     },
@@ -46,6 +47,13 @@ pub fn builder() -> Builder<tauri::Wry> {
             commands::providers::refresh_provider_models,
             commands::providers::set_model_enabled,
             commands::providers::set_default_model,
+            // Google Workspace
+            commands::google::get_google_status,
+            commands::google::save_google_client,
+            commands::google::connect_google,
+            commands::google::cancel_google_connect,
+            commands::google::disconnect_google,
+            commands::google::set_google_service_enabled,
             // Chat
             commands::chat::list_conversations,
             commands::chat::get_conversation,
@@ -65,6 +73,7 @@ pub fn builder() -> Builder<tauri::Wry> {
         .events(collect_events![
             ChatEvent,
             ConversationsChanged,
+            GoogleChanged,
             ProvidersChanged,
             TasksChanged,
         ])

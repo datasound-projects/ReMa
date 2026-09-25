@@ -1,4 +1,6 @@
 pub mod chat;
+pub mod google;
+pub mod jobs;
 pub mod provider;
 pub mod system;
 pub mod task;

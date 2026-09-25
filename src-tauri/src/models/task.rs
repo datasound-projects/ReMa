@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
-use super::{provider::ModelRef, text_enum};
+use super::{jobs::JobRunReport, provider::ModelRef, text_enum};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
 #[serde(rename_all = "lowercase")]
@@ -52,6 +52,25 @@ pub enum EndCondition {
     },
 }
 
+/// What a task does when it runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TaskKind {
+    /// Sends the prompt to the model and keeps its answer.
+    Prompt,
+    /// Checks Gmail for job-application emails, keeps the application
+    /// overview up to date and can sync confirmed interviews to Calendar.
+    /// The prompt adds the user's instructions.
+    #[serde(rename_all = "camelCase")]
+    JobApplications {
+        /// Days of email to check on every run (1–90). Each run also
+        /// covers everything since the previous successful run.
+        lookback_days: u32,
+        sync_calendar: bool,
+        detect_conflicts: bool,
+    },
+}
+
 /// Lifecycle of a task as shown to the user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "snake_case")]
@@ -93,6 +112,7 @@ text_enum!(ExecutionTrigger { Scheduled => "scheduled", Manual => "manual" });
 #[serde(rename_all = "camelCase")]
 pub struct TaskInput {
     pub name: String,
+    pub kind: TaskKind,
     pub prompt: String,
     pub model: ModelRef,
     /// IANA timezone, e.g. `Europe/Vienna`.
@@ -110,6 +130,7 @@ pub struct TaskInput {
 pub struct ScheduledTask {
     pub id: i64,
     pub name: String,
+    pub kind: TaskKind,
     pub prompt: String,
     pub model: ModelRef,
     pub schedule: Schedule,
@@ -144,8 +165,11 @@ pub struct TaskExecution {
     pub finished_at: Option<i64>,
     pub status: ExecutionStatus,
     pub model: ModelRef,
+    /// The answer (prompt tasks) or a plain-text summary (job tasks).
     pub result: Option<String>,
     pub error: Option<String>,
+    /// Structured result of a job-application run.
+    pub report: Option<JobRunReport>,
 }
 
 /// Tasks or their executions changed (created, edited, ran, finished).

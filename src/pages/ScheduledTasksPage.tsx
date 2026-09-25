@@ -9,7 +9,7 @@ import { TaskStatusLabel } from '../components/tasks/TaskStatus';
 import { dataOr } from '../hooks/useAsyncData';
 import { useModelCatalog } from '../hooks/useModelCatalog';
 import { useSystemTimezone, useTasks } from '../hooks/useTasks';
-import { describeSchedule, formatDateTime, modelName } from '../lib/format';
+import { describeSchedule, describeTaskKind, formatDateTime, modelName } from '../lib/format';
 import type { ScheduledTask } from '../services/taskService';
 
 export function ScheduledTasksPage() {
@@ -51,7 +51,7 @@ export function ScheduledTasksPage() {
   return (
     <PageContainer
       title="Scheduled Tasks"
-      subtitle="Prompts ReMa runs for you on a schedule."
+      subtitle="Prompts and job-application checks ReMa runs for you on a schedule."
       actions={
         <button type="button" className="button button--secondary" onClick={() => setEditing('new')}>
           <PlusIcon className="button__icon" />
@@ -98,7 +98,9 @@ export function ScheduledTasksPage() {
             >
               <span role="cell" className="task-table__name">
                 <span className="task-table__title">{task.name}</span>
-                <span className="task-table__prompt">{task.prompt}</span>
+                <span className="task-table__prompt">
+                  {task.kind.type === 'prompt' ? task.prompt : describeTaskKind(task.kind)}
+                </span>
               </span>
               <span role="cell">{describeSchedule(task.schedule, task.startTime)}</span>
               <span role="cell" className="task-table__muted">

@@ -148,3 +148,155 @@
 .history__result {
   padding: var(--space-2) var(--space-5) var(--space-5);
 }
+
+.job-options {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+/* ── Job-application report ────────────────────────────── */
+
+.job-report {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.job-report__title {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: 600;
+}
+
+.job-report__subtitle {
+  margin: 0 0 var(--space-1);
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+
+.job-report__counts {
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+.job-report__window {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
+}
+
+.job-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.job-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+
+.job-table th {
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-surface-sunken);
+  border-bottom: 1px solid var(--color-border);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--color-text-tertiary);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.job-table td {
+  padding: var(--space-2) var(--space-3);
+  vertical-align: top;
+}
+
+.job-table tr + tr td {
+  border-top: 1px solid var(--color-border);
+}
+
+.job-table__company {
+  font-weight: 600;
+}
+
+.job-table__muted {
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
+.app-status,
+.calendar-outcome {
+  display: inline-block;
+  padding: 1px var(--space-2);
+  border-radius: 999px;
+  background: var(--color-surface-sunken);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.app-status--upcoming_interview,
+.calendar-outcome--created,
+.calendar-outcome--updated {
+  background: var(--color-brand-subtle);
+  color: var(--color-brand-hover);
+}
+
+.app-status--needs_action,
+.calendar-outcome--needs_review {
+  background: #fdf4e6;
+  color: var(--color-warning);
+}
+
+.app-status--rejected,
+.calendar-outcome--cancelled {
+  background: var(--color-danger-subtle);
+  color: var(--color-danger);
+}
+
+.app-status--confirmed {
+  background: #eaf5ef;
+  color: var(--color-success);
+}
+
+.calendar-items {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.calendar-items__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-3);
+  font-size: var(--text-sm);
+}
+
+.calendar-items__title {
+  font-weight: 600;
+}
+
+.calendar-items__note,
+.calendar-items__conflict {
+  margin: 2px 0 0;
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+.calendar-items__conflict {
+  color: var(--color-warning);
+}
+
+.job-report__issues ul {
+  margin: 0;
+  padding-left: var(--space-5);
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}

@@ -7,7 +7,13 @@ use crate::{
         tasks::{self as repo, TaskRow},
     },
     error::{AppError, AppResult},
-    models::task::{EndCondition, Schedule, ScheduledTask, TaskExecution, TaskInput, TaskStatus},
+    integrations::google,
+    models::{
+        google::GoogleService,
+        task::{
+            EndCondition, Schedule, ScheduledTask, TaskExecution, TaskInput, TaskKind, TaskStatus,
+        },
+    },
     services::{
         chat::make_title,
         schedule::{self, Limits},
@@ -19,6 +25,8 @@ use crate::{
 
 const MAX_PROMPT_CHARS: usize = 20_000;
 const MAX_NAME_CHARS: usize = 120;
+const MAX_LOOKBACK_DAYS: u32 = 90;
+const JOB_TASK_NAME: &str = "Job application monitor";
 const MAX_RUNS_LIMIT: u32 = 100_000;
 /// A start time up to this far in the past still counts as "now".
 const START_GRACE_MS: i64 = 60_000;
@@ -26,6 +34,7 @@ const START_GRACE_MS: i64 = 60_000;
 /// A validated task definition.
 struct Definition {
     name: String,
+    kind: TaskKind,
     prompt: String,
     schedule: Schedule,
     timezone: String,
@@ -34,15 +43,41 @@ struct Definition {
     max_runs: Option<u32>,
 }
 
+fn parse_kind(kind: TaskKind) -> AppResult<TaskKind> {
+    match kind {
+        TaskKind::Prompt => Ok(kind),
+        TaskKind::JobApplications {
+            lookback_days,
+            sync_calendar,
+            detect_conflicts,
+        } => {
+            if !(1..=MAX_LOOKBACK_DAYS).contains(&lookback_days) {
+                return Err(AppError::validation(format!(
+                    "Choose a lookback of 1 to {MAX_LOOKBACK_DAYS} days."
+                )));
+            }
+            Ok(TaskKind::JobApplications {
+                lookback_days,
+                sync_calendar,
+                // Conflicts are checked while syncing interviews.
+                detect_conflicts: sync_calendar && detect_conflicts,
+            })
+        }
+    }
+}
+
 fn parse_input(conn: &rusqlite::Connection, input: &TaskInput) -> AppResult<Definition> {
+    let kind = parse_kind(input.kind)?;
     let prompt = input.prompt.trim();
-    if prompt.is_empty() {
+    // Job tasks work without extra instructions.
+    if prompt.is_empty() && kind == TaskKind::Prompt {
         return Err(AppError::validation("Enter a prompt for the task."));
     }
     if prompt.chars().count() > MAX_PROMPT_CHARS {
         return Err(AppError::validation("The prompt is too long."));
     }
     let name = match input.name.trim() {
+        "" if kind != TaskKind::Prompt => JOB_TASK_NAME.to_string(),
         "" => make_title(prompt),
         name if name.chars().count() > MAX_NAME_CHARS => {
             return Err(AppError::validation("The name is too long."))
@@ -88,6 +123,7 @@ fn parse_input(conn: &rusqlite::Connection, input: &TaskInput) -> AppResult<Defi
 
     Ok(Definition {
         name,
+        kind,
         prompt: prompt.to_string(),
         schedule: input.schedule.clone(),
         timezone: input.timezone.clone(),
@@ -117,7 +153,19 @@ fn no_future_runs() -> AppError {
     AppError::validation("This schedule has no upcoming runs. Check the start and end dates.")
 }
 
-pub fn create(state: &AppState, input: TaskInput) -> AppResult<ScheduledTask> {
+/// The Google services a task needs must be connected and enabled.
+async fn require_tools(state: &AppState, kind: TaskKind) -> AppResult<()> {
+    if let TaskKind::JobApplications { sync_calendar, .. } = kind {
+        google::require(state, GoogleService::Gmail).await?;
+        if sync_calendar {
+            google::require(state, GoogleService::Calendar).await?;
+        }
+    }
+    Ok(())
+}
+
+pub async fn create(state: &AppState, input: TaskInput) -> AppResult<ScheduledTask> {
+    require_tools(state, input.kind).await?;
     let now = now_ms();
     let id = state.db.call(|conn| {
         let definition = parse_input(conn, &input)?;
@@ -127,6 +175,7 @@ pub fn create(state: &AppState, input: TaskInput) -> AppResult<ScheduledTask> {
             &TaskRow {
                 id: 0,
                 name: definition.name,
+                kind: definition.kind,
                 prompt: definition.prompt,
                 model: input.model.clone(),
                 schedule: definition.schedule,
@@ -151,7 +200,8 @@ pub fn create(state: &AppState, input: TaskInput) -> AppResult<ScheduledTask> {
 
 /// Edits a task. Changing when it runs restarts its schedule (and run count);
 /// editing only the name, prompt or model keeps it.
-pub fn update(state: &AppState, id: i64, input: TaskInput) -> AppResult<ScheduledTask> {
+pub async fn update(state: &AppState, id: i64, input: TaskInput) -> AppResult<ScheduledTask> {
+    require_tools(state, input.kind).await?;
     let now = now_ms();
     state.db.call(|conn| {
         let mut task = repo::get(conn, id)?;
@@ -168,6 +218,7 @@ pub fn update(state: &AppState, id: i64, input: TaskInput) -> AppResult<Schedule
             task.next_run_at = Some(next);
         }
         task.name = definition.name;
+        task.kind = definition.kind;
         task.prompt = definition.prompt;
         task.model = input.model.clone();
         task.schedule = definition.schedule;
@@ -269,6 +320,7 @@ fn to_view(state: &AppState, row: TaskRow) -> AppResult<ScheduledTask> {
         id: row.id,
         running: state.scheduler.is_running(row.id),
         name: row.name,
+        kind: row.kind,
         prompt: row.prompt,
         model: row.model,
         schedule: row.schedule,
@@ -317,6 +369,7 @@ mod tests {
         let tomorrow = jiff::Zoned::now().date().tomorrow().unwrap();
         TaskInput {
             name: String::new(),
+            kind: TaskKind::Prompt,
             prompt: "Research new AI engineering jobs in Vienna".into(),
             model: ModelRef {
                 provider_id: "anthropic".into(),
@@ -337,6 +390,7 @@ mod tests {
             &state,
             input(Schedule::Daily { every: 1 }, EndCondition::Never),
         )
+        .await
         .unwrap();
         assert_eq!(task.name, "Research new AI engineering jobs in Vienna");
         assert_eq!(task.status, TaskStatus::Active);
@@ -356,25 +410,28 @@ mod tests {
             EndCondition::Never,
         );
         assert!(matches!(
-            create(&state, too_often),
+            create(&state, too_often).await,
             Err(AppError::Validation(_))
         ));
 
         let mut past = input(Schedule::Once, EndCondition::Never);
         past.start_date = "2020-01-01".into();
-        assert!(matches!(create(&state, past), Err(AppError::Validation(_))));
+        assert!(matches!(
+            create(&state, past).await,
+            Err(AppError::Validation(_))
+        ));
 
         let mut unknown_model = input(Schedule::Once, EndCondition::Never);
         unknown_model.model.provider_id = "gemini".into();
         assert!(matches!(
-            create(&state, unknown_model),
+            create(&state, unknown_model).await,
             Err(AppError::Validation(_))
         ));
 
         let mut empty = input(Schedule::Once, EndCondition::Never);
         empty.prompt = " ".into();
         assert!(matches!(
-            create(&state, empty),
+            create(&state, empty).await,
             Err(AppError::Validation(_))
         ));
 
@@ -385,7 +442,7 @@ mod tests {
             },
         );
         assert!(matches!(
-            create(&state, ends_before_start),
+            create(&state, ends_before_start).await,
             Err(AppError::Validation(_))
         ));
         assert!(list(&state).unwrap().is_empty());
@@ -403,6 +460,7 @@ mod tests {
                 EndCondition::AfterRuns { count: 3 },
             ),
         )
+        .await
         .unwrap();
         assert_eq!(limited.max_runs, Some(3));
         assert_eq!(limited.end, EndCondition::AfterRuns { count: 3 });
@@ -424,6 +482,7 @@ mod tests {
                 },
             ),
         )
+        .await
         .unwrap();
         assert_eq!(dated.end, EndCondition::OnDate { date: end_date });
     }
@@ -435,6 +494,7 @@ mod tests {
             &state,
             input(Schedule::Daily { every: 1 }, EndCondition::Never),
         )
+        .await
         .unwrap();
         state
             .db
@@ -448,7 +508,7 @@ mod tests {
         let mut renamed = input(Schedule::Daily { every: 1 }, EndCondition::Never);
         renamed.name = "Vienna jobs".into();
         renamed.model.model_id = "model-b".into();
-        let edited = update(&state, task.id, renamed).unwrap();
+        let edited = update(&state, task.id, renamed).await.unwrap();
         assert_eq!((edited.name.as_str(), edited.run_count), ("Vienna jobs", 2));
         assert_eq!(edited.model.model_id, "model-b");
 
@@ -457,6 +517,7 @@ mod tests {
             task.id,
             input(Schedule::Daily { every: 2 }, EndCondition::Never),
         )
+        .await
         .unwrap();
         assert_eq!(rescheduled.run_count, 0);
     }
@@ -468,6 +529,7 @@ mod tests {
             &state,
             input(Schedule::Daily { every: 1 }, EndCondition::Never),
         )
+        .await
         .unwrap();
         let paused = set_enabled(&state, task.id, false).unwrap();
         assert_eq!(

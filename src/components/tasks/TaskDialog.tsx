@@ -1,7 +1,16 @@
 import { useState } from 'react';
 
+import { dataOr } from '../../hooks/useAsyncData';
+import { useGoogleStatus } from '../../hooks/useGoogle';
 import { WEEKDAYS } from '../../lib/format';
-import { defaultForm, formFromTask, formToInput, type TaskForm } from '../../lib/taskForm';
+import {
+  defaultForm,
+  formFromTask,
+  formToInput,
+  LOOKBACK_PRESETS,
+  MAX_LOOKBACK_DAYS,
+  type TaskForm,
+} from '../../lib/taskForm';
 import { toApiError } from '../../services/ipc';
 import { sameModel, type ModelCatalog, type ModelRef } from '../../services/providerService';
 import { createTask, updateTask, type ScheduledTask } from '../../services/taskService';
@@ -21,7 +30,7 @@ interface TaskDialogProps {
 
 const modelKey = (model: ModelRef) => `${model.providerId}/${model.modelId}`;
 
-/** Create or edit a scheduled task: prompt, model, start, repeat and end. */
+/** Create or edit a scheduled task: type, prompt, model, start, repeat and end. */
 export function TaskDialog({
   catalog,
   timezone,
@@ -37,6 +46,8 @@ export function TaskDialog({
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const update = (patch: Partial<TaskForm>) => setForm((f) => ({ ...f, ...patch }));
+  const google = dataOr(useGoogleStatus().state, null);
+  const jobs = form.type === 'job_applications';
 
   const taskTimezone = task?.timezone ?? timezone;
   const models = catalog?.models ?? [];
@@ -94,21 +105,95 @@ export function TaskDialog({
     >
       <div className="form">
         <label className="field">
-          <span className="field__label">Prompt</span>
+          <span className="field__label">Type</span>
+          <select
+            className="input"
+            value={form.type}
+            onChange={(e) => update({ type: e.target.value as TaskForm['type'] })}
+          >
+            <option value="prompt">Prompt</option>
+            <option value="job_applications">Job applications (Gmail)</option>
+          </select>
+        </label>
+
+        <label className="field">
+          <span className="field__label">{jobs ? 'Instructions (optional)' : 'Prompt'}</span>
           <textarea
             className="input input--textarea"
             rows={3}
+            placeholder={
+              jobs ? 'E.g. I applied for data engineering roles in Vienna. Ignore recruiter newsletters.' : ''
+            }
             value={form.prompt}
             onChange={(e) => update({ prompt: e.target.value })}
           />
         </label>
+
+        {jobs && (
+          <div className="job-options">
+            <div className="form__inline">
+              <span>Check emails from the last</span>
+              <select
+                className="input input--auto"
+                aria-label="Lookback"
+                value={form.lookback}
+                onChange={(e) => update({ lookback: e.target.value })}
+              >
+                {LOOKBACK_PRESETS.map((days) => (
+                  <option key={days} value={days}>
+                    {days === 1 ? '1 day' : `${days} days`}
+                  </option>
+                ))}
+                <option value="custom">Custom</option>
+              </select>
+              {form.lookback === 'custom' && (
+                <>
+                  <input
+                    type="number"
+                    min={1}
+                    max={MAX_LOOKBACK_DAYS}
+                    className="input input--number"
+                    aria-label="Lookback in days"
+                    value={form.customLookback}
+                    onChange={(e) => update({ customLookback: Number(e.target.value) })}
+                  />
+                  <span>days</span>
+                </>
+              )}
+            </div>
+            <label className="checkbox">
+              <input
+                type="checkbox"
+                checked={form.syncCalendar}
+                onChange={(e) => update({ syncCalendar: e.target.checked })}
+              />
+              <span>Add confirmed interviews to Google Calendar</span>
+            </label>
+            <label className="checkbox">
+              <input
+                type="checkbox"
+                checked={form.syncCalendar && form.detectConflicts}
+                disabled={!form.syncCalendar}
+                onChange={(e) => update({ detectConflicts: e.target.checked })}
+              />
+              <span>Report calendar conflicts</span>
+            </label>
+            <p className="form__hint">
+              {google?.connected
+                ? `Uses ${google.email ?? 'your Google account'}: Gmail read-only${
+                    form.syncCalendar ? ' and Calendar' : ''
+                  }. Each run also covers emails since the last successful run.`
+                : 'Connect Google in Settings to use this task.'}
+            </p>
+          </div>
+        )}
 
         <div className="form__row">
           <label className="field field--grow">
             <span className="field__label">Name</span>
             <input
               className="input"
-              placeholder="From the prompt"
+              placeholder={jobs ? 'Job application monitor' : 'From the prompt'}
               value={form.name}
               onChange={(e) => update({ name: e.target.value })}
             />

@@ -5,6 +5,7 @@ use tauri::PackageInfo;
 use crate::{
     db::Database,
     events::EventSink,
+    integrations::google::GoogleContext,
     llm::LanguageModel,
     secrets::SecretVault,
     services::{chat::Generations, scheduler::SchedulerHandle},
@@ -40,12 +41,15 @@ pub struct AppState {
     /// Chat responses currently streaming.
     pub generations: Generations,
     pub scheduler: SchedulerHandle,
+    pub google: GoogleContext,
 }
 
 #[cfg(test)]
 pub mod testing {
     use super::*;
-    use crate::{events::RecordingEvents, secrets::MemoryStore};
+    use crate::{
+        events::RecordingEvents, integrations::google::GoogleEndpoints, secrets::MemoryStore,
+    };
 
     /// State with an in-memory database, in-memory secrets and a fake model.
     pub fn state(llm: Arc<dyn LanguageModel>) -> (AppState, Arc<RecordingEvents>) {
@@ -61,6 +65,7 @@ pub mod testing {
             events: events.clone(),
             generations: Generations::default(),
             scheduler: SchedulerHandle::default(),
+            google: GoogleContext::new(GoogleEndpoints::default()),
         };
         (state, events)
     }

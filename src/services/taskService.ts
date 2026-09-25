@@ -14,6 +14,7 @@ export type {
   ScheduledTask,
   TaskExecution,
   TaskInput,
+  TaskKind,
   TaskStatus,
   Weekday,
 } from '../generated/bindings';

@@ -4,16 +4,28 @@ import type {
   Schedule,
   ScheduledTask,
   TaskInput,
+  TaskKind,
   Weekday,
 } from '../services/taskService';
 import { isWorkweek } from './format';
 
+export type TaskType = TaskKind['type'];
 export type RepeatKind = 'once' | 'daily' | 'weekdays' | 'weekly' | 'days' | 'interval';
 export type EndKind = 'never' | 'on_date' | 'after_runs';
+
+/** Lookback choices for job-application tasks, in days. */
+export const LOOKBACK_PRESETS = [1, 3, 7, 14, 30];
+export const MAX_LOOKBACK_DAYS = 90;
 
 /** Editable state of the task dialog. Dates/times are local `YYYY-MM-DD` / `HH:MM`. */
 export interface TaskForm {
   name: string;
+  type: TaskType;
+  /** A preset number of days, or 'custom'. */
+  lookback: string;
+  customLookback: number;
+  syncCalendar: boolean;
+  detectConflicts: boolean;
   prompt: string;
   model: ModelRef | null;
   startDate: string;
@@ -51,6 +63,11 @@ export function defaultForm(prompt: string, model: ModelRef | null): TaskForm {
   end.setDate(end.getDate() + 7);
   return {
     name: '',
+    type: 'prompt',
+    lookback: '7',
+    customLookback: 60,
+    syncCalendar: true,
+    detectConflicts: true,
     prompt,
     model,
     startDate,
@@ -69,6 +86,14 @@ export function defaultForm(prompt: string, model: ModelRef | null): TaskForm {
 export function formFromTask(task: ScheduledTask): TaskForm {
   const form = defaultForm(task.prompt, task.model);
   form.name = task.name;
+  if (task.kind.type === 'job_applications') {
+    const days = task.kind.lookbackDays;
+    form.type = 'job_applications';
+    form.lookback = LOOKBACK_PRESETS.includes(days) ? String(days) : 'custom';
+    form.customLookback = days;
+    form.syncCalendar = task.kind.syncCalendar;
+    form.detectConflicts = task.kind.detectConflicts;
+  }
   form.startDate = task.startDate;
   form.startTime = task.startTime;
   const schedule = task.schedule;
@@ -105,6 +130,20 @@ export function formFromTask(task: ScheduledTask): TaskForm {
   return form;
 }
 
+function toKind(form: TaskForm): TaskKind | string {
+  if (form.type === 'prompt') return { type: 'prompt' };
+  const days = form.lookback === 'custom' ? form.customLookback : Number(form.lookback);
+  if (!Number.isInteger(days) || days < 1 || days > MAX_LOOKBACK_DAYS) {
+    return `Choose a lookback of 1 to ${MAX_LOOKBACK_DAYS} days.`;
+  }
+  return {
+    type: 'job_applications',
+    lookbackDays: days,
+    syncCalendar: form.syncCalendar,
+    detectConflicts: form.syncCalendar && form.detectConflicts,
+  };
+}
+
 function toSchedule(form: TaskForm): Schedule {
   switch (form.repeat) {
     case 'once':
@@ -127,8 +166,10 @@ function toSchedule(form: TaskForm): Schedule {
  * backend validates everything again.
  */
 export function formToInput(form: TaskForm, timezone: string): TaskInput | string {
-  if (!form.prompt.trim()) return 'Enter a prompt for the task.';
+  if (form.type === 'prompt' && !form.prompt.trim()) return 'Enter a prompt for the task.';
   if (!form.model) return 'Choose a model.';
+  const kind = toKind(form);
+  if (typeof kind === 'string') return kind;
   if (!form.startDate || !form.startTime) return 'Choose when the task starts.';
   if (form.repeat === 'interval') {
     const minutes = form.intervalEvery * (form.intervalUnit === 'hours' ? 60 : 1);
@@ -137,6 +178,7 @@ export function formToInput(form: TaskForm, timezone: string): TaskInput | strin
   if (form.repeat === 'weekly' && form.weekdays.length === 0) return 'Choose at least one weekday.';
   return {
     name: form.name.trim(),
+    kind,
     prompt: form.prompt.trim(),
     model: form.model,
     timezone,

@@ -8,6 +8,8 @@
 //! services  — deterministic business logic (chat, providers, tasks, scheduler)
 //! llm       — provider adapters behind one `LanguageModel` interface
 //! db        — SQLite persistence and migrations
+//! integrations — Google Workspace (OAuth, Gmail, Calendar)
+//! jobs      — job-application intelligence (Gmail → state → Calendar)
 //! secrets   — credentials in the OS credential store
 //! models    — typed data shared across layers and serialized to the UI
 //! state     — shared application state managed by Tauri
@@ -18,12 +20,16 @@ pub mod commands;
 pub mod db;
 pub mod error;
 pub mod events;
+pub mod integrations;
 pub mod ipc;
+pub mod jobs;
 pub mod llm;
 pub mod models;
 pub mod secrets;
 pub mod services;
 pub mod state;
+#[cfg(test)]
+mod test_support;
 pub mod time;
 
 use std::sync::Arc;
@@ -33,6 +39,7 @@ use tauri::{App, Manager, RunEvent};
 use crate::{
     db::Database,
     events::TauriEvents,
+    integrations::google::{GoogleContext, GoogleEndpoints},
     llm::HttpLanguageModel,
     secrets::{KeyringStore, SecretVault},
     services::{chat::Generations, scheduler, scheduler::SchedulerHandle},
@@ -93,5 +100,6 @@ fn init_state(app: &App) -> Result<AppState, Box<dyn std::error::Error>> {
         events: Arc::new(TauriEvents(app.handle().clone())),
         generations: Generations::default(),
         scheduler: SchedulerHandle::default(),
+        google: GoogleContext::new(GoogleEndpoints::from_env()),
     })
 }

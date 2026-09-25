@@ -19,12 +19,16 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    db::tasks::{self as repo, NewExecution, TaskRow},
+    db::tasks::{self as repo, Finished, NewExecution, TaskRow},
     error::{AppError, AppResult},
+    integrations::google::{self, calendar::CalendarApi, calendar::HttpCalendar, gmail::HttpGmail},
+    jobs::{self, JobRunConfig, RunModel, Tools},
     llm::{ChatRequest, Finish, Turn},
     models::{
         chat::MessageRole,
-        task::{ExecutionStatus, ExecutionTrigger, TaskExecution},
+        google::GoogleService,
+        jobs::JobRunReport,
+        task::{ExecutionStatus, ExecutionTrigger, TaskExecution, TaskKind},
     },
     services::{
         chat::system_prompt,
@@ -231,59 +235,45 @@ pub async fn execute(
     })?;
     state.events.tasks_changed();
 
-    let outcome = tokio::time::timeout(RUN_TIMEOUT, async {
-        let endpoint = providers::resolve_endpoint(state, &task.model.provider_id).await?;
-        let request = ChatRequest {
-            system: Some(format!(
-                "{} This request is a scheduled task running automatically; \
-                 reply with the finished result.",
-                system_prompt(started_at)
-            )),
-            turns: vec![Turn {
-                role: MessageRole::User,
-                content: task.prompt.clone(),
-            }],
-            max_output_tokens: providers::max_output_tokens(state, &task.model)?,
-        };
-        let mut text = String::new();
-        let mut on_delta = |delta: &str| text.push_str(delta);
-        let finish = state
-            .llm
-            .stream_chat(
-                &endpoint,
-                &task.model.model_id,
-                &request,
-                cancel,
-                &mut on_delta,
-            )
-            .await?;
-        Ok::<_, AppError>((finish, text))
-    })
-    .await;
+    let outcome =
+        tokio::time::timeout(RUN_TIMEOUT, run_task(state, task, started_at, cancel)).await;
 
-    let (status, result, error) = match outcome {
+    let (status, result, error, report) = match outcome {
         Err(_) => (
             ExecutionStatus::Failed,
             None,
             Some("The run timed out.".to_string()),
+            None,
         ),
-        Ok(Err(error)) => (ExecutionStatus::Failed, None, Some(error.to_string())),
-        Ok(Ok((Finish::Cancelled, _))) => (
+        Ok(Err(error)) => (ExecutionStatus::Failed, None, Some(error.to_string()), None),
+        Ok(Ok(Output {
+            finish: Finish::Cancelled,
+            ..
+        })) => (
             ExecutionStatus::Failed,
             None,
             Some("The run was cancelled.".to_string()),
+            None,
         ),
-        Ok(Ok((Finish::Refused, text))) if text.trim().is_empty() => (
+        Ok(Ok(Output {
+            finish: Finish::Refused,
+            text,
+            ..
+        })) if text.trim().is_empty() => (
             ExecutionStatus::Failed,
             None,
             Some("The model declined to answer this prompt.".to_string()),
+            None,
         ),
-        Ok(Ok((_, text))) if text.trim().is_empty() => (
+        Ok(Ok(Output { text, .. })) if text.trim().is_empty() => (
             ExecutionStatus::Failed,
             None,
             Some("The model returned an empty response.".to_string()),
+            None,
         ),
-        Ok(Ok((_, text))) => (ExecutionStatus::Succeeded, Some(text), None),
+        Ok(Ok(Output { text, report, .. })) => {
+            (ExecutionStatus::Succeeded, Some(text), None, report)
+        }
     };
 
     let finished_at = now_ms();
@@ -291,13 +281,113 @@ pub async fn execute(
         repo::finish_execution(
             conn,
             execution.id,
-            status,
-            result.as_deref(),
-            error.as_deref(),
-            finished_at,
+            Finished {
+                status,
+                result: result.as_deref(),
+                error: error.as_deref(),
+                report: report.as_ref(),
+                finished_at,
+            },
         )?;
         repo::get_execution(conn, execution.id)
     })
+}
+
+/// What one run produced.
+struct Output {
+    finish: Finish,
+    /// The model's answer, or a job run's summary.
+    text: String,
+    report: Option<JobRunReport>,
+}
+
+async fn run_task(
+    state: &AppState,
+    task: &TaskRow,
+    started_at: i64,
+    cancel: CancellationToken,
+) -> AppResult<Output> {
+    let endpoint = providers::resolve_endpoint(state, &task.model.provider_id).await?;
+    let max_output_tokens = providers::max_output_tokens(state, &task.model)?;
+    match task.kind {
+        TaskKind::Prompt => {
+            let request = ChatRequest {
+                system: Some(format!(
+                    "{} This request is a scheduled task running automatically; \
+                     reply with the finished result.",
+                    system_prompt(started_at)
+                )),
+                turns: vec![Turn {
+                    role: MessageRole::User,
+                    content: task.prompt.clone(),
+                }],
+                max_output_tokens,
+            };
+            let mut text = String::new();
+            let mut on_delta = |delta: &str| text.push_str(delta);
+            let finish = state
+                .llm
+                .stream_chat(
+                    &endpoint,
+                    &task.model.model_id,
+                    &request,
+                    cancel,
+                    &mut on_delta,
+                )
+                .await?;
+            Ok(Output {
+                finish,
+                text,
+                report: None,
+            })
+        }
+        TaskKind::JobApplications {
+            lookback_days,
+            sync_calendar,
+            detect_conflicts,
+        } => {
+            google::require(state, GoogleService::Gmail).await?;
+            // Without Calendar the run still updates the overview.
+            let calendar_ready = if sync_calendar {
+                google::require(state, GoogleService::Calendar)
+                    .await
+                    .map_err(|e| e.to_string())
+            } else {
+                Err("Calendar sync is off.".into())
+            };
+            let token = google::access_token(state).await?;
+            let endpoints = &state.google.endpoints;
+            let gmail = HttpGmail::new(state.google.http.clone(), &endpoints.gmail, token.clone());
+            let calendar = HttpCalendar::new(state.google.http.clone(), &endpoints.calendar, token);
+            let report = jobs::run(
+                state,
+                task.id,
+                &task.prompt,
+                RunModel {
+                    endpoint: &endpoint,
+                    model: &task.model,
+                    max_output_tokens,
+                },
+                JobRunConfig {
+                    lookback_days,
+                    sync_calendar,
+                    detect_conflicts,
+                },
+                Tools {
+                    gmail: &gmail,
+                    calendar: calendar_ready.map(|()| &calendar as &dyn CalendarApi),
+                },
+                &cancel,
+                started_at,
+            )
+            .await?;
+            Ok(Output {
+                finish: Finish::Complete,
+                text: jobs::report::summary(&report),
+                report: Some(report),
+            })
+        }
+    }
 }
 
 #[cfg(test)]
@@ -324,6 +414,7 @@ mod tests {
     fn every_4_hours(max_runs: Option<u32>) -> TaskInput {
         TaskInput {
             name: "Market summary".into(),
+            kind: crate::models::task::TaskKind::Prompt,
             prompt: "Summarize the market".into(),
             model: ModelRef {
                 provider_id: "anthropic".into(),
@@ -347,7 +438,7 @@ mod tests {
     #[tokio::test]
     async fn claims_due_runs_once_and_advances_the_schedule() {
         let state = state(FakeLanguageModel::replying(&["ok"])).await;
-        let task = tasks::create(&state, every_4_hours(None)).unwrap();
+        let task = tasks::create(&state, every_4_hours(None)).await.unwrap();
         let start = task.start_at;
 
         assert!(
@@ -371,7 +462,7 @@ mod tests {
     #[tokio::test]
     async fn missed_runs_execute_once_then_continue_on_schedule() {
         let state = state(FakeLanguageModel::replying(&["ok"])).await;
-        let task = tasks::create(&state, every_4_hours(None)).unwrap();
+        let task = tasks::create(&state, every_4_hours(None)).await.unwrap();
         // ReMa was closed for a day.
         let now = task.start_at + 25 * HOUR;
         assert_eq!(claim_due(&state, now).unwrap().len(), 1);
@@ -384,7 +475,7 @@ mod tests {
     #[tokio::test]
     async fn stops_after_the_run_limit() {
         let state = state(FakeLanguageModel::replying(&["ok"])).await;
-        let task = tasks::create(&state, every_4_hours(Some(2))).unwrap();
+        let task = tasks::create(&state, every_4_hours(Some(2))).await.unwrap();
         claim_due(&state, task.start_at).unwrap();
         claim_due(&state, task.start_at + 4 * HOUR).unwrap();
         let done = tasks::get(&state, task.id).unwrap();
@@ -398,7 +489,7 @@ mod tests {
     #[tokio::test]
     async fn paused_tasks_are_not_claimed() {
         let state = state(FakeLanguageModel::replying(&["ok"])).await;
-        let task = tasks::create(&state, every_4_hours(None)).unwrap();
+        let task = tasks::create(&state, every_4_hours(None)).await.unwrap();
         tasks::set_enabled(&state, task.id, false).unwrap();
         assert!(claim_due(&state, task.start_at + HOUR).unwrap().is_empty());
     }
@@ -410,7 +501,7 @@ mod tests {
         providers::connect(&state, ProviderKind::Anthropic, "k")
             .await
             .unwrap();
-        let task = tasks::create(&state, every_4_hours(None)).unwrap();
+        let task = tasks::create(&state, every_4_hours(None)).await.unwrap();
         let row = state.db.call(|c| repo::get(c, task.id)).unwrap();
 
         let execution = execute(
@@ -441,7 +532,7 @@ mod tests {
         let mut llm = FakeLanguageModel::replying(&[]);
         llm.fail_with = Some("Anthropic rate limit or quota reached".into());
         let state = state(llm).await;
-        let task = tasks::create(&state, every_4_hours(None)).unwrap();
+        let task = tasks::create(&state, every_4_hours(None)).await.unwrap();
         let row = state.db.call(|c| repo::get(c, task.id)).unwrap();
 
         let execution = execute(
@@ -465,7 +556,7 @@ mod tests {
         let mut llm = FakeLanguageModel::replying(&["a", "b"]);
         llm.delay = Duration::from_millis(200);
         let state = state(llm).await;
-        let task = tasks::create(&state, every_4_hours(None)).unwrap();
+        let task = tasks::create(&state, every_4_hours(None)).await.unwrap();
 
         tasks::run_now(&state, task.id).unwrap();
         assert!(matches!(

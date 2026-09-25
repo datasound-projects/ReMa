@@ -5,6 +5,7 @@
 //! hold the lock only for the duration of `Database::call`.
 
 pub mod conversations;
+pub mod jobs;
 pub mod providers;
 pub mod tasks;
 
@@ -18,7 +19,10 @@ use rusqlite::Connection;
 use crate::error::{AppError, AppResult};
 
 /// Ordered schema migrations. Never edit a shipped migration; append a new one.
-const MIGRATIONS: &[&str] = &[include_str!("migrations/0001_initial.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("migrations/0001_initial.sql"),
+    include_str!("migrations/0002_google_jobs.sql"),
+];
 
 #[derive(Clone)]
 pub struct Database {

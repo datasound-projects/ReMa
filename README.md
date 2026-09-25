@@ -4,12 +4,13 @@
 
 Rust owns application state, persistence, scheduling, validation, provider configuration and execution. LLMs are used only to reason about prompts and write the responses.
 
-## What V1 does
+## What ReMa does
 
 - **Chat**: a general-purpose AI chat with streaming responses, Stop, Retry, Copy, Markdown (code, lists, tables, links) and persistent conversation history ("Recents").
 - **Models**: OpenAI, Anthropic, Google Gemini, and any OpenAI-compatible endpoint (Ollama, LM Studio, vLLM, …). Pick the model in the chat composer.
 - **Scheduled Tasks**: schedule the prompt you are writing, straight from the composer. Supports one-time, daily, every N days, selected weekdays, and intervals of 15 minutes or more. A task can end on a date or after N runs. You can edit, pause, resume, delete or run tasks now, and each task keeps its run history with results.
-- **Settings**: connect providers, choose which models appear in the chat, and set the default model.
+- **Settings**: connect providers, choose which models appear in the chat, and set the default model. Connect Google Workspace (Gmail and Calendar) with one sign-in.
+- **Job applications (Gmail)**: a scheduled task type that finds job-application emails, keeps one record per application (Confirmed, Application in Process, Needs Your Action, Upcoming Interview, Rejected), and shows an overview table in the task history. It can add confirmed interviews to Google Calendar and report calendar conflicts.
 
 ## Architecture
 
@@ -23,8 +24,10 @@ Generated typed IPC         src/generated/bindings.ts (from Rust, via tauri-spec
 Thin Tauri commands         src-tauri/src/commands
       ↓
 Rust services               src-tauri/src/services   (chat, providers, tasks, scheduler, schedule)
+                            src-tauri/src/jobs       (job-application workflow, run by the scheduler)
       ↓
 Persistence / providers     src-tauri/src/db (SQLite) · src-tauri/src/llm (adapters) · src-tauri/src/secrets (OS keychain)
+Integrations                src-tauri/src/integrations/google (OAuth, Gmail tool, Calendar tool)
 ```
 
 Rules:
@@ -37,8 +40,38 @@ Rules:
 ## Data and credentials
 
 - **Database**: SQLite at `<app data dir>/rema.db`. On macOS that is `~/Library/Application Support/cloud.datasound.rema/`. Schema changes are versioned migrations in `src-tauri/src/db/migrations/`.
-- **Credentials**: API keys are stored in the operating system's credential store: macOS Keychain, Windows Credential Manager, or Secret Service on Linux. They never go in the database, config files or the frontend. The UI can only save, replace or remove a key.
+- **Credentials**: API keys and Google OAuth tokens are stored in the operating system's credential store: macOS Keychain, Windows Credential Manager, or Secret Service on Linux. They never go in the database, config files or the frontend. The UI can only save, replace or remove a key.
 - **Authentication**: API keys for OpenAI, Anthropic and Gemini. OpenAI-compatible endpoints take an optional key. None of the three cloud providers offers an official OAuth flow that a third-party desktop app can use for their model APIs without its own registered OAuth client. The credential model already supports OAuth tokens (with expiry), so an official flow can be added without changing chat or scheduler code.
+
+## Google Workspace
+
+**Connecting.** ReMa uses Google's official OAuth 2.0 flow for installed apps: authorization code with PKCE (S256), a random `state`, and a one-time loopback redirect (`http://127.0.0.1:<random port>`). The browser opens Google's consent page, and ReMa exchanges the code in Rust. The access and refresh tokens go to the OS keychain and are refreshed automatically. If Google revokes access, Settings shows "Reconnect needed". **Disconnect** revokes the grant at Google and deletes the tokens. Tokens never reach SQLite, config files, the frontend or a model.
+
+**OAuth client.** Google requires every app to have its own OAuth client. Create one of type **Desktop app** in Google Cloud Console (APIs & Services → Credentials), enable the Gmail API and the Google Calendar API, and enter the client ID and secret in Settings → Google Workspace. The secret is stored in the keychain. A build can also embed a client with `REMA_GOOGLE_CLIENT_ID` / `REMA_GOOGLE_CLIENT_SECRET`.
+
+**Scopes.** ReMa asks only for the services that are enabled:
+
+- `gmail.readonly`: read-only mail access.
+- `calendar.events`: read events to find conflicts, and create or update interview events.
+- `openid email`: shows which account is connected.
+
+**Job-application runs.** Each run works in this order:
+
+1. Rust searches Gmail with a fixed query. The window is the lookback, extended back to the last successful run.
+2. Rust skips emails that earlier runs already handled.
+3. The model sees only the sender, subject and a short snippet of each new candidate, and picks the job-related ones.
+4. Only those emails are read in full (truncated). The model returns JSON, and Rust validates it before storing anything.
+
+Applications are matched deterministically, by Gmail thread, reference number, company plus role, or company domain, so repeated emails update one record.
+
+**Calendar.** Only confirmed interviews become events, and only when the email itself states the date, start time, end time or duration, and time zone. The model must quote the email, and Rust checks the quote. Anything missing or ambiguous is marked Needs Your Action and nothing is written.
+
+Events are idempotent. The event id is stored, and each event also carries a private `remaInterviewId` property. A content hash skips unchanged events.
+
+- A reschedule updates the same event.
+- A cancellation keeps the event, renamed "Cancelled: …" and marked free, and the change is recorded in the interview history.
+- Events the user deleted are not recreated.
+- Conflicts with busy events are reported. ReMa never moves an event.
 
 ## Scheduler behaviour
 
@@ -89,8 +122,8 @@ rema/
 │   ├── components/
 │   │   ├── layout/               # AppShell, Sidebar, PageContainer
 │   │   ├── chat/                 # Composer, MessageList, Markdown, ModelSelector, ConversationList
-│   │   ├── tasks/                # TaskDialog, TaskDetail, TaskActions, TaskStatus
-│   │   ├── settings/             # Provider and endpoint rows
+│   │   ├── tasks/                # TaskDialog, TaskDetail, JobReport, TaskActions, TaskStatus
+│   │   ├── settings/             # Provider and endpoint rows, Google Workspace section
 │   │   └── ui/                   # Menu, Dialog, IconButton, StatusIndicator, BrandMark
 │   ├── hooks/                    # useAsyncData, useChat, useTasks, useModelCatalog, …
 │   ├── services/                 # ipc.ts (callBackend, ApiError), events.ts, one service per area
@@ -103,6 +136,8 @@ rema/
     ├── ipc.rs                    # Command/event registration + bindings export
     ├── commands/                 # Thin Tauri commands
     ├── services/                 # chat, providers, tasks, scheduler, schedule (pure math), system
+    ├── jobs/                     # Job-application workflow: extract, interviews, applications, calendar_sync, report
+    ├── integrations/google/      # OAuth (PKCE, refresh, revoke), Gmail and Calendar tools
     ├── llm/                      # LanguageModel trait, SSE, HTTP, OpenAI/Anthropic/Gemini adapters
     ├── db/                       # SQLite connection, migrations, repositories
     ├── secrets.rs                # OS credential store

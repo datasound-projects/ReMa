@@ -2,6 +2,7 @@ import { useState } from 'react';
 
 import { PlusIcon } from '../components/icons';
 import { PageContainer } from '../components/layout/PageContainer';
+import { GoogleSection } from '../components/settings/GoogleSection';
 import { CloudProviderRow, CustomEndpointRow } from '../components/settings/ProviderRows';
 import { StatusIndicator } from '../components/ui/StatusIndicator';
 import { useAppStatus } from '../hooks/useAppStatus';
@@ -95,6 +96,8 @@ export function SettingsPage() {
         </div>
         {error && <p className="form-error">{error}</p>}
       </section>
+
+      <GoogleSection />
 
       <section className="settings-section" aria-labelledby="about-heading">
         <h2 id="about-heading" className="section-title">

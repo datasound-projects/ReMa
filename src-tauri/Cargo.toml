@@ -28,14 +28,18 @@ specta-typescript = "=0.0.12"
 # Persistence
 rusqlite = { version = "0.40", features = ["bundled"] }
 # LLM providers (HTTP + streaming)
-reqwest = { version = "0.13", default-features = false, features = ["native-tls", "http2", "json", "query", "stream", "system-proxy"] }
+reqwest = { version = "0.13", default-features = false, features = ["native-tls", "http2", "json", "query", "form", "stream", "system-proxy"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
-tokio = { version = "1", features = ["sync", "time", "macros", "rt"] }
+tokio = { version = "1", features = ["sync", "time", "macros", "rt", "net", "io-util"] }
 tokio-util = "0.7"
 # Scheduling (timezone-aware date math)
 jiff = "0.2"
 # Secure credential storage (macOS Keychain, Windows Credential Manager, Secret Service)
 keyring = "4"
+# Google OAuth (PKCE) and API payloads
+base64 = "0.22"
+sha2 = "0.10"
+getrandom = "0.3"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util"] }
