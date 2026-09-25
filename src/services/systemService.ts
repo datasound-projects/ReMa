@@ -1,6 +1,8 @@
-import type { AppStatus } from '../types/system';
-import { invokeCommand } from './ipc';
+import { commands, type AppStatus } from '../generated/bindings';
+import { callBackend } from './ipc';
+
+export type { AppStatus, BackendStatus } from '../generated/bindings';
 
 export function getAppStatus(): Promise<AppStatus> {
-  return invokeCommand('get_app_status');
+  return callBackend(() => commands.getAppStatus());
 }

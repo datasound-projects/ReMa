@@ -20,10 +20,8 @@ body {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
-  /* Desktop app: no rubber-banding or accidental text selection of chrome. */
+  /* Desktop app: no rubber-banding when scrolling past the edges. */
   overscroll-behavior: none;
-  user-select: none;
-  cursor: default;
 }
 
 h1,
@@ -50,8 +48,8 @@ svg {
   box-shadow: var(--focus-ring);
 }
 
-/* Selectable content opts back in explicitly. */
-.selectable {
-  user-select: text;
-  cursor: auto;
+/* Controls are not text. Content stays selectable; chrome opts out in layout.css. */
+button {
+  -webkit-user-select: none;
+  user-select: none;
 }

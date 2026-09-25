@@ -1,14 +1,14 @@
 import { PageContainer } from '../components/layout/PageContainer';
 import { StatusIndicator, type StatusTone } from '../components/ui/StatusIndicator';
 import { useAppStatus } from '../hooks/useAppStatus';
-import type { BackendStatus } from '../types/system';
+import type { BackendStatus } from '../services/systemService';
 
 const BACKEND_STATUS_LABELS: Record<BackendStatus, string> = {
   ready: 'Ready',
 };
 
 export function HomePage() {
-  const { state, refresh } = useAppStatus();
+  const { state, retry } = useAppStatus();
 
   let tone: StatusTone;
   let label: string;
@@ -39,7 +39,7 @@ export function HomePage() {
           <div className="info-list__row">
             <dt>Backend</dt>
             <dd>
-              <StatusIndicator tone={tone} label={label} />
+              <StatusIndicator tone={tone} label={label} live />
             </dd>
           </div>
           <div className="info-list__row">
@@ -49,8 +49,8 @@ export function HomePage() {
         </dl>
         {state.status === 'error' && (
           <div className="panel__footer">
-            <p className="panel__message selectable">{state.error.message}</p>
-            <button type="button" className="button button--secondary" onClick={refresh}>
+            <p className="panel__message">{state.error.message}</p>
+            <button type="button" className="button button--secondary" onClick={retry}>
               Retry
             </button>
           </div>

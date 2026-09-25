@@ -9,7 +9,9 @@ ReMa is built one working feature at a time. This repository currently holds the
 ```text
 Frontend UI            React components and pages (src/pages, src/components)
     ↓
-Frontend service layer typed calls to the backend (src/services)
+Hooks / services       data loading and backend calls (src/hooks, src/services)
+    ↓
+Generated bindings     typed IPC functions generated from Rust (src/generated)
     ↓
 Tauri commands         thin IPC adapters (src-tauri/src/commands)
     ↓
@@ -23,7 +25,7 @@ Principles:
 - **Deterministic core.** Data, filters, state, workflows, ranking and UI behavior live in Rust services.
 - **LLMs only where semantic reasoning helps.** They will call the core through explicit, structured tools and never control the whole app.
 - **Thin edges.** React components never call `invoke` directly, and Tauri commands never contain business logic.
-- **One typed contract.** Rust models serialize to JSON that matches the TypeScript types in `src/types`.
+- **Rust is the source of truth.** IPC types and command functions are generated from Rust by `tauri-specta`; the frontend never hand-writes copies of them.
 
 ## Tech stack
 
@@ -55,7 +57,9 @@ The first run compiles the Rust dependencies and takes a few minutes. Later runs
 | `pnpm tauri build`       | Build an optimized, bundled release of the app            |
 | `pnpm build`             | Typecheck and build the frontend only                     |
 | `pnpm typecheck`         | Typecheck the frontend                                    |
-| `pnpm test:rust`         | Run the Rust unit tests                                   |
+| `pnpm lint`              | Lint the frontend with oxlint                             |
+| `pnpm test:rust`         | Run the Rust unit tests (fails if bindings are stale)     |
+| `pnpm bindings`          | Regenerate `src/generated/bindings.ts` from Rust          |
 | `pnpm dev`               | Frontend only, in a browser (backend shows "Unavailable") |
 
 ## Project structure
@@ -70,21 +74,24 @@ rema/
 │   │   ├── ui/                  # StatusIndicator, BrandMark
 │   │   └── icons.tsx            # Inline SVG icons
 │   ├── pages/                   # One component per sidebar page
-│   ├── services/                # Backend access: ipc.ts (typed invoke) + feature services
-│   ├── hooks/                   # React hooks that bind services to UI state
-│   ├── types/                   # Shared TS types, including the command contract
+│   ├── generated/               # bindings.ts, generated from Rust (do not edit)
+│   ├── services/                # ipc.ts (callBackend, ApiError) + feature services
+│   ├── hooks/                   # useAsyncData (loading/success/error/retry) + feature hooks
+│   ├── types/                   # Shared frontend-only TS types
 │   ├── styles/                  # tokens.css → base.css → layout.css → components.css
 │   └── assets/                  # rema-mark.svg (also the source of the app icons)
 │
 ├── src-tauri/                   # Backend (Rust + Tauri)
 │   ├── src/
 │   │   ├── main.rs              # Desktop entry point; calls rema_lib::run()
-│   │   ├── lib.rs               # App builder: state, command registration
+│   │   ├── lib.rs               # App builder: state, IPC handler
+│   │   ├── ipc.rs               # Command list + TypeScript bindings export
 │   │   ├── commands/            # Thin #[tauri::command] adapters
 │   │   ├── services/            # Business logic (unit-tested)
 │   │   ├── models/              # Serializable data types
 │   │   ├── state.rs             # Shared AppState managed by Tauri
-│   │   └── error.rs             # AppError → { code, message } for the UI
+│   │   └── error.rs             # AppError → { code, message } (validation, not_found, io,
+│   │                            #   database, configuration, internal)
 │   ├── capabilities/            # Tauri permission sets
 │   ├── icons/                   # Generated app icons
 │   ├── Cargo.toml
@@ -103,13 +110,19 @@ The Rust core is a library (`rema_lib`) with a thin binary on top, so services c
 
 1. Add the data types to `src-tauri/src/models/`.
 2. Add the logic to `src-tauri/src/services/`, with unit tests.
-3. Add a thin `async` command to `src-tauri/src/commands/` that returns `AppResult<T>`.
-4. Register the command in `tauri::generate_handler![...]` in `src-tauri/src/lib.rs`.
-5. Mirror the types in `src/types/` and add the command to `CommandMap` in `src/types/api.ts`.
-6. Expose it through a function in `src/services/`, and use it from a hook or page.
+   Models derive `serde::Serialize` and `specta::Type`.
+3. Add a thin `async` command to `src-tauri/src/commands/` with `#[tauri::command]` and `#[specta::specta]`, returning `AppResult<T>`.
+4. Register it in `collect_commands![...]` in `src-tauri/src/ipc.rs`.
+5. Run `pnpm bindings` (or just `pnpm tauri dev`) to regenerate `src/generated/bindings.ts`, and commit it.
+6. Wrap it in a service function: `callBackend(() => commands.myCommand(...))`.
+7. Load it in a hook with `useAsyncData(myServiceFunction)` and use the hook from a page.
 
 **A new page:** create it in `src/pages/`, then add one entry to `PAGES` in `src/app/pages.ts`. The sidebar picks it up automatically.
 
+## Window chrome
+
+On macOS the window uses Tauri's overlay title bar (`titleBarStyle: "Overlay"`, hidden title), so the native traffic lights sit inside ReMa's header, which leaves room for them. The header is the window drag area (`data-tauri-drag-region="deep"`); buttons and links placed in it stay clickable. Windows and Linux keep their normal native title bars.
+
 ## Styling
 
-All colors, type, spacing, radii and shadows are CSS custom properties in `src/styles/tokens.css`. The palette follows the ReMa website: LinkedIn-style blue (`#0A66C2`), white surfaces, soft-gray backgrounds and dark text, with subtle borders and restrained shadows. Components use these tokens and never hard-code values.
+All colors, type, spacing, radii and shadows are CSS custom properties in `src/styles/tokens.css`. The palette follows the ReMa website: LinkedIn-style blue (`#0A66C2`), white surfaces, soft-gray backgrounds and dark text, with subtle borders and restrained shadows. Components use these tokens and never hard-code values. Text is selectable by default; only app chrome (header, sidebar) and buttons opt out.

@@ -1,12 +1,9 @@
-import { invoke, isTauri, type InvokeArgs } from '@tauri-apps/api/core';
+import { isTauri } from '@tauri-apps/api/core';
 
-import type {
-  ApiErrorCode,
-  ApiErrorPayload,
-  CommandArgs,
-  CommandName,
-  CommandResult,
-} from '../types/api';
+import type { ErrorCode, ErrorPayload } from '../generated/bindings';
+
+/** Backend error codes (generated from Rust) plus frontend-side failures. */
+export type ApiErrorCode = ErrorCode | 'backend_unavailable' | 'unknown';
 
 /** Normalized error for every failed backend call. */
 export class ApiError extends Error {
@@ -19,32 +16,31 @@ export class ApiError extends Error {
   }
 }
 
-function isApiErrorPayload(value: unknown): value is ApiErrorPayload {
+function isErrorPayload(value: unknown): value is ErrorPayload {
   return (
     typeof value === 'object' &&
     value !== null &&
-    typeof (value as ApiErrorPayload).code === 'string' &&
-    typeof (value as ApiErrorPayload).message === 'string'
+    typeof (value as ErrorPayload).code === 'string' &&
+    typeof (value as ErrorPayload).message === 'string'
   );
 }
 
 /** Converts anything thrown by a backend call into an `ApiError`. */
 export function toApiError(error: unknown): ApiError {
   if (error instanceof ApiError) return error;
-  if (isApiErrorPayload(error)) return new ApiError(error.code, error.message);
+  if (isErrorPayload(error)) return new ApiError(error.code, error.message);
   if (typeof error === 'string') return new ApiError('unknown', error);
   if (error instanceof Error) return new ApiError('unknown', error.message);
   return new ApiError('unknown', 'Unexpected backend error');
 }
 
 /**
- * Typed wrapper around Tauri's `invoke`. The only place in the frontend that
- * talks to the Rust backend directly; feature services build on top of it.
+ * Runs a generated command binding with consistent error handling.
+ * Feature services wrap every backend call in this:
+ *
+ *   callBackend(() => commands.getAppStatus())
  */
-export async function invokeCommand<C extends CommandName>(
-  command: C,
-  ...args: CommandArgs<C> extends undefined ? [] : [CommandArgs<C>]
-): Promise<CommandResult<C>> {
+export async function callBackend<T>(call: () => Promise<T>): Promise<T> {
   if (!isTauri()) {
     throw new ApiError(
       'backend_unavailable',
@@ -53,7 +49,7 @@ export async function invokeCommand<C extends CommandName>(
   }
 
   try {
-    return await invoke<CommandResult<C>>(command, args[0] as InvokeArgs | undefined);
+    return await call();
   } catch (error) {
     throw toApiError(error);
   }

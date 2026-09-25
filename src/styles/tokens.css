@@ -61,6 +61,8 @@
 
   /* Layout */
   --topbar-height: 52px;
+  /* Matches trafficLightPosition.x (18px) + the three buttons + spacing. */
+  --traffic-light-inset: 88px;
   --sidebar-width: 232px;
   --page-max-width: 880px;
 

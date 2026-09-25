@@ -11,7 +11,8 @@ interface AppShellProps {
 export function AppShell({ sidebar, children }: AppShellProps) {
   return (
     <div className="app-shell">
-      <header className="app-shell__topbar">
+      {/* The whole header moves the window; buttons and links inside stay clickable. */}
+      <header className="app-shell__topbar" data-tauri-drag-region="deep">
         <div className="app-shell__brand">
           <BrandMark />
           <span className="app-shell__wordmark">ReMa</span>
