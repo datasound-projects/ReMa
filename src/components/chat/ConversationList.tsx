@@ -22,7 +22,7 @@ export function ConversationList({
   return (
     <section className="recents" aria-label="Recent chats">
       <div className="recents__header">
-        <span className="recents__label">Recents</span>
+        <h2 className="eyebrow">Recents</h2>
         <IconButton label="New chat" className="icon-button--small" onClick={onNew}>
           <PlusIcon />
         </IconButton>

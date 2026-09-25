@@ -29,6 +29,7 @@ import {
   RestoreIcon,
   SortIcon,
 } from '../icons';
+import { EmptyState } from '../ui/EmptyState';
 import { IconButton } from '../ui/IconButton';
 import { FilterEditor, RankingEditor, ScopeEditor } from './Controls';
 import { JobsTab } from './JobsTab';
@@ -245,14 +246,10 @@ function Dashboard({ prefs }: { prefs: AnalyticsPreferences }) {
       <div className="analytics__body" role="tabpanel">
         {overview.error && <p className="form-error">{overview.error}</p>}
         {status && status.runs === 0 ? (
-          <div className="a-empty">
-            <ChartIcon className="a-empty__icon" />
-            <p>No job searches yet.</p>
-            <p className="a-muted">
-              Ask Chat for jobs (e.g. “Find remote AI engineer jobs in Austria”) or schedule a job-search task. Every
-              result with a job table appears here automatically.
-            </p>
-          </div>
+          <EmptyState icon={<ChartIcon />} title="No job searches yet">
+            Ask Chat for jobs (e.g. “Find remote AI engineer jobs in Austria”) or schedule a job-search task. Every
+            result with a job table appears here automatically.
+          </EmptyState>
         ) : (
           <>
             {tab === 'jobs' && overview.data && (

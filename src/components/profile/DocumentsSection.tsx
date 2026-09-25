@@ -16,6 +16,7 @@ import {
 } from '../../services/profileService';
 import { ChevronDownIcon, ChevronUpIcon, FileIcon, PlusIcon, TrashIcon, UploadIcon } from '../icons';
 import { IconButton } from '../ui/IconButton';
+import { SECTION_IDS } from '../../lib/profileSections';
 import { Section } from './ProfileSections';
 
 const KIND_LABELS: Record<DocumentKind, string> = {
@@ -52,7 +53,11 @@ export function DocumentsSection({
 }) {
   const action = useAction();
   return (
-    <Section title="Documents" hint="CVs, certificates and portfolios, stored on this computer.">
+    <Section
+      id={SECTION_IDS.documents}
+      title="Documents"
+      hint="CVs, certificates and portfolios, stored on this computer. Import reads a CV into your Profile."
+    >
       {documents.length === 0 && <p className="entries__empty">No documents yet.</p>}
       {documents.map((doc) => (
         <DocumentRow key={doc.id} document={doc} onImport={onImport} importing={importing === doc.id} />
@@ -195,12 +200,16 @@ export function CustomFieldsSection({
     });
 
   return (
-    <Section title="Custom fields" hint="Anything else: portfolio, research profile, certificates…">
+    <Section
+      id={SECTION_IDS.custom}
+      title="Custom fields"
+      hint="Anything else an application may ask for: portfolio, research profile, certificates…"
+    >
       {fields.length === 0 && <p className="entries__empty">No custom fields yet.</p>}
       {fields.map((field, index) => (
         <div key={index} className="form__row profile-row custom-field">
           <label className="field custom-field__label">
-            <span className="field__label">Name</span>
+            <span className={index > 0 ? 'sr-only' : 'field__label'}>Name</span>
             <input
               className="input"
               placeholder="Portfolio"
@@ -209,7 +218,7 @@ export function CustomFieldsSection({
             />
           </label>
           <label className="field custom-field__kind">
-            <span className="field__label">Type</span>
+            <span className={index > 0 ? 'sr-only' : 'field__label'}>Type</span>
             <select
               className="input"
               value={field.kind}
@@ -223,7 +232,7 @@ export function CustomFieldsSection({
             </select>
           </label>
           <label className="field field--grow">
-            <span className="field__label">Value</span>
+            <span className={index > 0 ? 'sr-only' : 'field__label'}>Value</span>
             {field.kind === 'file' ? (
               <select
                 className="input"

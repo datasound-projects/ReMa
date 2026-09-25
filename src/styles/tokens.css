@@ -1,49 +1,85 @@
 /*
- * Design tokens — the single source for colors, type, spacing and depth.
- * Palette follows the ReMa website: LinkedIn-style blue on white and soft gray.
+ * Design tokens — the single source for colors, type, spacing, depth and motion.
+ *
+ * Palette: the ReMa website — LinkedIn blue on white surfaces over a calm,
+ * warm light-gray canvas, with charcoal text. Text colors meet WCAG AA on
+ * white and on the canvas (secondary 8.2:1, tertiary 5.3:1).
  */
 :root {
-  /* Brand */
+  color-scheme: light;
+
+  /* Brand — LinkedIn blue */
   --color-brand: #0a66c2;
   --color-brand-hover: #004182;
+  --color-brand-pressed: #00336a;
   --color-brand-bright: #378fe9;
-  --color-brand-subtle: #e8f1fb;
-  --color-brand-subtle-border: #cfe2f7;
+  --color-brand-subtle: #eaf2fb;
+  --color-brand-subtle-hover: #dde9f8;
+  --color-brand-subtle-border: #c7dcf3;
+  --color-brand-ring: rgba(10, 102, 194, 0.3);
 
   /* Neutrals */
   --color-bg: #f4f4f2;
   --color-surface: #ffffff;
-  --color-surface-sunken: #f9f9f8;
-  --color-hover: rgba(0, 0, 0, 0.045);
-  --color-border: #e5e4e0;
-  --color-border-strong: #d4d3ce;
+  --color-surface-sunken: #f8f8f7;
+  --color-surface-muted: #f1f1ef;
+  --color-hover: rgba(24, 24, 20, 0.05);
+  --color-pressed: rgba(24, 24, 20, 0.09);
+  --color-border: #e4e3df;
+  --color-border-strong: #d2d1cb;
+  --color-border-input: #c9c8c2;
+  --color-border-input-hover: #aeada6;
   --color-text: #191919;
-  --color-text-secondary: #5c5c59;
-  --color-text-tertiary: #8b8b87;
+  --color-text-secondary: #4f4f4c;
+  --color-text-tertiary: #6b6b67;
+  /* Placeholders, disabled text and decoration only. */
+  --color-text-quiet: #8a8a85;
+  --color-on-brand: #ffffff;
 
-  /* Status */
+  /* Status — each ships with an icon or a label, never color alone. */
   --color-success: #057642;
-  --color-warning: #b26a00;
+  --color-success-subtle: #e8f4ed;
+  --color-warning: #8f5a00;
+  --color-warning-subtle: #fcf3e3;
   --color-danger: #cc1016;
-  --color-danger-subtle: #fdf1f1;
-  --color-danger-border: #f3cfcf;
+  --color-danger-hover: #a80d12;
+  --color-danger-subtle: #fdf0f0;
+  --color-danger-border: #f2cdcd;
 
   /* Chat */
-  --color-user-bubble: #edf3fa;
+  --color-user-bubble: #eaf2fb;
   --color-code-bg: #f5f5f3;
 
-  /* Typography */
+  /* Typography — native on macOS (SF Pro) and Windows (Segoe UI), Inter elsewhere. */
   --font-sans:
-    -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI Variable', 'Segoe UI', Inter,
-    Roboto, 'Helvetica Neue', Arial, sans-serif;
+    -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI Variable Text', 'Segoe UI',
+    'Inter Variable', Inter, Roboto, 'Helvetica Neue', Arial, sans-serif;
   --font-mono:
-    ui-monospace, 'SF Mono', SFMono-Regular, Menlo, 'Cascadia Mono', Consolas, 'Liberation Mono',
-    monospace;
-  --text-xs: 11px;
-  --text-sm: 13px;
-  --text-md: 14px;
-  --text-lg: 16px;
-  --text-display: 40px;
+    ui-monospace, 'SF Mono', SFMono-Regular, Menlo, 'Cascadia Mono', Consolas, 'DejaVu Sans Mono',
+    'Liberation Mono', monospace;
+
+  --text-2xs: 11px; /* eyebrows (mono, uppercase) */
+  --text-xs: 12px; /* meta, table headers, badges */
+  --text-sm: 13px; /* secondary text, controls, table values */
+  --text-md: 14px; /* body */
+  --text-lg: 16px; /* card and panel titles */
+  --text-xl: 20px; /* dialog titles */
+  --text-2xl: 28px; /* page titles */
+  --text-display: 34px; /* the chat greeting */
+
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  --leading-tight: 1.2;
+  --leading-snug: 1.35;
+  --leading-normal: 1.5;
+  --leading-relaxed: 1.65;
+
+  --tracking-tight: -0.02em;
+  --tracking-display: -0.032em;
+  --tracking-eyebrow: 0.12em;
 
   /* Spacing (4px grid) */
   --space-1: 4px;
@@ -56,15 +92,29 @@
   --space-10: 40px;
   --space-12: 48px;
 
-  /* Shape & depth */
+  /* Control heights */
+  --control-sm: 28px;
+  --control-md: 32px;
+  --control-lg: 36px;
+
+  /* Shape */
+  --radius-xs: 4px;
   --radius-sm: 6px;
   --radius-md: 8px;
-  --radius-lg: 14px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
   --radius-pill: 999px;
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
-  --shadow-md: 0 1px 2px rgba(0, 0, 0, 0.04), 0 4px 16px rgba(0, 0, 0, 0.04);
-  --shadow-lg: 0 2px 6px rgba(0, 0, 0, 0.06), 0 12px 32px rgba(0, 0, 0, 0.1);
-  --focus-ring: 0 0 0 3px rgba(10, 102, 194, 0.28);
+
+  /* Depth — restrained; borders carry most of the separation. */
+  --shadow-xs: 0 1px 1px rgba(24, 24, 20, 0.04);
+  --shadow-sm: 0 1px 2px rgba(24, 24, 20, 0.06);
+  --shadow-md: 0 1px 2px rgba(24, 24, 20, 0.04), 0 2px 8px rgba(24, 24, 20, 0.035);
+  --shadow-lg: 0 2px 6px rgba(24, 24, 20, 0.06), 0 12px 32px rgba(24, 24, 20, 0.12);
+  --shadow-xl: 0 4px 12px rgba(24, 24, 20, 0.08), 0 24px 56px rgba(24, 24, 20, 0.18);
+  --shadow-brand: 0 1px 2px rgba(10, 102, 194, 0.24), 0 2px 6px rgba(10, 102, 194, 0.16);
+  --focus-ring: 0 0 0 3px var(--color-brand-ring);
+  /* Buttons and other filled controls: a gap, then the ring. */
+  --focus-ring-offset: 0 0 0 2px var(--color-surface), 0 0 0 4px rgba(10, 102, 194, 0.6);
 
   /* Layout */
   --topbar-height: 52px;
@@ -72,8 +122,20 @@
   --traffic-light-inset: 88px;
   --sidebar-width: 232px;
   --page-max-width: 880px;
-  --thread-max-width: 760px;
+  --page-wide-max-width: 1040px;
+  --thread-max-width: 800px;
 
-  /* Motion */
-  --transition-fast: 120ms ease;
+  /* Motion — quick and quiet. */
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --duration-fast: 110ms;
+  --duration-base: 160ms;
+  --duration-slow: 220ms;
+  --transition-fast: var(--duration-fast) var(--ease-standard);
+  --transition-base: var(--duration-base) var(--ease-standard);
+
+  /* Layers */
+  --z-sticky: 5;
+  --z-toast: 30;
+  --z-popover: 50;
 }

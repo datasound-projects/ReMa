@@ -17,7 +17,8 @@ import type { ModelCatalog } from '../../services/providerService';
 import { runTaskNow, type ScheduledTask, type TaskExecution } from '../../services/taskService';
 import { AnalyzeButton } from '../analytics/AnalyzeButton';
 import { Markdown } from '../chat/Markdown';
-import { ChevronLeftIcon, ChevronRightIcon } from '../icons';
+import { ChevronLeftIcon, ChevronRightIcon, ClockIcon } from '../icons';
+import { EmptyState } from '../ui/EmptyState';
 import { JobReport } from './JobReport';
 import { StatusIndicator } from '../ui/StatusIndicator';
 import { TaskActions } from './TaskActions';
@@ -50,12 +51,16 @@ export function TaskDetail({ task, catalog, onBack, onEdit }: TaskDetailProps) {
         <header className="page__header">
           <div className="page__heading">
             <h1 className="page__title">{task.name}</h1>
-            <p className="page__subtitle task-meta">
+            <div className="meta-line">
               <span>{describeSchedule(task.schedule, task.startTime)}</span>
               <span>{modelName(catalog, task.model)}</span>
-              {task.nextRunAt !== null && <span>Next {formatDateTime(task.nextRunAt)}</span>}
+              {task.nextRunAt !== null && (
+                <span>
+                  <span className="meta-line__label">Next run</span> {formatDateTime(task.nextRunAt)}
+                </span>
+              )}
               <TaskStatusLabel task={task} />
-            </p>
+            </div>
           </div>
           <div className="page__actions">
             <button
@@ -79,30 +84,39 @@ export function TaskDetail({ task, catalog, onBack, onEdit }: TaskDetailProps) {
         )}
 
         {task.kind.type === 'job_applications' ? (
-          <section>
-            <h2 className="section-title">Job applications</h2>
+          <section className="section">
+            <h2 className="section__title">Job applications</h2>
             <p className="prompt-box">
-              {describeTaskKind(task.kind)}
-              {task.kind.detectConflicts && ' · Conflicts reported'}
-              {task.prompt && (
-                <>
-                  <br />
-                  {task.prompt}
-                </>
-              )}
+              <span className="prompt-box__meta">
+                {describeTaskKind(task.kind)}
+                {task.kind.detectConflicts && ' · Conflicts reported'}
+              </span>
+              {task.prompt || 'No extra instructions.'}
             </p>
           </section>
         ) : (
-          <section>
-            <h2 className="section-title">Prompt</h2>
+          <section className="section">
+            <h2 className="section__title">Prompt</h2>
             <p className="prompt-box">{task.prompt}</p>
           </section>
         )}
 
-        <section>
-          <h2 className="section-title">History</h2>
+        <section className="section">
+          <div className="section__head">
+            <div className="section__heading">
+              <h2 className="section__title">History</h2>
+              {executions.length > 0 && (
+                <p className="section__description">
+                  {executions.length === 1 ? '1 run' : `${executions.length} runs`}, newest first. Open a run
+                  to see its result.
+                </p>
+              )}
+            </div>
+          </div>
           {executions.length === 0 ? (
-            <p className="empty-note">No runs yet.</p>
+            <EmptyState icon={<ClockIcon />} title="No runs yet" framed compact>
+              Each run appears here with its result. Use Run now to try the task right away.
+            </EmptyState>
           ) : (
             <ul className="history">
               {executions.map((execution) => (

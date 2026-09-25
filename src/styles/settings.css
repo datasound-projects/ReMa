@@ -1,19 +1,16 @@
 /* ── Settings ──────────────────────────────────────────── */
 
-.settings-section {
-  display: flex;
-  flex-direction: column;
-}
-
-.settings-section + .settings-section {
-  margin-top: var(--space-6);
-}
-
+/* A provider, endpoint or Google account row with its forms. */
 .provider {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
   padding: var(--space-4) var(--space-5);
+}
+
+.provider--add {
+  padding-top: var(--space-2);
+  padding-bottom: var(--space-2);
 }
 
 .provider__row {
@@ -24,15 +21,15 @@
 }
 
 .provider__name {
-  min-width: 96px;
-  font-weight: 600;
+  min-width: 104px;
+  font-weight: var(--weight-semibold);
 }
 
 .provider__detail {
   min-width: 0;
   overflow: hidden;
   font-size: var(--text-sm);
-  color: var(--color-text-secondary);
+  color: var(--color-text-tertiary);
   white-space: nowrap;
   text-overflow: ellipsis;
 }
@@ -49,6 +46,46 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
+  animation: reveal var(--duration-base) var(--ease-out);
+}
+
+/* A single setting: what it is on the left, its control on the right. */
+.setting-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  min-height: 60px;
+  padding: var(--space-3) var(--space-5);
+}
+
+.setting-row--flush {
+  min-height: 0;
+  padding: 0;
+}
+
+.setting-row__text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.setting-row__label {
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text);
+}
+
+.setting-row__hint {
+  font-size: var(--text-sm);
+  line-height: var(--leading-snug);
+  color: var(--color-text-tertiary);
+}
+
+.setting-row__control {
+  min-width: 180px;
+  max-width: 280px;
 }
 
 .models__toggle {
@@ -56,22 +93,28 @@
   align-items: center;
   gap: var(--space-1);
   align-self: flex-start;
-  padding: 0;
+  height: 26px;
+  margin-left: calc(-1 * var(--space-2));
+  padding: 0 var(--space-2);
   border: none;
+  border-radius: var(--radius-sm);
   background: none;
   color: var(--color-text-secondary);
   font-size: var(--text-sm);
-  cursor: pointer;
+  transition:
+    background-color var(--transition-fast),
+    color var(--transition-fast);
 }
 
 .models__toggle:hover {
+  background: var(--color-hover);
   color: var(--color-text);
 }
 
 .models__chevron {
   width: 16px;
   height: 16px;
-  transition: transform var(--transition-fast);
+  transition: transform var(--transition-base);
 }
 
 .models__chevron--open {
@@ -82,6 +125,7 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
+  animation: reveal var(--duration-base) var(--ease-out);
 }
 
 .models__list {
@@ -95,29 +139,17 @@
   list-style: none;
 }
 
-.default-model {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  margin-top: var(--space-5);
-}
-
-.about {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  color: var(--color-text-secondary);
-}
-
-.about__sep {
-  color: var(--color-text-tertiary);
-}
-
-.settings-note {
-  margin-top: var(--space-3);
-}
-
 .google__client-link {
   align-self: flex-start;
   font-size: var(--text-sm);
+}
+
+@container (max-width: 720px) {
+  .setting-row {
+    flex-wrap: wrap;
+  }
+
+  .setting-row__control {
+    max-width: none;
+  }
 }

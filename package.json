@@ -18,6 +18,7 @@
     "bindings": "cargo test --manifest-path src-tauri/Cargo.toml --lib ipc::tests::export -- --ignored"
   },
   "dependencies": {
+    "@fontsource-variable/inter": "^5.3.0",
     "@tauri-apps/api": "^2.11.1",
     "chart.js": "^4.5.1",
     "marked": "^18.0.14",

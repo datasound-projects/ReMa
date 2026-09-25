@@ -1,11 +1,12 @@
 import { useState } from 'react';
 
-import { PlusIcon } from '../components/icons';
+import { ClockIcon, PlusIcon } from '../components/icons';
 import { PageContainer } from '../components/layout/PageContainer';
 import { TaskActions } from '../components/tasks/TaskActions';
 import { TaskDetail } from '../components/tasks/TaskDetail';
 import { TaskDialog } from '../components/tasks/TaskDialog';
 import { TaskStatusLabel } from '../components/tasks/TaskStatus';
+import { EmptyState, LoadingState } from '../components/ui/EmptyState';
 import { dataOr } from '../hooks/useAsyncData';
 import { useModelCatalog } from '../hooks/useModelCatalog';
 import { useSystemTimezone, useTasks } from '../hooks/useTasks';
@@ -65,16 +66,29 @@ export function ScheduledTasksPage() {
         </p>
       )}
       {tasks.state.status === 'error' ? (
-        <div className="empty-note">
+        <p className="notice notice--danger" role="alert">
           {tasks.state.error.message}{' '}
           <button type="button" className="link-button" onClick={tasks.retry}>
             Retry
           </button>
-        </div>
-      ) : tasks.state.status === 'success' && list.length === 0 ? (
-        <p className="empty-note">
-          No scheduled tasks yet. Write a prompt in Chat and choose <strong>Schedule</strong>.
         </p>
+      ) : tasks.state.status === 'loading' ? (
+        <LoadingState label="Loading tasks…" />
+      ) : list.length === 0 ? (
+        <EmptyState
+          icon={<ClockIcon />}
+          title="No scheduled tasks yet"
+          framed
+          actions={
+            <button type="button" className="button button--primary" onClick={() => setEditing('new')}>
+              <PlusIcon className="button__icon" />
+              New task
+            </button>
+          }
+        >
+          Let ReMa repeat a prompt or check your job-application emails on a schedule. You can also write a
+          prompt in Chat and choose Schedule.
+        </EmptyState>
       ) : (
         <div className="task-table" role="table" aria-label="Scheduled tasks">
           <div className="task-table__head" role="row">

@@ -206,10 +206,10 @@ rema/
 │   │   ├── analytics/            # AnalyticsPanel, scope/filter/ranking editors, Jobs, Skill gap,
 │   │   │                         # Requirements and Learning tabs, charts, Analyze button
 │   │   ├── chat/                 # Composer, MessageList, Markdown, ModelSelector, ConversationList
-│   │   ├── profile/              # Profile sections, documents, custom fields, import review
+│   │   ├── profile/              # Overview, sections, documents, custom fields, import review
 │   │   ├── tasks/                # TaskDialog, TaskDetail, JobReport, TaskActions, TaskStatus
 │   │   ├── settings/             # Provider and endpoint rows, Google Workspace section
-│   │   └── ui/                   # Menu, Dialog, IconButton, StatusIndicator, BrandMark
+│   │   └── ui/                   # Menu, Dialog, Switch, EmptyState, IconButton, StatusIndicator, BrandMark
 │   ├── hooks/                    # useAsyncData, useChat, useTasks, useProfile, useAutofill, …
 │   ├── services/                 # ipc.ts (callBackend, ApiError), events.ts, one service per area
 │   ├── generated/bindings.ts     # Generated from Rust (do not edit)
@@ -249,6 +249,15 @@ rema/
 
 On macOS the window uses Tauri's overlay title bar, so the traffic lights sit inside ReMa's header. The header is the window drag area; buttons placed in it stay clickable. Windows and Linux keep their native title bars.
 
-## Styling
+## Design system
 
-All colors, type, spacing, radii and shadows are CSS custom properties in `src/styles/tokens.css`. The palette uses LinkedIn-style blue (`#0A66C2`), white, soft gray and dark text, with subtle borders and restrained shadows.
+The look is defined once, in `src/styles/tokens.css`, and every stylesheet uses those tokens:
+
+- **Color**: LinkedIn blue (`#0A66C2`, hover `#004182`) for actions, selection and focus; white surfaces on a warm light-gray canvas (`#F4F4F2`); charcoal text. Secondary and meta text meet WCAG AA contrast on both surfaces. Status colors (success, warning, danger) always come with an icon or a label.
+- **Type**: the native system font (SF Pro on macOS, Segoe UI on Windows), with Inter bundled for other platforms (`@fontsource-variable/inter`). The scale: 28px page titles, 15px section titles, 14px body, 13px secondary text and controls, 12px meta, and 11px monospace uppercase eyebrows, a nod to the ReMa website.
+- **Space and shape**: a 4px grid; 28, 32 and 36px controls; 8px radius for inputs, 12px for cards, 16px for dialogs; pill buttons.
+- **Depth**: hairline borders carry separation; shadows stay light and are stronger only for popovers and dialogs.
+- **Motion**: 110–220ms with ease-out curves, used for hover and press states, popovers, dialogs, panels and page changes. Everything is off with "Reduce motion".
+- **Desktop conventions**: buttons keep the arrow cursor (only text links show the hand), and there is one focus ring for keyboard users everywhere. Thin scrollbars appear outside macOS, which keeps its native overlay scrollbars.
+
+Shared building blocks live in `src/styles/components.css` (buttons, inputs and styled native selects, switches, badges, menus, dialogs, data tables, empty and loading states) and `src/components/ui/` (`Dialog`, `Menu`, `Switch`, `EmptyState`, `StatusIndicator`, `IconButton`).

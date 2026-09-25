@@ -16,17 +16,21 @@ export function AutofillButton({ autofill, disabled }: { autofill: Autofill; dis
       type="button"
       className="autofill-button"
       disabled={disabled || autofill.running}
+      aria-label="ReMa Auto Fill"
       title="Fill this page's form with your Profile. ReMa never submits it."
       onClick={() => void autofill.run()}
     >
       <SparkleIcon className="button__icon" />
-      {autofill.running ? (
-        'Filling…'
-      ) : (
-        <span>
-          <span className="autofill-button__brand">ReMa </span>Auto Fill
-        </span>
-      )}
+      {/* The label steps aside in a narrow panel; the icon and tooltip remain. */}
+      <span className="autofill-button__label">
+        {autofill.running ? (
+          'Filling…'
+        ) : (
+          <>
+            <span className="autofill-button__brand">ReMa </span>Auto Fill
+          </>
+        )}
+      </span>
     </button>
   );
 }

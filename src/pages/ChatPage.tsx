@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { useNavigation } from '../app/navigation';
 import { Composer } from '../components/chat/Composer';
+import { BriefcaseIcon, ChartIcon, SearchIcon, SparkleIcon } from '../components/icons';
 import { MessageList } from '../components/chat/MessageList';
 import { TaskDialog } from '../components/tasks/TaskDialog';
 import { dataOr } from '../hooks/useAsyncData';
@@ -18,6 +19,14 @@ interface ChatPageProps {
 
 /** Sticks to the bottom while the user is near it. */
 const STICK_THRESHOLD = 80;
+
+/** Starting points on an empty chat; picking one only fills the composer. */
+const SUGGESTIONS = [
+  { icon: SearchIcon, text: 'Find senior AI engineering jobs in Vienna' },
+  { icon: ChartIcon, text: 'Which skills do data engineering roles ask for most?' },
+  { icon: SparkleIcon, text: 'Draft a short cover letter for a data engineer role' },
+  { icon: BriefcaseIcon, text: 'Help me prepare for a technical interview' },
+];
 
 export function ChatPage({ conversationId }: ChatPageProps) {
   const { navigate } = useNavigation();
@@ -54,6 +63,7 @@ export function ChatPage({ conversationId }: ChatPageProps) {
   const [schedulePrompt, setSchedulePrompt] = useState<string | null>(null);
   const [scheduled, setScheduled] = useState<ScheduledTask | null>(null);
   const [clearSignal, setClearSignal] = useState(0);
+  const [draft, setDraft] = useState<{ text: string; seq: number } | undefined>(undefined);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
@@ -88,6 +98,7 @@ export function ChatPage({ conversationId }: ChatPageProps) {
       }}
       onSchedule={setSchedulePrompt}
       clearSignal={clearSignal}
+      draft={draft}
       autoFocus
     />
   );
@@ -96,8 +107,26 @@ export function ChatPage({ conversationId }: ChatPageProps) {
     <div className={empty ? 'chat chat--empty' : 'chat'}>
       {empty ? (
         <div className="chat__welcome">
-          <h1 className="chat__greeting">What can ReMa help with?</h1>
+          <div className="chat__heading">
+            <h1 className="chat__greeting">What can ReMa help with?</h1>
+            <p className="chat__tagline">Search roles, compare them with your Profile, and plan your next step.</p>
+          </div>
           {composer}
+          {model && (
+            <div className="suggestions" aria-label="Suggestions">
+              {SUGGESTIONS.map(({ icon: Icon, text }) => (
+                <button
+                  key={text}
+                  type="button"
+                  className="suggestion"
+                  onClick={() => setDraft((d) => ({ text, seq: (d?.seq ?? 0) + 1 }))}
+                >
+                  <Icon aria-hidden="true" />
+                  {text}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       ) : (
         <>

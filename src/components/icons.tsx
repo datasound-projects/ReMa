@@ -302,3 +302,72 @@ export function DatabaseIcon(props: IconProps) {
     </Icon>
   );
 }
+
+export function SearchIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <circle cx="9" cy="9" r="5" />
+      <path d="m12.8 12.8 3.7 3.7" />
+    </Icon>
+  );
+}
+
+export function BriefcaseIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <rect x="3" y="6.5" width="14" height="10" rx="1.5" />
+      <path d="M7.5 6.5V5a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v1.5M3 11h14" />
+    </Icon>
+  );
+}
+
+export function LinkIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M8.5 11.5a3 3 0 0 0 4.2 0l2.5-2.5a3 3 0 0 0-4.2-4.2l-.8.8M11.5 8.5a3 3 0 0 0-4.2 0L4.8 11a3 3 0 0 0 4.2 4.2l.8-.8" />
+    </Icon>
+  );
+}
+
+export function LanguageIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M3.5 5.5h7M7 4v1.5c0 3-1.6 5.6-3.5 7M5 8.5c1 1.6 2.5 3 4 3.8M10.5 16.5l3-7 3 7M11.5 14.5h4" />
+    </Icon>
+  );
+}
+
+export function SchoolIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M2.5 8 10 4.5 17.5 8 10 11.5 2.5 8ZM5.5 9.5v3.5c1.2 1.3 2.8 2 4.5 2s3.3-.7 4.5-2V9.5M17.5 8v4" />
+    </Icon>
+  );
+}
+
+export function TagIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M3.5 4.5v5l6.8 6.8a1 1 0 0 0 1.4 0l4.6-4.6a1 1 0 0 0 0-1.4L9.5 3.5h-5a1 1 0 0 0-1 1Z" />
+      <circle cx="7" cy="7" r="1" />
+    </Icon>
+  );
+}
+
+export function KeyIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <circle cx="7" cy="12.5" r="3.5" />
+      <path d="m9.5 10 6-6M13.5 6l1.8 1.8M12 7.5l1.3 1.3" />
+    </Icon>
+  );
+}
+
+export function InfoIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <circle cx="10" cy="10" r="7" />
+      <path d="M10 9v4.5M10 6.5v.01" />
+    </Icon>
+  );
+}

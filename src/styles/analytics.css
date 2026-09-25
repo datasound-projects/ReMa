@@ -16,29 +16,39 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  height: 28px;
-  padding: 0 var(--space-3) 0 var(--space-2);
+  height: 30px;
+  padding: 0 var(--space-3) 0 10px;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-pill);
   background: var(--color-surface);
   color: var(--color-text-secondary);
   font-size: var(--text-sm);
-  font-weight: 600;
-  cursor: pointer;
+  font-weight: var(--weight-semibold);
+  box-shadow: var(--shadow-xs);
+  transition:
+    background-color var(--transition-fast),
+    border-color var(--transition-fast),
+    color var(--transition-fast);
 }
 
 .analytics-button:hover {
-  background: var(--color-hover);
+  border-color: var(--color-border-strong);
   color: var(--color-text);
 }
 
-.analytics-button--on {
+.analytics-button:active {
+  background: var(--color-hover);
+}
+
+.analytics-button--on,
+.analytics-button--on:hover {
   border-color: var(--color-brand-subtle-border);
   background: var(--color-brand-subtle);
   color: var(--color-brand-hover);
 }
 
-.analytics-button--minimized {
+.analytics-button--minimized,
+.analytics-button--minimized:hover {
   border-color: var(--color-brand);
   color: var(--color-brand);
 }
@@ -54,7 +64,8 @@
   border-radius: var(--radius-pill);
   background: var(--color-brand);
   color: #fff;
-  font-size: var(--text-xs);
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-bold);
   line-height: 18px;
   text-align: center;
 }
@@ -69,6 +80,14 @@
   border-left: 1px solid var(--color-border);
   background: var(--color-surface);
   container: analytics / inline-size;
+  animation: panel-in var(--duration-slow) var(--ease-out);
+}
+
+@keyframes panel-in {
+  from {
+    opacity: 0;
+    transform: translateX(10px);
+  }
 }
 
 .analytics--fill {
@@ -93,9 +112,9 @@
   background: none;
   font: inherit;
   font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
   color: var(--color-text-tertiary);
   white-space: nowrap;
-  cursor: pointer;
 }
 
 .analytics__collapsed-title span {
@@ -106,27 +125,43 @@
   color: var(--color-text-secondary);
 }
 
+/* Resize handle: invisible until hovered, then a thin blue line. */
 .analytics__resize {
   position: absolute;
   top: 0;
   bottom: 0;
-  left: -4px;
+  left: -5px;
   z-index: 2;
-  width: 8px;
+  width: 9px;
   cursor: col-resize;
 }
 
-.analytics__resize:hover {
-  background: linear-gradient(90deg, transparent 3px, var(--color-brand-bright) 3px 5px, transparent 5px);
+.analytics__resize::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 3px;
+  border-radius: var(--radius-pill);
+  background: var(--color-brand-bright);
+  opacity: 0;
+  transition: opacity var(--transition-base);
 }
 
+.analytics__resize:hover::after,
+.analytics__resize:active::after {
+  opacity: 1;
+}
+
+/* Panel chrome, matching the browser panel. */
 .analytics__header {
   display: flex;
   flex-shrink: 0;
   align-items: center;
   gap: 2px;
-  height: 34px;
-  padding: 0 var(--space-2);
+  height: 36px;
+  padding: 0 6px 0 var(--space-2);
   border-bottom: 1px solid var(--color-border);
   background: var(--color-surface-sunken);
   -webkit-user-select: none;
@@ -136,14 +171,14 @@
 .analytics__header-icon {
   width: 16px;
   height: 16px;
-  margin: 0 var(--space-1);
+  margin: 0 6px 0 4px;
   color: var(--color-brand);
 }
 
 .analytics__title {
   flex: 1;
   font-size: var(--text-sm);
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
 }
 
 /* One row of dataset controls above everything they scope. */
@@ -152,29 +187,34 @@
   flex-shrink: 0;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--space-2);
-  padding: var(--space-3) var(--space-4) 0;
+  padding: var(--space-4) var(--space-4) 0;
 }
 
 .a-control {
   display: grid;
   grid-template-columns: auto 1fr;
   grid-template-rows: auto auto;
-  column-gap: var(--space-2);
+  column-gap: 10px;
   min-width: 0;
-  padding: 6px var(--space-3);
+  padding: 7px var(--space-3);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background: var(--color-surface);
+  box-shadow: var(--shadow-xs);
   color: var(--color-text);
   text-align: left;
-  cursor: pointer;
+  transition:
+    border-color var(--transition-fast),
+    box-shadow var(--transition-fast),
+    background-color var(--transition-fast);
 }
 
 .a-control:hover {
   border-color: var(--color-border-strong);
 }
 
-.a-control--open {
+.a-control--open,
+.a-control--open:hover {
   border-color: var(--color-brand);
   box-shadow: var(--focus-ring);
 }
@@ -187,15 +227,21 @@
   color: var(--color-text-tertiary);
 }
 
+.a-control--open .a-control__icon {
+  color: var(--color-brand);
+}
+
 .a-control__label {
   font-size: var(--text-xs);
+  line-height: var(--leading-snug);
   color: var(--color-text-tertiary);
 }
 
 .a-control__value {
   overflow: hidden;
   font-size: var(--text-sm);
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-snug);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -210,6 +256,7 @@
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background: var(--color-surface-sunken);
+  animation: reveal var(--duration-base) var(--ease-out);
 }
 
 .analytics__editor-close {
@@ -220,19 +267,21 @@
 
 .analytics__dataset {
   flex-shrink: 0;
-  padding: var(--space-3) var(--space-4) 0;
+  padding: var(--space-4) var(--space-4) 0;
   font-size: var(--text-sm);
 }
 
 .analytics__label {
   overflow: hidden;
-  font-weight: 600;
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .analytics__count {
   color: var(--color-text);
+  font-weight: var(--weight-semibold);
 }
 
 .analytics__tabs {
@@ -240,28 +289,52 @@
   flex-shrink: 0;
   gap: var(--space-1);
   margin-top: var(--space-3);
-  padding: 0 var(--space-4);
+  padding: 0 var(--space-3);
   border-bottom: 1px solid var(--color-border);
 }
 
 .analytics__tab {
-  padding: var(--space-2) var(--space-3);
+  position: relative;
+  height: 38px;
+  padding: 0 var(--space-3);
   border: none;
-  border-bottom: 2px solid transparent;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
   background: none;
   color: var(--color-text-secondary);
   font-size: var(--text-sm);
-  font-weight: 600;
-  cursor: pointer;
+  font-weight: var(--weight-semibold);
+  transition: color var(--transition-fast);
+}
+
+/* The active tab's underline sits on the tab row's hairline. */
+.analytics__tab::after {
+  content: '';
+  position: absolute;
+  left: var(--space-3);
+  right: var(--space-3);
+  bottom: -1px;
+  height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: var(--color-brand);
+  transform: scaleX(0);
+  transition: transform var(--duration-base) var(--ease-out);
 }
 
 .analytics__tab:hover {
   color: var(--color-text);
 }
 
-.analytics__tab--active {
-  border-bottom-color: var(--color-brand);
+.analytics__tab:focus-visible {
+  outline-offset: -2px;
+}
+
+.analytics__tab--active,
+.analytics__tab--active:hover {
   color: var(--color-brand);
+}
+
+.analytics__tab--active::after {
+  transform: scaleX(1);
 }
 
 .analytics__body {
@@ -270,7 +343,6 @@
   padding: var(--space-4);
   overflow-y: auto;
 }
-
 
 /* ── Shared pieces ─────────────────────────────────────── */
 
@@ -300,14 +372,9 @@
 
 .a-empty {
   padding: var(--space-8) var(--space-4);
-  color: var(--color-text-secondary);
-  text-align: center;
-}
-
-.a-empty__icon {
-  width: 32px;
-  height: 32px;
+  font-size: var(--text-sm);
   color: var(--color-text-tertiary);
+  text-align: center;
 }
 
 .a-notes {
@@ -354,21 +421,26 @@
 .a-stat {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding: var(--space-3);
+  gap: 4px;
+  padding: var(--space-3) var(--space-3) 10px;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-xs);
 }
 
 .a-stat__label {
   font-size: var(--text-xs);
-  color: var(--color-text-secondary);
+  line-height: var(--leading-snug);
+  color: var(--color-text-tertiary);
 }
 
 .a-stat__value {
   font-size: 22px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
+  font-weight: var(--weight-semibold);
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
 }
 
 .a-toolbar {
@@ -402,19 +474,25 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
-  min-width: 170px;
+  min-width: 180px;
   margin-top: var(--space-1);
   padding: var(--space-2) var(--space-3);
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
+  border-radius: 10px;
   background: var(--color-surface);
   box-shadow: var(--shadow-lg);
+  animation: popover-in var(--duration-base) var(--ease-out);
 }
 
 .a-link {
   color: var(--color-brand);
   text-decoration: underline;
   text-underline-offset: 2px;
+}
+
+.web-link,
+.a-link {
+  cursor: pointer;
 }
 
 .web-link {
@@ -429,7 +507,6 @@
   border: none;
   background: none;
   color: var(--color-text-tertiary);
-  cursor: pointer;
 }
 
 .web-link__external svg {
@@ -466,7 +543,6 @@
   align-items: center;
   gap: var(--space-2);
   font-size: var(--text-sm);
-  cursor: pointer;
 }
 
 .a-runs {
@@ -489,7 +565,6 @@
   align-items: center;
   gap: 0 var(--space-2);
   min-width: 0;
-  cursor: pointer;
 }
 
 .a-run__title {
@@ -533,7 +608,6 @@
   font-size: var(--text-sm);
   font-weight: 500;
   text-align: left;
-  cursor: pointer;
 }
 
 .a-condition--editing .a-condition__text {
@@ -568,7 +642,6 @@
   color: var(--color-text-secondary);
   font-size: var(--text-xs);
   font-weight: 600;
-  cursor: pointer;
 }
 
 .a-chip-button--on {
@@ -600,7 +673,6 @@
   border: none;
   background: none;
   color: var(--color-text-tertiary);
-  cursor: pointer;
 }
 
 .input.a-number {
@@ -668,39 +740,24 @@
 .a-table-wrap {
   overflow-x: auto;
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
 }
 
-.a-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: var(--text-sm);
-}
-
-.a-table th {
-  padding: var(--space-2) var(--space-3);
-  border-bottom: 1px solid var(--color-border);
-  background: var(--color-surface-sunken);
-  color: var(--color-text-secondary);
-  font-size: var(--text-xs);
-  font-weight: 600;
-  text-align: left;
-  white-space: nowrap;
-}
-
-.a-table td {
-  padding: var(--space-2) var(--space-3);
-  border-bottom: 1px solid var(--color-border);
-  vertical-align: top;
-}
-
-.a-table tbody tr:last-child td {
-  border-bottom: none;
+/* Base look (header, hairlines, numbers) comes from the shared data tables. */
+.a-table--compact th {
+  height: 32px;
 }
 
 .a-table--compact td,
 .a-table--compact th {
-  padding: 6px var(--space-2);
+  padding-right: var(--space-2);
+  padding-left: var(--space-2);
+}
+
+.a-table--compact td {
+  padding-top: 7px;
+  padding-bottom: 7px;
 }
 
 .a-table__pick {
@@ -712,11 +769,14 @@
 }
 
 .a-row--link {
-  cursor: pointer;
+}
+
+.a-row--link td {
+  transition: background-color var(--transition-fast);
 }
 
 .a-row--link:hover td {
-  background: var(--color-hover);
+  background: var(--color-surface-sunken);
 }
 
 .a-row--selected td {
@@ -787,6 +847,12 @@
   .a-table__actions {
     width: 36px;
   }
+
+  /* "Sep 24," stays on one line; the year goes below. */
+  .a-col--posted,
+  .a-col--discovered {
+    min-width: 64px;
+  }
 }
 
 .a-coverage {
@@ -796,7 +862,6 @@
 }
 
 .a-coverage summary {
-  cursor: pointer;
 }
 
 .a-coverage .a-notes {
@@ -816,7 +881,6 @@
   background: none;
   color: inherit;
   font: inherit;
-  cursor: pointer;
 }
 
 .a-classes {
@@ -836,7 +900,6 @@
   background: var(--color-surface);
   font-size: var(--text-xs);
   text-align: left;
-  cursor: pointer;
 }
 
 .a-class--on {
@@ -1324,17 +1387,25 @@
 .analyze-button {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  height: 26px;
+  gap: 5px;
+  height: 28px;
   margin-left: var(--space-1);
-  padding: 0 var(--space-2);
+  padding: 0 10px 0 var(--space-2);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-pill);
   background: var(--color-surface);
+  box-shadow: var(--shadow-xs);
   color: var(--color-text-secondary);
   font-size: var(--text-xs);
-  font-weight: 600;
-  cursor: pointer;
+  font-weight: var(--weight-semibold);
+  transition:
+    background-color var(--transition-fast),
+    border-color var(--transition-fast),
+    color var(--transition-fast);
+}
+
+.analyze-button .analyze-button__icon {
+  color: var(--color-brand);
 }
 
 .analyze-button:hover:not(:disabled) {

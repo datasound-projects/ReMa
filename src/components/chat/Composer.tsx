@@ -20,6 +20,8 @@ interface ComposerProps {
   onSchedule: (text: string) => void;
   /** Clears the text after a successful schedule. */
   clearSignal?: number;
+  /** Puts text into the box (e.g. a suggestion); `seq` changes each time. */
+  draft?: { text: string; seq: number };
   autoFocus?: boolean;
 }
 
@@ -37,6 +39,7 @@ export function Composer({
   onStop,
   onSchedule,
   clearSignal,
+  draft,
   autoFocus,
 }: ComposerProps) {
   const [text, setText] = useState('');
@@ -58,6 +61,19 @@ export function Composer({
     setSeenClear(clearSignal);
     setText('');
   }
+
+  // A suggestion was picked: show it, ready to edit or send.
+  const [seenDraft, setSeenDraft] = useState(draft?.seq);
+  if (draft && draft.seq !== seenDraft) {
+    setSeenDraft(draft.seq);
+    setText(draft.text);
+  }
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el || draft === undefined) return;
+    el.focus();
+    el.setSelectionRange(el.value.length, el.value.length);
+  }, [draft]);
 
   const hasText = text.trim().length > 0;
   const canSend = hasText && !!model && !streaming && !sending;
@@ -119,7 +135,7 @@ export function Composer({
             >
               <ProfileIcon className="button__icon" />
               Profile
-              <span className="tool-toggle__state">{profileOn ? 'On' : 'Off'}</span>
+              <span className="tool-toggle__switch" aria-hidden="true" />
             </button>
           </div>
           <div className="composer__actions">

@@ -284,7 +284,8 @@ export function BrowserPanel() {
         ) : !status.open && !request ? (
           <div className="browser__message">
             <GlobeIcon className="browser__message-icon" />
-            <p>Enter an address above, or open a link from Chat or a task result.</p>
+            <p className="browser__message-title">Browse next to your work</p>
+            <p>Enter an address above, or open a link from Chat, a task result or Analytics.</p>
           </div>
         ) : (
           browser.covered && <div className="browser__message">…</div>

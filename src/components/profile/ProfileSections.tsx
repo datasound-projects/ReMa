@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 
 import { removeAt, replaceAt } from '../../lib/profileMerge';
+import { SECTION_IDS } from '../../lib/profileSections';
 import type { Education, Experience, Profile } from '../../services/profileService';
 import { PlusIcon, TrashIcon } from '../icons';
 import { IconButton } from '../ui/IconButton';
@@ -8,20 +9,27 @@ import { ChipInput, EntryList } from './EntryList';
 
 type Update = (patch: Partial<Profile>) => void;
 
+/** A titled group of the Profile, with an anchor for the overview. */
 export function Section({
+  id,
   title,
   hint,
   children,
 }: {
+  id: string;
   title: string;
   hint?: string;
   children: ReactNode;
 }) {
   return (
-    <section className="profile-section">
-      <div className="profile-section__head">
-        <h2 className="section-title">{title}</h2>
-        {hint && <span className="profile-section__hint">{hint}</span>}
+    <section className="section profile-section" id={id} aria-labelledby={`${id}-title`}>
+      <div className="section__head">
+        <div className="section__heading">
+          <h2 className="section__title" id={`${id}-title`}>
+            {title}
+          </h2>
+          {hint && <p className="section__description">{hint}</p>}
+        </div>
       </div>
       <div className="panel profile-section__body">{children}</div>
     </section>
@@ -35,6 +43,7 @@ function Field({
   type = 'text',
   placeholder,
   grow,
+  hideLabel,
 }: {
   label: string;
   value: string;
@@ -42,10 +51,12 @@ function Field({
   type?: 'text' | 'email' | 'tel' | 'url';
   placeholder?: string;
   grow?: boolean;
+  /** Rows after the first in a list: the column label is shown once. */
+  hideLabel?: boolean;
 }) {
   return (
     <label className={grow ? 'field field--grow' : 'field'}>
-      <span className="field__label">{label}</span>
+      <span className={hideLabel ? 'sr-only' : 'field__label'}>{label}</span>
       <input
         className="input"
         type={type}
@@ -60,7 +71,11 @@ function Field({
 
 export function PersonalSection({ profile, update }: { profile: Profile; update: Update }) {
   return (
-    <Section title="Personal information">
+    <Section
+      id={SECTION_IDS.personal}
+      title="Personal information"
+      hint="How employers reach you. Auto Fill uses these; Profile context in Chat leaves email and phone out."
+    >
       <div className="profile-grid">
         <Field label="First name" value={profile.firstName} onChange={(firstName) => update({ firstName })} />
         <Field label="Last name" value={profile.lastName} onChange={(lastName) => update({ lastName })} />
@@ -79,7 +94,7 @@ export function PersonalSection({ profile, update }: { profile: Profile; update:
 
 export function ProfessionalSection({ profile, update }: { profile: Profile; update: Update }) {
   return (
-    <Section title="Professional profile">
+    <Section id={SECTION_IDS.professional} title="Professional profile" hint="Your headline, summary and skills.">
       <Field
         label="Professional title"
         placeholder="e.g. Data Engineer"
@@ -113,7 +128,7 @@ const period = (start: string, end: string, current = false) =>
 
 export function ExperienceSection({ profile, update }: { profile: Profile; update: Update }) {
   return (
-    <Section title="Experience">
+    <Section id={SECTION_IDS.experience} title="Experience" hint="Your roles. Open one to edit it; the arrows change the order.">
       <EntryList<Experience>
         items={profile.experience}
         onChange={(experience) => update({ experience })}
@@ -165,7 +180,7 @@ export function ExperienceSection({ profile, update }: { profile: Profile; updat
 
 export function EducationSection({ profile, update }: { profile: Profile; update: Update }) {
   return (
-    <Section title="Education">
+    <Section id={SECTION_IDS.education} title="Education" hint="Degrees, schools and courses.">
       <EntryList<Education>
         items={profile.education}
         onChange={(education) => update({ education })}
@@ -210,18 +225,21 @@ export function EducationSection({ profile, update }: { profile: Profile; update
 export function LanguagesSection({ profile, update }: { profile: Profile; update: Update }) {
   const languages = profile.languages;
   return (
-    <Section title="Languages">
+    <Section id={SECTION_IDS.languages} title="Languages" hint="Languages you speak and how well.">
+      {languages.length === 0 && <p className="entries__empty">No languages yet.</p>}
       {languages.map((language, index) => (
         <div key={index} className="form__row profile-row">
           <Field
             grow
             label="Language"
+            hideLabel={index > 0}
             value={language.name}
             onChange={(name) => update({ languages: replaceAt(languages, index, { ...language, name }) })}
           />
           <Field
             grow
             label="Level"
+            hideLabel={index > 0}
             placeholder="Native, C1, Fluent…"
             value={language.level}
             onChange={(level) => update({ languages: replaceAt(languages, index, { ...language, level }) })}
@@ -250,7 +268,7 @@ export function LanguagesSection({ profile, update }: { profile: Profile; update
 export function LinksSection({ profile, update }: { profile: Profile; update: Update }) {
   const links = profile.otherLinks;
   return (
-    <Section title="Links" hint="A resume website can replace a CV file.">
+    <Section id={SECTION_IDS.links} title="Links" hint="Your websites and profiles. A resume website can replace a CV file.">
       <div className="profile-grid">
         <Field
           type="url"
@@ -285,6 +303,7 @@ export function LinksSection({ profile, update }: { profile: Profile; update: Up
         <div key={index} className="form__row profile-row">
           <Field
             label="Name"
+            hideLabel={index > 0}
             placeholder="Blog"
             value={link.label}
             onChange={(label) => update({ otherLinks: replaceAt(links, index, { ...link, label }) })}
@@ -293,6 +312,7 @@ export function LinksSection({ profile, update }: { profile: Profile; update: Up
             grow
             type="url"
             label="Address"
+            hideLabel={index > 0}
             placeholder="https://"
             value={link.url}
             onChange={(url) => update({ otherLinks: replaceAt(links, index, { ...link, url }) })}

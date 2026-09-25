@@ -1,9 +1,11 @@
 import { useState } from 'react';
 
-import { UploadIcon } from '../components/icons';
+import { ProfileIcon, UploadIcon } from '../components/icons';
 import { PageContainer } from '../components/layout/PageContainer';
+import { LoadingState } from '../components/ui/EmptyState';
 import { CustomFieldsSection, DocumentsSection } from '../components/profile/DocumentsSection';
 import { ImportReviewDialog } from '../components/profile/ImportReviewDialog';
+import { ProfileOverview } from '../components/profile/ProfileOverview';
 import {
   EducationSection,
   ExperienceSection,
@@ -89,7 +91,13 @@ export function ProfilePage() {
     }
   };
 
-  if (loaded.state.status === 'loading') return <PageContainer title="Profile" />;
+  if (loaded.state.status === 'loading') {
+    return (
+      <PageContainer title="Profile">
+        <LoadingState label="Loading your Profile…" />
+      </PageContainer>
+    );
+  }
   if (loaded.state.status === 'error') {
     return (
       <PageContainer title="Profile">
@@ -124,7 +132,7 @@ export function ProfilePage() {
         </p>
       )}
       {notice && (
-        <p className="profile__notice" role="status">
+        <p className="notice" role="status">
           {notice}
         </p>
       )}
@@ -137,6 +145,9 @@ export function ProfilePage() {
             disabled={importing !== null}
             onClick={() => void importCv()}
           >
+            <span className="profile-start__icon" aria-hidden="true">
+              <UploadIcon />
+            </span>
             <span className="profile-start__title">
               {importing !== null ? 'Reading your CV…' : 'Import your CV'}
             </span>
@@ -145,6 +156,9 @@ export function ProfilePage() {
             </span>
           </button>
           <button type="button" className="profile-start__card" onClick={() => setBuilding(true)}>
+            <span className="profile-start__icon" aria-hidden="true">
+              <ProfileIcon />
+            </span>
             <span className="profile-start__title">Build it yourself</span>
             <span className="profile-start__text">
               Fill in only what you want: personal details, experience, skills, links or just a resume
@@ -154,6 +168,7 @@ export function ProfilePage() {
         </div>
       ) : (
         <div className="profile">
+          <ProfileOverview profile={current} documents={documents} />
           <PersonalSection profile={current} update={update} />
           <ProfessionalSection profile={current} update={update} />
           <ExperienceSection profile={current} update={update} />

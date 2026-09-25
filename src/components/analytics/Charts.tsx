@@ -11,6 +11,8 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 
 // Only the pieces the dashboard uses (keeps the bundle small).
 Chart.register(BarController, BarElement, CategoryScale, LinearScale, Tooltip);
+// Axis labels and tooltips use the app's own typeface.
+Chart.defaults.font.family = token('--font-sans', 'system-ui');
 
 export interface BarRow {
   label: string;
@@ -155,7 +157,7 @@ export function BarChart({ rows, max, ariaLabel, thresholds = [], tick, onSelect
             border: { display: false },
             ticks: {
               color: muted,
-              font: { size: 10 },
+              font: { size: 11 },
               maxTicksLimit: 5,
               padding: 6,
               callback: (v) => tickRef.current?.(Number(v)) ?? String(v),
@@ -180,8 +182,10 @@ export function BarChart({ rows, max, ariaLabel, thresholds = [], tick, onSelect
           tooltip: {
             displayColors: false,
             backgroundColor: ink,
-            padding: 8,
-            titleFont: { size: 12, weight: 'bold' },
+            padding: { x: 10, y: 8 },
+            cornerRadius: 8,
+            caretSize: 5,
+            titleFont: { size: 12, weight: 600 },
             bodyFont: { size: 12 },
             callbacks: {
               title: (items) => rowsRef.current[items[0]?.dataIndex ?? 0]?.label ?? '',

@@ -12,30 +12,68 @@ import {
   formatTimeRange,
 } from '../../lib/format';
 
-const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+const noun = (n: number, one: string, many: string) => (n === 1 ? one : many);
+
+interface Stat {
+  value: number;
+  label: string;
+  /** Worth a look when above zero. */
+  attention?: boolean;
+}
+
+/** Counts as tiles: the number, then what it counts. */
+function StatStrip({ stats, compact }: { stats: Stat[]; compact?: boolean }) {
+  return (
+    <dl className={compact ? 'stat-strip stat-strip--compact' : 'stat-strip'}>
+      {stats.map((stat) => (
+        <div
+          key={stat.label}
+          className={
+            stat.attention && stat.value > 0 ? 'stat-strip__item stat-strip__item--attention' : 'stat-strip__item'
+          }
+        >
+          <dt className="stat-strip__label">{stat.label}</dt>
+          <dd className="stat-strip__value">{stat.value}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
 
 /** The result of a job-application run: counts, overview table, Calendar. */
 export function JobReport({ report }: { report: JobRunReport }) {
-  const counts = [
-    plural(report.applicationsUpdated, 'application updated', 'applications updated'),
-    plural(report.relevantEmails, 'new relevant email', 'new relevant emails'),
-    plural(report.upcomingInterviews, 'upcoming interview', 'upcoming interviews'),
-    plural(report.needsAction, 'needs action', 'need action'),
-    plural(report.newRejections, 'new rejection', 'new rejections'),
+  const stats: Stat[] = [
+    {
+      value: report.applicationsUpdated,
+      label: noun(report.applicationsUpdated, 'application updated', 'applications updated'),
+    },
+    { value: report.relevantEmails, label: noun(report.relevantEmails, 'new relevant email', 'new relevant emails') },
+    {
+      value: report.upcomingInterviews,
+      label: noun(report.upcomingInterviews, 'upcoming interview', 'upcoming interviews'),
+    },
+    { value: report.needsAction, label: noun(report.needsAction, 'needs action', 'need action'), attention: true },
+    { value: report.newRejections, label: noun(report.newRejections, 'new rejection', 'new rejections') },
   ];
   if (report.calendar) {
-    counts.push(plural(report.calendar.conflicts, 'calendar conflict', 'calendar conflicts'));
+    stats.push({
+      value: report.calendar.conflicts,
+      label: noun(report.calendar.conflicts, 'calendar conflict', 'calendar conflicts'),
+      attention: true,
+    });
   }
 
   return (
     <div className="job-report">
-      <h3 className="job-report__title">Job Application Update</h3>
-      <p className="job-report__counts">{counts.join(' · ')}</p>
-      <p className="job-report__window">
-        Emails since {formatDateTime(report.windowStart)} · {report.emailsChecked} checked,{' '}
-        {report.newEmails} new
-        {report.deferredEmails > 0 && ` · ${report.deferredEmails} left for the next run`}
-      </p>
+      <div className="job-report__head">
+        <h3 className="job-report__title">Job Application Update</h3>
+        <p className="job-report__window">
+          Emails since {formatDateTime(report.windowStart)} · {report.emailsChecked} checked, {report.newEmails}{' '}
+          new
+          {report.deferredEmails > 0 && ` · ${report.deferredEmails} left for the next run`}
+        </p>
+      </div>
+      <StatStrip stats={stats} />
 
       {report.applications.length === 0 ? (
         <p className="empty-note">No job applications found in this period.</p>
@@ -109,18 +147,18 @@ const OUTCOME_LABELS: Record<CalendarOutcome, string> = {
 };
 
 function CalendarBlock({ calendar }: { calendar: CalendarReport }) {
-  const counts = [
-    `Created ${calendar.created}`,
-    `Updated ${calendar.updated}`,
-    `Unchanged ${calendar.unchanged}`,
-    calendar.cancelled > 0 && `Cancelled ${calendar.cancelled}`,
-    `Conflicts ${calendar.conflicts}`,
-    `Needs Review ${calendar.needsReview}`,
-  ].filter(Boolean);
+  const stats: Stat[] = [
+    { value: calendar.created, label: 'Created' },
+    { value: calendar.updated, label: 'Updated' },
+    { value: calendar.unchanged, label: 'Unchanged' },
+    ...(calendar.cancelled > 0 ? [{ value: calendar.cancelled, label: 'Cancelled' }] : []),
+    { value: calendar.conflicts, label: 'Conflicts', attention: true },
+    { value: calendar.needsReview, label: 'Needs Review', attention: true },
+  ];
   return (
     <div className="job-report__calendar">
       <h4 className="job-report__subtitle">Calendar</h4>
-      <p className="job-report__counts">{counts.join(' · ')}</p>
+      <StatStrip stats={stats} compact />
       {calendar.items.length > 0 && (
         <ul className="calendar-items">
           {calendar.items.map((item, i) => (

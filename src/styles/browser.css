@@ -27,6 +27,7 @@
   border: none;
 }
 
+/* Collapsed: a slim strip with the site's name. */
 .browser--collapsed {
   align-items: center;
   gap: var(--space-2);
@@ -40,30 +41,46 @@
   max-height: 60%;
   overflow: hidden;
   font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
   color: var(--color-text-tertiary);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+/* Resize handle: invisible until hovered, then a thin blue line. */
 .browser__resize {
   position: absolute;
   top: 0;
   bottom: 0;
   z-index: 2;
-  width: 8px;
+  width: 9px;
   cursor: col-resize;
 }
 
 .browser--right .browser__resize {
-  left: -4px;
+  left: -5px;
 }
 
 .browser--left .browser__resize {
-  right: -4px;
+  right: -5px;
 }
 
-.browser__resize:hover {
-  background: linear-gradient(90deg, transparent 3px, var(--color-brand-bright) 3px 5px, transparent 5px);
+.browser__resize::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 3px;
+  border-radius: var(--radius-pill);
+  background: var(--color-brand-bright);
+  opacity: 0;
+  transition: opacity var(--transition-base);
+}
+
+.browser__resize:hover::after,
+.browser__resize:active::after {
+  opacity: 1;
 }
 
 .browser__header,
@@ -71,19 +88,21 @@
   display: flex;
   align-items: center;
   gap: 2px;
-  padding: 0 var(--space-2);
+  padding: 0 6px;
 }
 
+/* Panel chrome: title and window controls. */
 .browser__header {
-  height: 34px;
+  height: 36px;
   border-bottom: 1px solid var(--color-border);
   background: var(--color-surface-sunken);
 }
 
 .browser__header-icon {
+  flex-shrink: 0;
   width: 15px;
   height: 15px;
-  margin: 0 var(--space-1);
+  margin: 0 6px 0 4px;
   color: var(--color-text-tertiary);
 }
 
@@ -92,13 +111,14 @@
   min-width: 0;
   overflow: hidden;
   font-size: var(--text-sm);
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+/* Page controls: back, forward, reload, address, external, Auto Fill. */
 .browser__toolbar {
-  height: 42px;
+  height: 44px;
   gap: 2px;
   border-bottom: 1px solid var(--color-border);
   container: browser-toolbar / inline-size;
@@ -106,33 +126,35 @@
 
 .browser__address {
   flex: 1;
-  min-width: 64px;
+  min-width: 80px;
   margin: 0 var(--space-1);
-}
-
-/* A narrow panel keeps every control inside it. */
-@container browser-toolbar (max-width: 460px) {
-  .autofill-button__brand {
-    display: none;
-  }
 }
 
 .browser__address-input {
   width: 100%;
-  height: 28px;
+  height: 30px;
   padding: 0 var(--space-3);
   border: 1px solid transparent;
   border-radius: var(--radius-pill);
-  background: var(--color-surface-sunken);
+  background: var(--color-surface-muted);
   color: var(--color-text);
   font: inherit;
   font-size: var(--text-sm);
   text-overflow: ellipsis;
   -webkit-user-select: text;
   user-select: text;
+  transition:
+    background-color var(--transition-fast),
+    border-color var(--transition-fast),
+    box-shadow var(--transition-fast);
 }
 
-.browser__address-input:focus {
+.browser__address-input:hover:not(:focus) {
+  background: var(--color-border);
+}
+
+.browser__address-input:focus,
+.browser__address-input:focus-visible {
   border-color: var(--color-brand);
   outline: none;
   background: var(--color-surface);
@@ -143,8 +165,9 @@
   display: inline-flex;
   flex-shrink: 0;
   align-items: center;
-  gap: 5px;
-  height: 28px;
+  justify-content: center;
+  gap: 6px;
+  height: 30px;
   margin-left: var(--space-1);
   padding: 0 var(--space-3);
   border: 1px solid var(--color-brand-subtle-border);
@@ -152,18 +175,38 @@
   background: var(--color-brand-subtle);
   color: var(--color-brand-hover);
   font-size: var(--text-sm);
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   white-space: nowrap;
-  cursor: pointer;
+  transition:
+    background-color var(--transition-fast),
+    border-color var(--transition-fast);
 }
 
 .autofill-button:hover:not(:disabled) {
   border-color: var(--color-brand-bright);
+  background: var(--color-brand-subtle-hover);
 }
 
 .autofill-button:disabled {
   opacity: 0.5;
-  cursor: default;
+}
+
+/* A narrow panel keeps every control inside it. */
+@container browser-toolbar (max-width: 480px) {
+  .autofill-button__brand {
+    display: none;
+  }
+}
+
+@container browser-toolbar (max-width: 400px) {
+  .autofill-button {
+    width: 30px;
+    padding: 0;
+  }
+
+  .autofill-button__label {
+    display: none;
+  }
 }
 
 .browser__progress {
@@ -195,22 +238,34 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: var(--space-3);
+  gap: var(--space-2);
   height: 100%;
   padding: var(--space-6);
-  color: var(--color-text-secondary);
+  color: var(--color-text-tertiary);
   font-size: var(--text-sm);
+  line-height: var(--leading-normal);
   text-align: center;
 }
 
 .browser__message-icon {
-  width: 32px;
-  height: 32px;
-  color: var(--color-text-tertiary);
+  box-sizing: content-box;
+  width: 22px;
+  height: 22px;
+  margin-bottom: var(--space-2);
+  padding: 11px;
+  border-radius: 50%;
+  background: var(--color-brand-subtle);
+  color: var(--color-brand);
+}
+
+.browser__message-title {
+  font-size: 15px;
+  font-weight: var(--weight-semibold);
+  color: var(--color-text);
 }
 
 .browser__footnote {
-  padding: 4px var(--space-3);
+  padding: 5px var(--space-3);
   border-top: 1px solid var(--color-border);
   background: var(--color-surface-sunken);
   font-size: var(--text-xs);
@@ -228,13 +283,14 @@
   flex-direction: column;
   gap: 4px;
   max-height: 40%;
-  padding: var(--space-2) var(--space-3);
+  padding: 10px var(--space-3);
   overflow-y: auto;
-  border-bottom: 1px solid var(--color-border);
+  border-bottom: 1px solid var(--color-brand-subtle-border);
   background: var(--color-brand-subtle);
   font-size: var(--text-sm);
   -webkit-user-select: text;
   user-select: text;
+  animation: reveal var(--duration-base) var(--ease-out);
 }
 
 .autofill__head {
@@ -251,7 +307,7 @@
 
 .autofill__title {
   flex: 1;
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
 }
 
 .autofill__line {
@@ -274,16 +330,16 @@
 }
 
 .autofill__file-label {
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
 }
 
 .autofill__select {
-  height: 28px;
+  height: var(--control-sm);
   font-size: var(--text-sm);
 }
 
 .autofill__attach {
-  height: 28px;
+  height: var(--control-sm);
 }
 
 .autofill__attached {
@@ -291,5 +347,5 @@
   align-items: center;
   gap: 4px;
   color: var(--color-success);
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
 }

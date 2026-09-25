@@ -4,6 +4,7 @@ import { PlusIcon } from '../components/icons';
 import { PageContainer } from '../components/layout/PageContainer';
 import { GoogleSection } from '../components/settings/GoogleSection';
 import { CloudProviderRow, CustomEndpointRow } from '../components/settings/ProviderRows';
+import { BrandMark } from '../components/ui/BrandMark';
 import { StatusIndicator } from '../components/ui/StatusIndicator';
 import { useAppStatus } from '../hooks/useAppStatus';
 import { useModelCatalog } from '../hooks/useModelCatalog';
@@ -28,11 +29,18 @@ export function SettingsPage() {
   const providerNames = [...new Set(models.map((m) => m.providerName))];
 
   return (
-    <PageContainer title="Settings">
-      <section className="settings-section" aria-labelledby="models-heading">
-        <h2 id="models-heading" className="section-title">
-          Models &amp; Providers
-        </h2>
+    <PageContainer title="Settings" subtitle="Models, connected accounts and how ReMa works for you.">
+      <section className="section" aria-labelledby="models-heading">
+        <div className="section__head">
+          <div className="section__heading">
+            <h2 id="models-heading" className="section__title">
+              Models &amp; providers
+            </h2>
+            <p className="section__description">
+              Connect a cloud provider with an API key. Keys stay in your system keychain.
+            </p>
+          </div>
+        </div>
 
         {settings.state.status === 'error' && (
           <p className="form-error" role="alert">
@@ -46,7 +54,19 @@ export function SettingsPage() {
           ))}
         </div>
 
-        <h3 className="subsection-title">OpenAI-compatible endpoints</h3>
+      </section>
+
+      <section className="section" aria-labelledby="endpoints-heading">
+        <div className="section__head">
+          <div className="section__heading">
+            <h2 id="endpoints-heading" className="section__title">
+              Local and compatible endpoints
+            </h2>
+            <p className="section__description">
+              Ollama, LM Studio, vLLM or any server with the OpenAI Chat Completions API.
+            </p>
+          </div>
+        </div>
         <div className="panel panel--list">
           {custom.map((provider) => (
             <CustomEndpointRow key={provider.id} provider={provider} />
@@ -54,22 +74,31 @@ export function SettingsPage() {
           {adding ? (
             <CustomEndpointRow onDone={() => setAdding(false)} />
           ) : (
-            <div className="provider">
-              <button type="button" className="button button--ghost" onClick={() => setAdding(true)}>
+            <div className="provider provider--add">
+              <button type="button" className="button button--ghost entries__add" onClick={() => setAdding(true)}>
                 <PlusIcon className="button__icon" />
                 Add endpoint
               </button>
             </div>
           )}
         </div>
+      </section>
 
-        <div className="default-model">
-          <label className="field__label" htmlFor="default-model">
-            Default model
-          </label>
-          <select
+      <section className="section" aria-labelledby="chat-heading">
+        <h2 id="chat-heading" className="section__title">
+          Chat
+        </h2>
+        <div className="panel panel--list">
+          <div className="setting-row">
+            <div className="setting-row__text">
+              <label className="setting-row__label" htmlFor="default-model">
+                Default model
+              </label>
+              <span className="setting-row__hint">Used for new chats and new scheduled tasks.</span>
+            </div>
+            <select
             id="default-model"
-            className="input input--auto"
+            className="input input--auto input--small setting-row__control"
             disabled={models.length === 0}
             value={catalog?.defaultModel ? modelKey(catalog.defaultModel) : ''}
             onChange={(e) => {
@@ -92,28 +121,33 @@ export function SettingsPage() {
               </optgroup>
             ))}
           </select>
-          <span className="form__hint">Used for new chats.</span>
+          </div>
         </div>
         {error && <p className="form-error">{error}</p>}
       </section>
 
       <GoogleSection />
 
-      <section className="settings-section" aria-labelledby="about-heading">
-        <h2 id="about-heading" className="section-title">
+      <section className="section" aria-labelledby="about-heading">
+        <h2 id="about-heading" className="section__title">
           About
         </h2>
-        <p className="about">
-          ReMa {status.status === 'success' ? status.data.version : ''}
-          <span className="about__sep">·</span>
-          {status.status === 'success' ? (
-            <StatusIndicator tone="ready" label="Backend ready" />
-          ) : status.status === 'error' ? (
-            <StatusIndicator tone="error" label={status.error.message} />
-          ) : (
-            <StatusIndicator tone="pending" label="Connecting…" />
-          )}
-        </p>
+        <div className="panel panel--list">
+          <div className="setting-row">
+            <BrandMark size={32} />
+            <div className="setting-row__text">
+              <span className="setting-row__label">ReMa {status.status === 'success' ? status.data.version : ''}</span>
+              <span className="setting-row__hint">Career UI harness. Your chats, tasks and Profile are stored in a local database on this computer.</span>
+            </div>
+            {status.status === 'success' ? (
+              <StatusIndicator tone="ready" label="Backend ready" />
+            ) : status.status === 'error' ? (
+              <StatusIndicator tone="error" label={status.error.message} />
+            ) : (
+              <StatusIndicator tone="pending" label="Connecting…" />
+            )}
+          </div>
+        </div>
       </section>
     </PageContainer>
   );
