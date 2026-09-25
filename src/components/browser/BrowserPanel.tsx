@@ -93,6 +93,10 @@ export function BrowserPanel() {
     };
     const observer = new ResizeObserver(sync);
     observer.observe(el);
+    // The page can also move without resizing (e.g. the sidebar collapses):
+    // the workspace around it resizes then.
+    const workspace = el.closest('.app-shell__workspace');
+    if (workspace) observer.observe(workspace);
     window.addEventListener('resize', sync);
     sync();
     return () => {

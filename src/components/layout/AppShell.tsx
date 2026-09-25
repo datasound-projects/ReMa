@@ -4,7 +4,8 @@ import { COLLAPSED_WIDTH, MIN_ANALYTICS, useAnalytics } from '../../app/analytic
 import { useBrowser } from '../../app/browser';
 import { useNavigation } from '../../app/navigation';
 import { BrowserPanel } from '../browser/BrowserPanel';
-import { ChartIcon, GlobeIcon } from '../icons';
+import { SIDEBAR_SHORTCUT } from '../../hooks/useSidebar';
+import { ChartIcon, GlobeIcon, PanelIcon } from '../icons';
 import { BrandMark } from '../ui/BrandMark';
 import { IconButton } from '../ui/IconButton';
 
@@ -13,6 +14,9 @@ const AnalyticsPanel = lazy(() => import('../analytics/AnalyticsPanel').then((m)
 
 interface AppShellProps {
   sidebar: ReactNode;
+  /** The sidebar is collapsed to an icon rail. */
+  sidebarCollapsed: boolean;
+  onToggleSidebar: () => void;
   children: ReactNode;
 }
 
@@ -31,7 +35,7 @@ const SIDEBAR = 232;
  * When the window is too narrow for all three, the page steps aside and the
  * panels share the space; navigating brings the page back.
  */
-export function AppShell({ sidebar, children }: AppShellProps) {
+export function AppShell({ sidebar, sidebarCollapsed, onToggleSidebar, children }: AppShellProps) {
   const browser = useBrowser();
   const analytics = useAnalytics();
   const { view } = useNavigation();
@@ -96,6 +100,14 @@ export function AppShell({ sidebar, children }: AppShellProps) {
           <BrandMark />
           <span className="app-shell__wordmark">ReMa</span>
         </div>
+        <IconButton
+          label={`${sidebarCollapsed ? 'Show' : 'Hide'} sidebar (${SIDEBAR_SHORTCUT})`}
+          aria-controls="app-sidebar"
+          className="icon-button--small app-shell__sidebar-toggle"
+          onClick={onToggleSidebar}
+        >
+          <PanelIcon side="left" />
+        </IconButton>
         <div className="app-shell__tools">
           {analytics.open && analytics.mode === 'minimized' ? (
             <button

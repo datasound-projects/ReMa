@@ -123,6 +123,7 @@
   /* Matches trafficLightPosition.x (18px) + the three buttons + spacing. */
   --traffic-light-inset: 88px;
   --sidebar-width: 232px;
+  --sidebar-collapsed-width: 60px;
   --page-max-width: 880px;
   --page-wide-max-width: 1040px;
   --thread-max-width: 800px;

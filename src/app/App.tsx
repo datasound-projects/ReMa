@@ -3,11 +3,13 @@ import { useCallback, useMemo, useState } from 'react';
 import { AnalyticsProvider } from '../components/analytics/AnalyticsProvider';
 import { BrowserProvider } from '../components/browser/BrowserProvider';
 import { ConversationList } from '../components/chat/ConversationList';
+import { PlusIcon } from '../components/icons';
 import { AppShell } from '../components/layout/AppShell';
 import { LaunchIntro } from '../components/layout/LaunchIntro';
 import { Sidebar } from '../components/layout/Sidebar';
 import { dataOr } from '../hooks/useAsyncData';
 import { useConversations } from '../hooks/useConversations';
+import { useSidebar } from '../hooks/useSidebar';
 import { ChatPage } from '../pages/ChatPage';
 import { ProfilePage } from '../pages/ProfilePage';
 import { ScheduledTasksPage } from '../pages/ScheduledTasksPage';
@@ -21,6 +23,7 @@ export function App() {
   // "Chat" in the sidebar returns to the conversation that was open last.
   const [lastConversationId, setLastConversationId] = useState<number | null>(null);
   const conversations = dataOr(useConversations().state, []);
+  const sidebar = useSidebar();
 
   const navigate = useCallback((next: View) => {
     setView(next);
@@ -40,8 +43,27 @@ export function App() {
       <BrowserProvider>
       <AnalyticsProvider>
       <AppShell
+        sidebarCollapsed={sidebar.collapsed}
+        onToggleSidebar={sidebar.toggle}
         sidebar={
-          <Sidebar items={MAIN_NAV} footerItems={FOOTER_NAV} activeId={view.page} onSelect={selectPage}>
+          <Sidebar
+            items={MAIN_NAV}
+            footerItems={FOOTER_NAV}
+            activeId={view.page}
+            onSelect={selectPage}
+            collapsed={sidebar.collapsed}
+            rail={
+              <button
+                type="button"
+                className="sidebar__item"
+                title="New chat"
+                onClick={() => navigate({ page: 'chat', conversationId: null })}
+              >
+                <PlusIcon className="sidebar__icon" />
+                <span className="sidebar__label">New chat</span>
+              </button>
+            }
+          >
             <ConversationList
               conversations={conversations}
               activeId={activeConversationId}

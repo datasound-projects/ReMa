@@ -39,6 +39,10 @@
   color: var(--color-text);
 }
 
+.app-shell__sidebar-toggle {
+  margin-left: var(--space-3);
+}
+
 .app-shell__tools {
   display: flex;
   align-items: center;
@@ -80,10 +84,33 @@
   flex-shrink: 0;
   width: var(--sidebar-width);
   padding: var(--space-3) var(--space-3) var(--space-3);
+  overflow: hidden;
   background: var(--color-surface-sunken);
   border-right: 1px solid var(--color-border);
+  transition: width var(--duration-slow) var(--ease-standard);
   -webkit-user-select: none;
   user-select: none;
+}
+
+/* Collapsed: an icon rail. Icons keep their place; labels clip and fade. */
+.sidebar--collapsed {
+  width: var(--sidebar-collapsed-width);
+}
+
+.sidebar__label {
+  transition: opacity var(--duration-base) var(--ease-standard);
+}
+
+.sidebar--collapsed .sidebar__label {
+  opacity: 0;
+}
+
+.sidebar__rail {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--color-border);
 }
 
 .sidebar__nav {
@@ -111,7 +138,10 @@
   gap: 10px;
   width: 100%;
   height: 36px;
-  padding: 0 var(--space-3) 0 10px;
+  /* 9px + 18px icon + 9px: centered in the 36px rail, same place when expanded. */
+  padding: 0 var(--space-3) 0 9px;
+  overflow: hidden;
+  white-space: nowrap;
   border: 1px solid transparent;
   border-radius: var(--radius-md);
   background: transparent;
