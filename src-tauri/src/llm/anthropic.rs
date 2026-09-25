@@ -16,6 +16,8 @@ use crate::{
 
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com/v1";
 const API_VERSION: &str = "2023-06-01";
+/// Required with OAuth access tokens (a Claude Console sign-in).
+const OAUTH_BETA: &str = "oauth-2025-04-20";
 
 /// Output cap for streaming requests when the model allows at least this much.
 const STREAMING_MAX_TOKENS: u32 = 64_000;
@@ -27,7 +29,10 @@ fn authorize(endpoint: &Endpoint, request: RequestBuilder) -> RequestBuilder {
     let request = request.header("anthropic-version", API_VERSION);
     match &endpoint.credential {
         Some(Credential::ApiKey { key }) => request.header("x-api-key", key),
-        _ => endpoint.bearer(request),
+        Some(Credential::OAuth { access_token, .. }) => request
+            .bearer_auth(access_token)
+            .header("anthropic-beta", OAUTH_BETA),
+        None => request,
     }
 }
 

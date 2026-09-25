@@ -42,6 +42,135 @@
   align-self: flex-start;
 }
 
+.provider__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-1);
+}
+
+/* Who is signed in: "ana@example.com · Plus". */
+.provider__account {
+  margin-top: calc(-1 * var(--space-2));
+  font-size: var(--text-sm);
+  color: var(--color-text-tertiary);
+  overflow-wrap: anywhere;
+}
+
+.provider__models {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-5);
+}
+
+.provider__models .models {
+  flex-basis: 100%;
+}
+
+.provider__model {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.provider__model-label {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--color-text-secondary);
+}
+
+.provider__model .input {
+  min-width: 200px;
+  max-width: 320px;
+}
+
+/* "Connect with [API key] or [Continue with ChatGPT]". */
+.connect {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  animation: reveal var(--duration-base) var(--ease-out);
+}
+
+.connect__choices {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.connect__label,
+.connect__or {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+.connect__label {
+  margin-right: var(--space-1);
+  font-weight: var(--weight-medium);
+}
+
+.connect .form__hint {
+  max-width: 640px;
+}
+
+/* A browser sign-in in progress. */
+.sign-in {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--color-brand-subtle-border);
+  border-radius: var(--radius-md);
+  background: var(--color-brand-subtle);
+  animation: reveal var(--duration-base) var(--ease-out);
+}
+
+.sign-in .spinner {
+  margin-top: 2px;
+}
+
+.sign-in__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.sign-in__text {
+  font-size: var(--text-sm);
+  line-height: var(--leading-snug);
+  color: var(--color-text);
+}
+
+.sign-in__code-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  font-size: var(--text-sm);
+}
+
+.sign-in__code {
+  padding: 4px 10px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  font-family: var(--font-mono);
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.08em;
+  -webkit-user-select: all;
+  user-select: all;
+}
+
+.notice__text {
+  flex: 1;
+  min-width: 0;
+}
+
 .provider__form {
   display: flex;
   flex-direction: column;
@@ -147,6 +276,14 @@
 @container (max-width: 720px) {
   .setting-row {
     flex-wrap: wrap;
+  }
+
+  .provider__row {
+    flex-wrap: wrap;
+  }
+
+  .provider__actions {
+    justify-content: flex-start;
   }
 
   .setting-row__control {

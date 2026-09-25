@@ -69,6 +69,7 @@ fn endpoint(kind: ProviderKind, base_url: String, key: &str) -> Endpoint {
     Endpoint {
         kind,
         name: kind.display_name().into(),
+        connection: ConnectionMethod::ApiKey,
         base_url,
         credential: Some(Credential::ApiKey { key: key.into() }),
     }
@@ -86,7 +87,7 @@ fn request() -> ChatRequest {
 }
 
 async fn collect(endpoint: &Endpoint, cancel: CancellationToken) -> (AppResult<Finish>, String) {
-    let llm = HttpLanguageModel::new();
+    let llm = ProviderLanguageModel::new(None);
     let mut text = String::new();
     let mut sink = |delta: &str| text.push_str(delta);
     let result = llm
@@ -142,6 +143,47 @@ async fn streams_anthropic_responses_with_its_headers() {
     assert!(request.starts_with("post /messages"));
     assert!(request.contains("x-api-key: sk-ant-test"));
     assert!(request.contains("anthropic-version: 2023-06-01"));
+}
+
+#[tokio::test]
+async fn sends_claude_console_tokens_as_oauth_bearer() {
+    let (base_url, received) = serve_once(
+        200,
+        vec![
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Ok\"}}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        ],
+        false,
+    )
+    .await;
+    let endpoint = Endpoint {
+        connection: ConnectionMethod::ClaudeConsole,
+        credential: Some(Credential::OAuth {
+            access_token: "console-access-token".into(),
+            refresh_token: None,
+            expires_at: None,
+        }),
+        ..endpoint(ProviderKind::Anthropic, base_url, "unused")
+    };
+    let (result, text) = collect(&endpoint, CancellationToken::new()).await;
+
+    assert_eq!(result.unwrap(), Finish::Complete);
+    assert_eq!(text, "Ok");
+    let request = received.await.unwrap().to_ascii_lowercase();
+    assert!(request.contains("authorization: bearer console-access-token"));
+    assert!(request.contains("anthropic-beta: oauth-2025-04-20"));
+    assert!(!request.contains("x-api-key"));
+}
+
+#[tokio::test]
+async fn a_chatgpt_connection_needs_the_codex_runtime() {
+    let endpoint = Endpoint {
+        connection: ConnectionMethod::ChatgptAccount,
+        credential: None,
+        ..endpoint(ProviderKind::Openai, "http://unused".into(), "unused")
+    };
+    let (result, _) = collect(&endpoint, CancellationToken::new()).await;
+    assert!(matches!(result.unwrap_err(), AppError::Configuration(_)));
 }
 
 #[tokio::test]

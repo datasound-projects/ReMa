@@ -2,7 +2,6 @@ import { useState } from 'react';
 
 import { useAction } from '../../hooks/useAction';
 import {
-  connectProvider,
   disconnectProvider,
   refreshProviderModels,
   saveCustomProvider,
@@ -10,102 +9,11 @@ import {
   type ProviderView,
 } from '../../services/providerService';
 import { ChevronDownIcon } from '../icons';
-import { StatusIndicator } from '../ui/StatusIndicator';
 
 export const KEY_NOTE = 'Stored in your system keychain, never in ReMa’s files.';
 
-/** OpenAI, Anthropic or Gemini. */
-export function CloudProviderRow({ provider }: { provider: ProviderView }) {
-  const [connecting, setConnecting] = useState(false);
-  const [apiKey, setApiKey] = useState('');
-  const action = useAction();
-
-  const connect = async () => {
-    if (await action.run(() => connectProvider(provider.kind, apiKey))) {
-      setConnecting(false);
-      setApiKey('');
-    }
-  };
-
-  return (
-    <div className="provider">
-      <div className="provider__row">
-        <span className="provider__name">{provider.name}</span>
-        {provider.configured ? (
-          <StatusIndicator tone="ready" label="Connected" />
-        ) : (
-          <StatusIndicator tone="idle" label="Not connected" />
-        )}
-        <span className="provider__spacer" />
-        {provider.configured ? (
-          <button
-            type="button"
-            className="button button--ghost"
-            disabled={action.busy}
-            onClick={() => void action.run(() => disconnectProvider(provider.id))}
-          >
-            Disconnect
-          </button>
-        ) : (
-          !connecting && (
-            <button type="button" className="button button--secondary" onClick={() => setConnecting(true)}>
-              Connect
-            </button>
-          )
-        )}
-      </div>
-
-      {connecting && !provider.configured && (
-        <form
-          className="provider__form"
-          onSubmit={(e) => {
-            e.preventDefault();
-            void connect();
-          }}
-        >
-          <div className="form__inline">
-            <input
-              type="password"
-              className="input input--grow"
-              placeholder={`${provider.name} API key`}
-              aria-label={`${provider.name} API key`}
-              autoComplete="off"
-              spellCheck={false}
-              autoFocus
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-            />
-            <button type="submit" className="button button--primary" disabled={action.busy || !apiKey.trim()}>
-              {action.busy ? 'Checking…' : 'Save'}
-            </button>
-            <button
-              type="button"
-              className="button button--ghost"
-              onClick={() => {
-                setConnecting(false);
-                setApiKey('');
-                action.clearError();
-              }}
-            >
-              Cancel
-            </button>
-          </div>
-          <p className="form__hint">{KEY_NOTE} ReMa checks the key with {provider.name} first.</p>
-        </form>
-      )}
-
-      {action.error && (
-        <p className="form-error" role="alert">
-          {action.error}
-        </p>
-      )}
-      {provider.configured && <ModelList provider={provider} />}
-    </div>
-  );
-}
-
 /** Which of a provider's models appear in the chat. */
-function ModelList({ provider }: { provider: ProviderView }) {
+export function ModelList({ provider }: { provider: ProviderView }) {
   const [open, setOpen] = useState(false);
   const [filter, setFilter] = useState('');
   const action = useAction();

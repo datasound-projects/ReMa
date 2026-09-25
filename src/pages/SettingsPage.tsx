@@ -3,7 +3,8 @@ import { useState } from 'react';
 import { PlusIcon } from '../components/icons';
 import { PageContainer } from '../components/layout/PageContainer';
 import { GoogleSection } from '../components/settings/GoogleSection';
-import { CloudProviderRow, CustomEndpointRow } from '../components/settings/ProviderRows';
+import { CloudProviderRow } from '../components/settings/CloudProviderRow';
+import { CustomEndpointRow } from '../components/settings/ProviderRows';
 import { BrandMark } from '../components/ui/BrandMark';
 import { StatusIndicator } from '../components/ui/StatusIndicator';
 import { useAppStatus } from '../hooks/useAppStatus';
@@ -37,7 +38,9 @@ export function SettingsPage() {
               Models &amp; providers
             </h2>
             <p className="section__description">
-              Connect a cloud provider with an API key. Keys stay in your system keychain.
+              Sign in with your account in the browser, or use an API key. Sign-in runs through each
+              provider’s own app on this computer, so ReMa never sees your password or tokens; keys
+              stay in your system keychain.
             </p>
           </div>
         </div>
@@ -50,7 +53,11 @@ export function SettingsPage() {
 
         <div className="panel panel--list">
           {cloud.map((provider) => (
-            <CloudProviderRow key={provider.id} provider={provider} />
+            <CloudProviderRow
+              key={provider.id}
+              provider={provider}
+              defaultModel={catalog?.defaultModel ?? null}
+            />
           ))}
         </div>
 

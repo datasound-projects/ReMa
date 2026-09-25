@@ -34,20 +34,69 @@ impl ProviderKind {
         }
     }
 
-    /// Authentication methods ReMa supports for this provider.
+    /// How ReMa can connect to this provider, preferred method first.
     ///
-    /// OpenAI, Anthropic and Google do not offer an official OAuth flow that a
-    /// third-party desktop app can use for their model APIs without its own
-    /// registered client, so API keys are the supported method for now. The
-    /// credential model (`secrets::Credential`) already carries OAuth tokens.
-    pub fn auth_methods(self) -> &'static [AuthMethod] {
+    /// Account sign-in goes through the provider's official local runtime
+    /// (see `accounts`); it is offered only where the provider permits a
+    /// third-party app to use it. Anthropic does not allow third-party apps
+    /// to offer Claude.ai (Free/Pro/Max) sign-in, so its account option is
+    /// the Claude Console (API) account.
+    pub fn connection_methods(self) -> &'static [ConnectionMethod] {
         match self {
-            Self::OpenaiCompatible => &[AuthMethod::None, AuthMethod::ApiKey],
-            _ => &[AuthMethod::ApiKey],
+            Self::Openai => &[ConnectionMethod::ChatgptAccount, ConnectionMethod::ApiKey],
+            Self::Anthropic => &[ConnectionMethod::ClaudeConsole, ConnectionMethod::ApiKey],
+            Self::Gemini | Self::OpenaiCompatible => &[ConnectionMethod::ApiKey],
+        }
+    }
+
+    /// The account sign-in this provider offers, if any.
+    pub fn account_method(self) -> Option<ConnectionMethod> {
+        self.connection_methods()
+            .iter()
+            .copied()
+            .find(|m| m.is_account())
+    }
+}
+
+/// How ReMa reaches a provider: which transport carries the requests and
+/// how they are authenticated. One provider has one active method.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionMethod {
+    /// The provider's HTTPS API with a key kept in the OS credential store
+    /// (or no key, for local endpoints).
+    ApiKey,
+    /// OpenAI through the official Codex runtime, signed in with a ChatGPT
+    /// account. Codex stores the credentials and sends the requests.
+    ChatgptAccount,
+    /// The Anthropic API with a Claude Console account sign-in managed by
+    /// the official Anthropic CLI, which stores and refreshes the token.
+    ClaudeConsole,
+}
+
+text_enum!(ConnectionMethod {
+    ApiKey => "api_key",
+    ChatgptAccount => "chatgpt_account",
+    ClaudeConsole => "claude_console",
+});
+
+impl ConnectionMethod {
+    /// Signed in through a browser rather than with a pasted key.
+    pub fn is_account(self) -> bool {
+        !matches!(self, Self::ApiKey)
+    }
+
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::ApiKey => "API key",
+            Self::ChatgptAccount => "ChatGPT account",
+            Self::ClaudeConsole => "Claude Console account",
         }
     }
 }
 
+/// What ReMa itself stores for a provider (in the OS credential store).
+/// Account connections store nothing: their runtime keeps the credentials.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthMethod {
@@ -58,6 +107,43 @@ pub enum AuthMethod {
 }
 
 text_enum!(AuthMethod { None => "none", ApiKey => "api_key", OAuth => "oauth" });
+
+/// Whether a saved connection works.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionStatus {
+    Disconnected,
+    Connected,
+    /// The sign-in expired and could not be renewed.
+    Expired,
+    /// The runtime is signed out (e.g. signed out elsewhere).
+    ReauthRequired,
+    /// The runtime is missing or failed; `status_message` says why.
+    Unavailable,
+}
+
+/// A browser sign-in that is running or just ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum SignInStatus {
+    Connecting,
+    OpeningBrowser,
+    WaitingForAuthorization,
+    Cancelled,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SignInView {
+    pub method: ConnectionMethod,
+    pub status: SignInStatus,
+    pub message: Option<String>,
+    /// Device-code sign-in: the one-time code to enter on the provider's page.
+    pub user_code: Option<String>,
+    /// Device-code sign-in: where to enter it.
+    pub verification_url: Option<String>,
+}
 
 /// Identifies a model: which provider serves it and its provider-side id.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
@@ -75,7 +161,7 @@ pub struct ProviderModel {
     pub enabled: bool,
 }
 
-/// A provider as shown in Settings. Never contains secrets.
+/// A provider as shown in Settings. Never contains secrets or tokens.
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderView {
@@ -85,7 +171,16 @@ pub struct ProviderView {
     pub base_url: Option<String>,
     /// Configured model of an OpenAI-compatible endpoint.
     pub configured_model: Option<String>,
-    pub auth_methods: Vec<AuthMethod>,
+    /// How this provider can be connected, preferred first.
+    pub connection_methods: Vec<ConnectionMethod>,
+    /// The active connection, if connected.
+    pub connection: Option<ConnectionMethod>,
+    /// Who is signed in (account connections), e.g. "ana@example.com · Plus".
+    pub account_label: Option<String>,
+    pub status: ConnectionStatus,
+    pub status_message: Option<String>,
+    /// A browser sign-in running or just ended for this provider.
+    pub sign_in: Option<SignInView>,
     /// Saved in ReMa (built-in providers are listed even when not saved).
     pub configured: bool,
     /// A credential is stored in the OS credential store.

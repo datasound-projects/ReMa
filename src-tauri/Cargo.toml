@@ -33,7 +33,7 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 # LLM providers (HTTP + streaming)
 reqwest = { version = "0.13", default-features = false, features = ["native-tls", "http2", "json", "query", "form", "stream", "system-proxy"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
-tokio = { version = "1", features = ["sync", "time", "macros", "rt", "net", "io-util"] }
+tokio = { version = "1", features = ["sync", "time", "macros", "rt", "net", "io-util", "process"] }
 tokio-util = "0.7"
 # Scheduling (timezone-aware date math)
 jiff = "0.2"

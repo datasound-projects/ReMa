@@ -21,6 +21,10 @@ pub const APP_COMMANDS: &[&str] = &[
     "refresh_provider_models",
     "set_model_enabled",
     "set_default_model",
+    "start_provider_sign_in",
+    "cancel_provider_sign_in",
+    "check_provider_connection",
+    "sign_out_provider",
     // Google Workspace
     "get_google_status",
     "save_google_client",

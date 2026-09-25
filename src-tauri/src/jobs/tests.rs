@@ -19,7 +19,7 @@ use crate::{
     llm::{BoxFuture, DeltaSink, FetchedModel, LanguageModel},
     models::{
         jobs::ApplicationStatus,
-        provider::{ModelRef, ProviderKind},
+        provider::{ConnectionMethod, ModelRef, ProviderKind},
     },
     state::testing,
 };
@@ -349,6 +349,7 @@ impl World {
         let endpoint = Endpoint {
             kind: ProviderKind::Anthropic,
             name: "Anthropic".into(),
+            connection: ConnectionMethod::ApiKey,
             base_url: "http://localhost".into(),
             credential: None,
         };
@@ -890,6 +891,7 @@ async fn calendar_is_untouched_when_sync_is_off() {
     let endpoint = Endpoint {
         kind: ProviderKind::Anthropic,
         name: "Anthropic".into(),
+        connection: ConnectionMethod::ApiKey,
         base_url: "http://localhost".into(),
         credential: None,
     };

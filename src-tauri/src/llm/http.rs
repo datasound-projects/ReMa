@@ -144,7 +144,7 @@ async fn error_from_response(response: Response, provider: &str, secrets: &[&str
 pub fn status_error(status: StatusCode, provider: &str, detail: &str) -> AppError {
     match status {
         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => AppError::authentication(format!(
-            "{provider} rejected the credentials. Check the API key in Settings."
+            "{provider} rejected the credentials. Reconnect {provider} in Settings."
         )),
         StatusCode::TOO_MANY_REQUESTS => AppError::provider(format!(
             "{provider} rate limit or quota reached{}",

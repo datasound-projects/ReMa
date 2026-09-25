@@ -7,7 +7,7 @@ Rust owns application state, persistence, scheduling, validation, provider confi
 ## What ReMa does
 
 - **Chat**: a general-purpose AI chat with streaming responses, Stop, Retry, Copy, Markdown (code, lists, tables, links) and persistent conversation history ("Recents").
-- **Models**: OpenAI, Anthropic, Google Gemini, and any OpenAI-compatible endpoint (Ollama, LM Studio, vLLM, …). Pick the model in the chat composer.
+- **Models**: OpenAI, Anthropic, Google Gemini, and any OpenAI-compatible endpoint (Ollama, LM Studio, vLLM, …). Connect OpenAI with your **ChatGPT account** and Anthropic with your **Claude Console account** in the browser, or use API keys. Pick the model in the chat composer.
 - **Scheduled Tasks**: schedule the prompt you are writing, straight from the composer. Supports one-time, daily, every N days, selected weekdays, and intervals of 15 minutes or more. A task can end on a date or after N runs. You can edit, pause, resume, delete or run tasks now, and each task keeps its run history with results.
 - **Settings**: connect providers, choose which models appear in the chat, and set the default model. Connect Google Workspace (Gmail and Calendar) with one sign-in.
 - **Job applications (Gmail)**: a scheduled task type that finds job-application emails, keeps one record per application (Confirmed, Application in Process, Needs Your Action, Upcoming Interview, Rejected), and shows an overview table in the task history. It can add confirmed interviews to Google Calendar and report calendar conflicts.
@@ -35,13 +35,14 @@ Rust services               src-tauri/src/services   (chat, providers, tasks, sc
                             src-tauri/src/analytics  (job ingestion, dedupe, filters, ranking, skill gap, learning)
       ↓
 Persistence / providers     src-tauri/src/db (SQLite) · src-tauri/src/llm (adapters) · src-tauri/src/secrets (OS keychain)
+Provider accounts           src-tauri/src/accounts (official local runtimes: Codex app-server, Anthropic CLI)
 Integrations                src-tauri/src/integrations/google (OAuth, Gmail tool, Calendar tool)
 ```
 
 Rules:
 
 - **Deterministic core.** The scheduler decides when tasks run, using pure, unit-tested schedule math. The LLM never controls timing, state, credentials or configuration.
-- **Provider-neutral.** Chat and scheduler use one `LanguageModel` interface. Provider request formats, authentication, streaming and errors stay inside `llm/openai.rs`, `llm/anthropic.rs` and `llm/gemini.rs`. The OpenAI adapter also serves every OpenAI-compatible endpoint.
+- **Provider-neutral.** Chat and scheduler use one `LanguageModel` interface. Provider, transport, authentication and model are separate concepts: the HTTPS adapters (`llm/openai.rs`, `llm/anthropic.rs`, `llm/gemini.rs`) and the Codex runtime (`accounts/codex.rs`) are transports; a connection method says how a request is authenticated; models are discovered per connection. The OpenAI adapter also serves every OpenAI-compatible endpoint.
 - **Rust is the source of truth.** IPC types, commands and events are generated from Rust. The frontend never hand-writes copies of them.
 - **Streaming via events.** Replies stream as typed `ChatEvent`s. Generation runs in the background, so switching chats does not interrupt it.
 
@@ -50,7 +51,52 @@ Rules:
 - **Database**: SQLite at `<app data dir>/rema.db`. On macOS that is `~/Library/Application Support/cloud.datasound.rema/`. Schema changes are versioned migrations in `src-tauri/src/db/migrations/`.
 - **Profile documents**: copied into `<app data dir>/profile-documents/` under generated names. The original file name, size, SHA-256 and extracted text are stored in SQLite. The original file is never changed or moved.
 - **Credentials**: API keys and Google OAuth tokens are stored in the operating system's credential store: macOS Keychain, Windows Credential Manager, or Secret Service on Linux. They never go in the database, config files or the frontend. The UI can only save, replace or remove a key.
-- **Authentication**: API keys for OpenAI, Anthropic and Gemini. OpenAI-compatible endpoints take an optional key. None of the three cloud providers offers an official OAuth flow that a third-party desktop app can use for their model APIs without its own registered OAuth client. The credential model already supports OAuth tokens (with expiry), so an official flow can be added without changing chat or scheduler code.
+- **Authentication**: OpenAI — ChatGPT account (through OpenAI's Codex runtime) or API key. Anthropic — Claude Console account (through Anthropic's CLI) or API key. Gemini — API key. OpenAI-compatible endpoints take an optional key. Account credentials are kept by the provider's own runtime, never by ReMa. See [Provider accounts](#provider-accounts).
+
+## Provider accounts
+
+OpenAI and Anthropic can be connected with an account in the browser instead of a pasted API key. ReMa never implements a provider's OAuth protocol, never reads browser cookies or sessions, and never stores, logs or shows account tokens. There is no ReMa server: requests go from your computer to the provider.
+
+```text
+React → Tauri command → services::accounts → accounts::{codex, claude_console} → official runtime → provider
+```
+
+**OpenAI: ChatGPT account.** ReMa runs OpenAI's Codex runtime, `codex app-server`. This is the JSON-RPC interface that OpenAI's own Codex SDKs (`openai-codex` for Python, whose `login_chatgpt()` and `login_chatgpt_device_code()` call it; `@openai/codex-sdk`) and the Codex IDE extension are built on.
+
+- **Sign-in.** **Continue with ChatGPT** calls `account/login/start`. ReMa opens the returned `auth.openai.com` page in your browser, and Codex receives the result on its own local callback.
+- **Device code.** **Use a code instead** switches to device-code sign-in: ReMa shows a one-time code to enter on OpenAI's page.
+- **Credentials and requests.** Codex stores and refreshes the credentials, in the OS keychain when available (`cli_auth_credentials_store = "auto"`). It also sends every model request.
+- **Chat.** Each chat turn runs on an ephemeral thread. ReMa's system prompt replaces Codex's instructions, earlier messages are added as history, and every agent tool is turned off (shell, file edits, web search, apps, plugins, sub-agents). The thread uses a read-only sandbox in an empty folder, and approvals are always declined.
+- **Isolation.** The runtime is private to ReMa: its own `CODEX_HOME` under the app data folder, so your Codex CLI settings, sessions and MCP servers are neither read nor changed. It keeps no history.
+- **Install.** Requires Codex 0.151 or newer: `brew install --cask codex` or `npm install -g @openai/codex`.
+
+**Anthropic: Claude Console account.** **Continue with Claude Console** runs `ant auth login`, from Anthropic's official CLI (`brew install anthropics/tap/ant`).
+
+- **Sign-in.** `ant` opens the Claude Console sign-in in your browser, receives the result on a local callback, and stores and refreshes the token.
+- **Requests.** For requests, ReMa asks `ant auth print-credentials --access-token` for a short-lived token. This is the documented way to hand the credential to another program. ReMa keeps the token in memory for at most a minute and calls the Anthropic API with `Authorization: Bearer` and `anthropic-beta: oauth-2025-04-20`.
+- **Isolation.** The CLI uses a ReMa-owned `ANTHROPIC_CONFIG_DIR`, so your own `ant` profiles are untouched.
+- **Billing.** Usage is billed to your Console organization at API rates, like an API key.
+
+**Claude Pro/Max (Claude.ai) sign-in is not offered.** Anthropic's documentation rules it out for apps like ReMa:
+
+- The [Agent SDK overview](https://code.claude.com/docs/en/agent-sdk/overview) says: *"Unless previously approved, Anthropic does not allow third party developers to offer claude.ai login or rate limits for their products, including agents built on the Claude Agent SDK."*
+- The [Legal and compliance page](https://code.claude.com/docs/en/legal-and-compliance) says: *"Anthropic does not permit third-party developers to offer Claude.ai login into their own applications, or to route requests through Free, Pro, or Max plan credentials on behalf of their users."*
+
+So the Claude Agent SDK and Claude Code subscription sign-in are not used. If Anthropic approves ReMa, a runtime for it can be added in `accounts/` without changing chat or scheduler code.
+
+**States and actions.**
+
+- **States:** Disconnected, Connecting…, Opening browser…, Waiting for authorization…, Connected, Authentication expired, Authentication cancelled, Authentication failed, Reauthentication required.
+- **Checks:** Settings checks each account connection with its runtime when it opens.
+- **Actions:**
+  - **Reconnect** signs in again.
+  - **Change connection** switches between account and API key. Models are re-discovered, and an unused key is removed from the keychain.
+  - **Disconnect** stops using the account; you stay signed in, so reconnecting is instant.
+  - **Sign out** uses the runtime's own logout (`account/logout`, `ant auth logout`) and disconnects.
+
+**Models** are always discovered per connection: Codex's `model/list` for a ChatGPT account, `/v1/models` for API keys and the Claude Console. A ChatGPT plan and an OpenAI API key can offer different models.
+
+**Finding the runtimes.** Apps opened from the Finder don't inherit the terminal's `PATH`. ReMa therefore also looks in the usual install folders (Homebrew, npm, Volta, nvm, pnpm, Go) and asks your login shell. Set `REMA_CODEX_PATH` or `REMA_ANT_PATH` to use a specific executable. Debug builds also accept `REMA_ANTHROPIC_BASE_URL` / `REMA_OPENAI_BASE_URL` / `REMA_GEMINI_BASE_URL` for local mock servers.
 
 ## Google Workspace
 
@@ -208,7 +254,7 @@ rema/
 │   │   ├── chat/                 # Composer, MessageList, Markdown, ModelSelector, ConversationList
 │   │   ├── profile/              # Overview, sections, documents, custom fields, import review
 │   │   ├── tasks/                # TaskDialog, TaskDetail, JobReport, TaskActions, TaskStatus
-│   │   ├── settings/             # Provider and endpoint rows, Google Workspace section
+│   │   ├── settings/             # Provider connections (account or key), endpoints, Google Workspace
 │   │   └── ui/                   # Menu, Dialog, Switch, EmptyState, IconButton, StatusIndicator, BrandMark
 │   ├── hooks/                    # useAsyncData, useChat, useTasks, useProfile, useAutofill, …
 │   ├── services/                 # ipc.ts (callBackend, ApiError), events.ts, one service per area
@@ -228,6 +274,8 @@ rema/
     │                             # (dedupe), page reader + background worker, dataset, filter, rank,
     │                             # matching, overview, gap, unique (requirements), learning
     ├── jobs/                     # Job-application workflow: extract, interviews, applications, calendar_sync, report
+    ├── accounts/                 # Provider account sign-in: Codex app-server client, Anthropic CLI,
+    │                             # runtime discovery, sign-in sessions
     ├── integrations/google/      # OAuth (PKCE, refresh, revoke), Gmail and Calendar tools
     ├── llm/                      # LanguageModel trait, SSE, HTTP, OpenAI/Anthropic/Gemini adapters
     ├── db/                       # SQLite connection, migrations, repositories

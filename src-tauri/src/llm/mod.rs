@@ -1,10 +1,21 @@
 //! LLM provider layer.
 //!
 //! The rest of ReMa talks to [`LanguageModel`] with provider-neutral types.
-//! Each adapter (`openai`, `anthropic`, `gemini`) only knows how to build its
-//! HTTP requests and parse its stream events; streaming, cancellation and
-//! error mapping are shared. The OpenAI adapter also serves every
-//! OpenAI-compatible endpoint (Ollama, LM Studio, vLLM, …).
+//! Four concepts stay separate:
+//!
+//! - **provider** ([`ProviderKind`]) — who serves the model;
+//! - **transport** — how requests travel: the provider's HTTPS API (the
+//!   `openai`, `anthropic` and `gemini` adapters) or the provider's official
+//!   local runtime (`accounts::codex` for a ChatGPT account);
+//! - **authentication** ([`ConnectionMethod`]) — an API key from the OS
+//!   credential store, or an account sign-in owned by a runtime;
+//! - **model** — discovered per connection, never assumed: a ChatGPT
+//!   account and an OpenAI API key can offer different models.
+//!
+//! Each HTTP adapter only knows how to build its requests and parse its
+//! stream events; streaming, cancellation and error mapping are shared. The
+//! OpenAI adapter also serves every OpenAI-compatible endpoint (Ollama, LM
+//! Studio, vLLM, …).
 
 pub mod anthropic;
 pub mod gemini;
@@ -12,14 +23,18 @@ pub mod http;
 pub mod openai;
 pub mod sse;
 
-use std::{future::Future, pin::Pin};
+use std::{future::Future, pin::Pin, sync::Arc};
 
 use reqwest::RequestBuilder;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    error::AppResult,
-    models::{chat::MessageRole, provider::ProviderKind},
+    accounts::codex::CodexRuntime,
+    error::{AppError, AppResult},
+    models::{
+        chat::MessageRole,
+        provider::{ConnectionMethod, ProviderKind},
+    },
     secrets::Credential,
 };
 use http::{read_sse, Flow, StreamEnd};
@@ -87,18 +102,30 @@ pub struct Endpoint {
     pub kind: ProviderKind,
     /// Display name used in error messages.
     pub name: String,
+    /// The transport and authentication in use.
+    pub connection: ConnectionMethod,
+    /// HTTPS transports only.
     pub base_url: String,
+    /// Sent with HTTPS requests: an API key, or a Claude Console access
+    /// token from the Anthropic CLI. `None` when a runtime authenticates.
     pub credential: Option<Credential>,
 }
 
 impl Endpoint {
-    pub fn default_base_url(kind: ProviderKind) -> Option<&'static str> {
-        match kind {
-            ProviderKind::Openai => Some(openai::DEFAULT_BASE_URL),
-            ProviderKind::Anthropic => Some(anthropic::DEFAULT_BASE_URL),
-            ProviderKind::Gemini => Some(gemini::DEFAULT_BASE_URL),
-            ProviderKind::OpenaiCompatible => None,
+    /// A built-in provider's API. Debug builds accept a local mock server
+    /// (`REMA_ANTHROPIC_BASE_URL`, …) for end-to-end tests.
+    pub fn default_base_url(kind: ProviderKind) -> Option<String> {
+        let official = match kind {
+            ProviderKind::Openai => openai::DEFAULT_BASE_URL,
+            ProviderKind::Anthropic => anthropic::DEFAULT_BASE_URL,
+            ProviderKind::Gemini => gemini::DEFAULT_BASE_URL,
+            ProviderKind::OpenaiCompatible => return None,
+        };
+        #[cfg(debug_assertions)]
+        if let Ok(url) = std::env::var(format!("REMA_{}_BASE_URL", kind.as_str().to_uppercase())) {
+            return Some(url);
         }
+        Some(official.to_string())
     }
 
     fn secrets(&self) -> Vec<&str> {
@@ -175,31 +202,37 @@ pub trait LanguageModel: Send + Sync {
     ) -> BoxFuture<'a, AppResult<Finish>>;
 }
 
-/// The real implementation, talking HTTP to the providers.
-pub struct HttpLanguageModel {
+/// The real implementation: HTTPS APIs, or the Codex runtime for a
+/// ChatGPT account.
+pub struct ProviderLanguageModel {
     http: reqwest::Client,
+    codex: Option<Arc<CodexRuntime>>,
 }
 
-impl HttpLanguageModel {
-    pub fn new() -> Self {
+impl ProviderLanguageModel {
+    pub fn new(codex: Option<Arc<CodexRuntime>>) -> Self {
         Self {
             http: http::client(),
+            codex,
         }
     }
-}
 
-impl Default for HttpLanguageModel {
-    fn default() -> Self {
-        Self::new()
+    fn codex(&self) -> AppResult<&CodexRuntime> {
+        self.codex
+            .as_deref()
+            .ok_or_else(|| AppError::configuration("ChatGPT sign-in is not available"))
     }
 }
 
-impl LanguageModel for HttpLanguageModel {
+impl LanguageModel for ProviderLanguageModel {
     fn list_models<'a>(
         &'a self,
         endpoint: &'a Endpoint,
     ) -> BoxFuture<'a, AppResult<Vec<FetchedModel>>> {
         Box::pin(async move {
+            if endpoint.connection == ConnectionMethod::ChatgptAccount {
+                return self.codex()?.list_models().await;
+            }
             match endpoint.kind {
                 ProviderKind::Openai | ProviderKind::OpenaiCompatible => {
                     openai::list_models(&self.http, endpoint).await
@@ -219,6 +252,12 @@ impl LanguageModel for HttpLanguageModel {
         on_delta: DeltaSink<'a>,
     ) -> BoxFuture<'a, AppResult<Finish>> {
         Box::pin(async move {
+            if endpoint.connection == ConnectionMethod::ChatgptAccount {
+                return self
+                    .codex()?
+                    .stream_chat(model_id, request, cancel, on_delta)
+                    .await;
+            }
             let secrets = endpoint.secrets();
             let (http_request, parse): (RequestBuilder, fn(&SseEvent) -> AppResult<StreamPiece>) =
                 match endpoint.kind {

@@ -3,6 +3,7 @@ use std::{path::PathBuf, sync::Arc};
 use tauri::PackageInfo;
 
 use crate::{
+    accounts::Accounts,
     analytics::AnalyticsContext,
     browser::BrowserContext,
     db::Database,
@@ -40,6 +41,8 @@ pub struct AppState {
     pub data_dir: Arc<PathBuf>,
     pub db: Database,
     pub vault: SecretVault,
+    /// Account sign-in through the providers' official runtimes.
+    pub accounts: Accounts,
     pub llm: Arc<dyn LanguageModel>,
     pub events: Arc<dyn EventSink>,
     /// Chat responses currently streaming.
@@ -54,7 +57,8 @@ pub struct AppState {
 pub mod testing {
     use super::*;
     use crate::{
-        events::RecordingEvents, integrations::google::GoogleEndpoints, secrets::MemoryStore,
+        accounts::fake::FakeAccountRuntime, events::RecordingEvents,
+        integrations::google::GoogleEndpoints, secrets::MemoryStore,
     };
 
     /// A fresh, empty folder under the system temp directory.
@@ -79,6 +83,10 @@ pub mod testing {
             data_dir: Arc::new(temp_dir()),
             db: Database::open_in_memory().unwrap(),
             vault: SecretVault::new(Arc::new(MemoryStore::default())),
+            accounts: Accounts::new(
+                Arc::new(FakeAccountRuntime::signed_out()),
+                Arc::new(FakeAccountRuntime::signed_out()),
+            ),
             llm,
             events: events.clone(),
             generations: Generations::default(),

@@ -1,13 +1,14 @@
-//! Provider configuration: connecting providers, storing credentials,
-//! syncing their model lists and choosing the default model.
+//! Provider configuration: connecting providers (API key or account
+//! sign-in), storing credentials, syncing their model lists and choosing
+//! the default model.
 
 use crate::{
     db::providers::{self as repo, ModelRow, ProviderRow},
     error::{AppError, AppResult},
     llm::{Endpoint, FetchedModel},
     models::provider::{
-        AuthMethod, CustomProviderInput, ModelCatalog, ModelOption, ModelRef, ProviderKind,
-        ProviderModel, ProviderSettings, ProviderView,
+        AuthMethod, ConnectionMethod, ConnectionStatus, CustomProviderInput, ModelCatalog,
+        ModelOption, ModelRef, ProviderKind, ProviderModel, ProviderSettings, ProviderView,
     },
     secrets::Credential,
     state::AppState,
@@ -26,14 +27,19 @@ pub fn settings(state: &AppState) -> AppResult<ProviderSettings> {
         for kind in ProviderKind::BUILT_IN {
             let row = rows.iter().find(|r| r.id == kind.as_str());
             providers.push(match row {
-                Some(row) => view(conn, row)?,
+                Some(row) => view(state, conn, row)?,
                 None => ProviderView {
                     id: kind.as_str().into(),
                     kind,
                     name: kind.display_name().into(),
                     base_url: None,
                     configured_model: None,
-                    auth_methods: kind.auth_methods().to_vec(),
+                    connection_methods: kind.connection_methods().to_vec(),
+                    connection: None,
+                    account_label: None,
+                    status: ConnectionStatus::Disconnected,
+                    status_message: None,
+                    sign_in: state.accounts.sign_in(kind.as_str()),
                     configured: false,
                     has_credential: false,
                     models: Vec::new(),
@@ -44,7 +50,7 @@ pub fn settings(state: &AppState) -> AppResult<ProviderSettings> {
             .iter()
             .filter(|r| r.kind == ProviderKind::OpenaiCompatible)
         {
-            providers.push(view(conn, row)?);
+            providers.push(view(state, conn, row)?);
         }
         Ok(ProviderSettings {
             providers,
@@ -53,7 +59,11 @@ pub fn settings(state: &AppState) -> AppResult<ProviderSettings> {
     })
 }
 
-fn view(conn: &rusqlite::Connection, row: &ProviderRow) -> AppResult<ProviderView> {
+fn view(
+    state: &AppState,
+    conn: &rusqlite::Connection,
+    row: &ProviderRow,
+) -> AppResult<ProviderView> {
     let models = repo::list_models(conn, &row.id)?
         .into_iter()
         .map(|m| ProviderModel {
@@ -62,13 +72,22 @@ fn view(conn: &rusqlite::Connection, row: &ProviderRow) -> AppResult<ProviderVie
             enabled: m.enabled,
         })
         .collect();
+    let (status, status_message) = state
+        .accounts
+        .health(&row.id)
+        .unwrap_or((ConnectionStatus::Connected, None));
     Ok(ProviderView {
         id: row.id.clone(),
         kind: row.kind,
         name: row.name.clone(),
         base_url: row.base_url.clone(),
         configured_model: row.model.clone(),
-        auth_methods: row.kind.auth_methods().to_vec(),
+        connection_methods: row.kind.connection_methods().to_vec(),
+        connection: Some(row.connection),
+        account_label: row.account_label.clone(),
+        status,
+        status_message,
+        sign_in: state.accounts.sign_in(&row.id),
         configured: true,
         // A key is saved whenever the provider uses one; the secret itself
         // stays in the OS credential store.
@@ -77,11 +96,20 @@ fn view(conn: &rusqlite::Connection, row: &ProviderRow) -> AppResult<ProviderVie
     })
 }
 
-fn provider_view(state: &AppState, id: &str) -> AppResult<ProviderView> {
-    state.db.call(|conn| {
-        let row = repo::get(conn, id)?.ok_or_else(|| AppError::not_found("Provider not found"))?;
-        view(conn, &row)
-    })
+pub fn provider_view(state: &AppState, id: &str) -> AppResult<ProviderView> {
+    let found = state.db.call(|conn| match repo::get(conn, id)? {
+        Some(row) => view(state, conn, &row).map(Some),
+        None => Ok(None),
+    })?;
+    match found {
+        Some(view) => Ok(view),
+        // A built-in provider that is not connected.
+        None => settings(state)?
+            .providers
+            .into_iter()
+            .find(|p| p.id == id)
+            .ok_or_else(|| AppError::not_found("Provider not found")),
+    }
 }
 
 fn validate_api_key(api_key: &str) -> AppResult<String> {
@@ -115,18 +143,37 @@ pub async fn connect(
     let endpoint = Endpoint {
         kind,
         name: kind.display_name().into(),
-        base_url: Endpoint::default_base_url(kind).unwrap_or_default().into(),
+        connection: ConnectionMethod::ApiKey,
+        base_url: Endpoint::default_base_url(kind).unwrap_or_default(),
         credential: Some(credential.clone()),
     };
     let fetched = state.llm.list_models(&endpoint).await?;
 
     let id = kind.as_str();
     state.vault.set(id, credential).await?;
+    save_connection(state, kind, ConnectionMethod::ApiKey, None, &fetched)?;
+    // An account sign-in that was running is replaced by the key.
+    state.accounts.dismiss(id);
+    state.events.providers_changed();
+    provider_view(state, id)
+}
+
+/// Saves a built-in provider's connection with the models discovered for
+/// it. Switching methods replaces the model list: models are never assumed
+/// to be the same across connections.
+pub fn save_connection(
+    state: &AppState,
+    kind: ProviderKind,
+    connection: ConnectionMethod,
+    account_label: Option<String>,
+    fetched: &[FetchedModel],
+) -> AppResult<()> {
+    let id = kind.as_str();
     let now = now_ms();
     state.db.call(|conn| {
         let tx = conn.transaction()?;
         let existing = repo::get(&tx, id)?;
-        let first_time = existing.is_none();
+        let fresh = existing.as_ref().is_none_or(|e| e.connection != connection);
         repo::upsert(
             &tx,
             &ProviderRow {
@@ -135,23 +182,37 @@ pub async fn connect(
                 name: kind.display_name().into(),
                 base_url: None,
                 model: None,
-                auth_method: AuthMethod::ApiKey,
+                auth_method: if connection == ConnectionMethod::ApiKey {
+                    AuthMethod::ApiKey
+                } else {
+                    // The runtime keeps the account's credentials.
+                    AuthMethod::None
+                },
+                connection,
+                account_label,
                 created_at: existing.map_or(now, |e| e.created_at),
                 updated_at: now,
             },
         )?;
-        sync_models(&tx, id, &fetched, first_time, None)?;
+        sync_models(&tx, id, fetched, fresh, None)?;
         ensure_default_model(&tx)?;
         tx.commit()?;
         Ok(())
     })?;
-    state.events.providers_changed();
-    provider_view(state, id)
+    state
+        .accounts
+        .set_health(id, ConnectionStatus::Connected, None);
+    Ok(())
 }
 
-/// Removes a provider, its models and its stored credential.
+/// Removes a provider, its models and its stored credential. An account's
+/// runtime stays signed in (see [`crate::services::accounts::sign_out`]).
 pub async fn disconnect(state: &AppState, provider_id: &str) -> AppResult<()> {
     state.vault.delete(provider_id).await?;
+    state.accounts.dismiss(provider_id);
+    state
+        .accounts
+        .set_health(provider_id, ConnectionStatus::Connected, None);
     state.db.call(|conn| {
         let tx = conn.transaction()?;
         repo::delete(&tx, provider_id)?;
@@ -214,6 +275,7 @@ pub async fn save_custom(state: &AppState, input: CustomProviderInput) -> AppRes
     let endpoint = Endpoint {
         kind: ProviderKind::OpenaiCompatible,
         name: name.into(),
+        connection: ConnectionMethod::ApiKey,
         base_url: base_url.clone(),
         credential: credential.clone(),
     };
@@ -238,6 +300,8 @@ pub async fn save_custom(state: &AppState, input: CustomProviderInput) -> AppRes
                 } else {
                     AuthMethod::None
                 },
+                connection: ConnectionMethod::ApiKey,
+                account_label: None,
                 created_at: existing.map_or(now, |e| e.created_at),
                 updated_at: now,
             },
@@ -439,9 +503,32 @@ pub async fn resolve_endpoint(state: &AppState, provider_id: &str) -> AppResult<
                 "This model's provider is no longer connected. Choose another model.",
             )
         })?;
-    let credential = match row.auth_method {
-        AuthMethod::None => None,
-        AuthMethod::ApiKey | AuthMethod::OAuth => {
+    let credential = match (row.connection, row.auth_method) {
+        // Codex authenticates its own requests.
+        (ConnectionMethod::ChatgptAccount, _) => None,
+        // A short-lived token from the Anthropic CLI, never stored by ReMa.
+        (ConnectionMethod::ClaudeConsole, _) => {
+            let runtime = state
+                .accounts
+                .runtime(ConnectionMethod::ClaudeConsole)
+                .ok_or_else(|| AppError::configuration("Claude Console sign-in is unavailable"))?;
+            match runtime.credential().await {
+                Ok(credential) => credential,
+                Err(error) => {
+                    if matches!(error, AppError::Authentication(_)) {
+                        state.accounts.set_health(
+                            &row.id,
+                            ConnectionStatus::ReauthRequired,
+                            Some(error.to_string()),
+                        );
+                        state.events.providers_changed();
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        (ConnectionMethod::ApiKey, AuthMethod::None) => None,
+        (ConnectionMethod::ApiKey, AuthMethod::ApiKey | AuthMethod::OAuth) => {
             let credential = state.vault.get(&row.id).await?.ok_or_else(|| {
                 AppError::authentication(format!(
                     "No credentials are stored for {}. Reconnect it in Settings.",
@@ -466,11 +553,12 @@ pub async fn resolve_endpoint(state: &AppState, provider_id: &str) -> AppResult<
     let base_url = row
         .base_url
         .clone()
-        .or_else(|| Endpoint::default_base_url(row.kind).map(str::to_string))
+        .or_else(|| Endpoint::default_base_url(row.kind))
         .ok_or_else(|| AppError::configuration(format!("{} has no base URL.", row.name)))?;
     Ok(Endpoint {
         kind: row.kind,
         name: row.name,
+        connection: row.connection,
         base_url,
         credential,
     })

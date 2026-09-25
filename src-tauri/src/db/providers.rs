@@ -4,7 +4,7 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 
 use crate::{
     error::AppResult,
-    models::provider::{AuthMethod, ProviderKind},
+    models::provider::{AuthMethod, ConnectionMethod, ProviderKind},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,7 +15,12 @@ pub struct ProviderRow {
     pub base_url: Option<String>,
     /// Configured model of an OpenAI-compatible endpoint.
     pub model: Option<String>,
+    /// What ReMa stores in the OS credential store for this provider.
     pub auth_method: AuthMethod,
+    /// The transport and authentication in use.
+    pub connection: ConnectionMethod,
+    /// Who is signed in, for account connections (display text only).
+    pub account_label: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -31,7 +36,7 @@ pub struct ModelRow {
 }
 
 const PROVIDER_COLUMNS: &str =
-    "id, kind, name, base_url, model, auth_method, created_at, updated_at";
+    "id, kind, name, base_url, model, auth_method, created_at, updated_at, connection, account_label";
 const MODEL_COLUMNS: &str =
     "provider_id, model_id, display_name, enabled, max_output_tokens, sort_order";
 
@@ -47,6 +52,9 @@ fn provider_from_row(row: &Row) -> rusqlite::Result<ProviderRow> {
         auth_method: AuthMethod::parse(&auth).unwrap_or(AuthMethod::None),
         created_at: row.get(6)?,
         updated_at: row.get(7)?,
+        connection: ConnectionMethod::parse(&row.get::<_, String>(8)?)
+            .unwrap_or(ConnectionMethod::ApiKey),
+        account_label: row.get(9)?,
     })
 }
 
@@ -81,14 +89,17 @@ pub fn get(conn: &Connection, id: &str) -> AppResult<Option<ProviderRow>> {
 
 pub fn upsert(conn: &Connection, provider: &ProviderRow) -> AppResult<()> {
     conn.execute(
-        "INSERT INTO providers (id, kind, name, base_url, model, auth_method, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        "INSERT INTO providers (id, kind, name, base_url, model, auth_method, created_at,
+                                updated_at, connection, account_label)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
          ON CONFLICT (id) DO UPDATE SET
              name = excluded.name,
              base_url = excluded.base_url,
              model = excluded.model,
              auth_method = excluded.auth_method,
-             updated_at = excluded.updated_at",
+             updated_at = excluded.updated_at,
+             connection = excluded.connection,
+             account_label = excluded.account_label",
         params![
             provider.id,
             provider.kind.as_str(),
@@ -98,7 +109,18 @@ pub fn upsert(conn: &Connection, provider: &ProviderRow) -> AppResult<()> {
             provider.auth_method.as_str(),
             provider.created_at,
             provider.updated_at,
+            provider.connection.as_str(),
+            provider.account_label,
         ],
+    )?;
+    Ok(())
+}
+
+/// Updates who is signed in for an account connection.
+pub fn set_account_label(conn: &Connection, id: &str, label: Option<&str>) -> AppResult<()> {
+    conn.execute(
+        "UPDATE providers SET account_label = ?2 WHERE id = ?1",
+        params![id, label],
     )?;
     Ok(())
 }
@@ -226,6 +248,8 @@ mod tests {
             base_url: None,
             model: None,
             auth_method: AuthMethod::ApiKey,
+            connection: ConnectionMethod::ApiKey,
+            account_label: None,
             created_at: 1,
             updated_at: 1,
         }
@@ -266,6 +290,44 @@ mod tests {
 
             delete(c, "openai")?;
             assert!(list_models(c, "openai")?.is_empty());
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn stores_the_connection_method_and_account_label() {
+        let db = Database::open_in_memory().unwrap();
+        db.call(|c| {
+            // Rows saved before connection methods existed read as API keys.
+            upsert(c, &provider("anthropic", ProviderKind::Anthropic))?;
+            assert_eq!(
+                get(c, "anthropic")?.unwrap().connection,
+                ConnectionMethod::ApiKey
+            );
+
+            let mut account = provider("openai", ProviderKind::Openai);
+            account.connection = ConnectionMethod::ChatgptAccount;
+            account.auth_method = AuthMethod::None;
+            account.account_label = Some("ana@example.com · Plus".into());
+            upsert(c, &account)?;
+            let row = get(c, "openai")?.unwrap();
+            assert_eq!(row.connection, ConnectionMethod::ChatgptAccount);
+            assert_eq!(row.account_label.as_deref(), Some("ana@example.com · Plus"));
+
+            set_account_label(c, "openai", Some("ana@example.com · Pro"))?;
+            assert_eq!(
+                get(c, "openai")?.unwrap().account_label.as_deref(),
+                Some("ana@example.com · Pro")
+            );
+
+            // The schema only accepts known methods.
+            assert!(c
+                .execute(
+                    "UPDATE providers SET connection = 'cookie' WHERE id = 'openai'",
+                    []
+                )
+                .is_err());
             Ok(())
         })
         .unwrap();

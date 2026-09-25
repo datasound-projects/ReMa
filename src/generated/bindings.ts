@@ -20,6 +20,17 @@ export const commands = {
 	refreshProviderModels: (providerId: string) => __TAURI_INVOKE<ProviderView>("refresh_provider_models", { providerId }),
 	setModelEnabled: (model: ModelRef, enabled: boolean) => __TAURI_INVOKE<null>("set_model_enabled", { model, enabled }),
 	setDefaultModel: (model: ModelRef) => __TAURI_INVOKE<null>("set_default_model", { model }),
+	/**
+	 *  Starts the account sign-in (ChatGPT, Claude Console) in the system
+	 *  browser. Returns at once; progress arrives as `ProvidersChanged`.
+	 */
+	startProviderSignIn: (kind: ProviderKind, deviceCode: boolean) => __TAURI_INVOKE<ProviderView>("start_provider_sign_in", { kind, deviceCode }),
+	/**  Cancels a running sign-in, or clears a finished one's notice. */
+	cancelProviderSignIn: (kind: ProviderKind) => __TAURI_INVOKE<ProviderView>("cancel_provider_sign_in", { kind }),
+	/**  Asks an account connection's runtime whether the sign-in still works. */
+	checkProviderConnection: (providerId: string) => __TAURI_INVOKE<ProviderView>("check_provider_connection", { providerId }),
+	/**  Signs out with the runtime's official logout and disconnects. */
+	signOutProvider: (providerId: string) => __TAURI_INVOKE<null>("sign_out_provider", { providerId }),
 	getGoogleStatus: () => __TAURI_INVOKE<GoogleStatus>("get_google_status"),
 	/**  Stores the user's own Google Cloud "Desktop app" OAuth client. */
 	saveGoogleClient: (clientId: string, clientSecret: string) => __TAURI_INVOKE<GoogleStatus>("save_google_client", { clientId, clientSecret }),
@@ -193,8 +204,6 @@ export type ApplicationStatus =
 /**  A confirmed interview is coming up. */
 "upcoming_interview" | "rejected";
 
-export type AuthMethod = "none" | "api_key" | "oauth";
-
 /**  What ReMa Auto Fill did. Nothing is ever submitted. */
 export type AutofillResult = {
 	filled: FilledField[],
@@ -295,6 +304,36 @@ export type ConflictingEvent = {
 	startAt: number,
 	endAt: number,
 };
+
+/**
+ *  How ReMa reaches a provider: which transport carries the requests and
+ *  how they are authenticated. One provider has one active method.
+ */
+export type ConnectionMethod = 
+/**
+ *  The provider's HTTPS API with a key kept in the OS credential store
+ *  (or no key, for local endpoints).
+ */
+"api_key" | 
+/**
+ *  OpenAI through the official Codex runtime, signed in with a ChatGPT
+ *  account. Codex stores the credentials and sends the requests.
+ */
+"chatgpt_account" | 
+/**
+ *  The Anthropic API with a Claude Console account sign-in managed by
+ *  the official Anthropic CLI, which stores and refreshes the token.
+ */
+"claude_console";
+
+/**  Whether a saved connection works. */
+export type ConnectionStatus = "disconnected" | "connected" | 
+/**  The sign-in expired and could not be renewed. */
+"expired" | 
+/**  The runtime is signed out (e.g. signed out elsewhere). */
+"reauth_required" | 
+/**  The runtime is missing or failed; `status_message` says why. */
+"unavailable";
 
 export type Conversation = {
 	id: number,
@@ -856,7 +895,7 @@ export type ProviderSettings = {
 	defaultModel: ModelRef | null,
 };
 
-/**  A provider as shown in Settings. Never contains secrets. */
+/**  A provider as shown in Settings. Never contains secrets or tokens. */
 export type ProviderView = {
 	id: string,
 	kind: ProviderKind,
@@ -864,7 +903,16 @@ export type ProviderView = {
 	baseUrl: string | null,
 	/**  Configured model of an OpenAI-compatible endpoint. */
 	configuredModel: string | null,
-	authMethods: AuthMethod[],
+	/**  How this provider can be connected, preferred first. */
+	connectionMethods: ConnectionMethod[],
+	/**  The active connection, if connected. */
+	connection: ConnectionMethod | null,
+	/**  Who is signed in (account connections), e.g. "ana@example.com · Plus". */
+	accountLabel: string | null,
+	status: ConnectionStatus,
+	statusMessage: string | null,
+	/**  A browser sign-in running or just ended for this provider. */
+	signIn: SignInView | null,
 	/**  Saved in ReMa (built-in providers are listed even when not saved). */
 	configured: boolean,
 	/**  A credential is stored in the OS credential store. */
@@ -1032,6 +1080,19 @@ export type SendMessageResult = {
 };
 
 export type Seniority = "intern" | "entry" | "mid" | "senior" | "lead" | "executive";
+
+/**  A browser sign-in that is running or just ended. */
+export type SignInStatus = "connecting" | "opening_browser" | "waiting_for_authorization" | "cancelled" | "failed";
+
+export type SignInView = {
+	method: ConnectionMethod,
+	status: SignInStatus,
+	message: string | null,
+	/**  Device-code sign-in: the one-time code to enter on the provider's page. */
+	userCode: string | null,
+	/**  Device-code sign-in: where to enter it. */
+	verificationUrl: string | null,
+};
 
 export type SkillDemand = {
 	name: string,

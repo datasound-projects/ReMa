@@ -50,6 +50,10 @@ pub fn builder() -> Builder<tauri::Wry> {
             commands::providers::refresh_provider_models,
             commands::providers::set_model_enabled,
             commands::providers::set_default_model,
+            commands::providers::start_provider_sign_in,
+            commands::providers::cancel_provider_sign_in,
+            commands::providers::check_provider_connection,
+            commands::providers::sign_out_provider,
             // Google Workspace
             commands::google::get_google_status,
             commands::google::save_google_client,

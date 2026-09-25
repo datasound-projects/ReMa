@@ -10,6 +10,8 @@ import {
 import { callBackend } from './ipc';
 
 export type {
+  ConnectionMethod,
+  ConnectionStatus,
   ModelCatalog,
   ModelOption,
   ModelRef,
@@ -17,6 +19,8 @@ export type {
   ProviderModel,
   ProviderSettings,
   ProviderView,
+  SignInStatus,
+  SignInView,
 } from '../generated/bindings';
 
 export function getProviderSettings(): Promise<ProviderSettings> {
@@ -29,6 +33,30 @@ export function getModelCatalog(): Promise<ModelCatalog> {
 
 export function connectProvider(kind: ProviderKind, apiKey: string): Promise<ProviderView> {
   return callBackend(() => commands.connectProvider(kind, apiKey));
+}
+
+/**
+ * Starts the account sign-in in the system browser (ChatGPT through OpenAI's
+ * Codex app, Claude Console through Anthropic's CLI). Resolves at once;
+ * progress arrives with `providersChanged`.
+ */
+export function startProviderSignIn(kind: ProviderKind, deviceCode = false): Promise<ProviderView> {
+  return callBackend(() => commands.startProviderSignIn(kind, deviceCode));
+}
+
+/** Cancels a running sign-in, or clears a finished one's notice. */
+export function cancelProviderSignIn(kind: ProviderKind): Promise<ProviderView> {
+  return callBackend(() => commands.cancelProviderSignIn(kind));
+}
+
+/** Asks an account connection's runtime whether the sign-in still works. */
+export function checkProviderConnection(providerId: string): Promise<ProviderView> {
+  return callBackend(() => commands.checkProviderConnection(providerId));
+}
+
+/** Signs out with the runtime's official logout, then disconnects. */
+export function signOutProvider(providerId: string): Promise<null> {
+  return callBackend(() => commands.signOutProvider(providerId));
 }
 
 export function disconnectProvider(providerId: string): Promise<null> {

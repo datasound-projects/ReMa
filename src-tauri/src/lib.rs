@@ -4,6 +4,7 @@
 //!
 //! ```text
 //! ipc       — the command list and generated TypeScript bindings
+//! accounts  — provider account sign-in through official local runtimes
 //! analytics — the deterministic job analytics engine (ingestion → dashboard)
 //! browser   — the isolated built-in browser workspace and Auto Fill
 //! commands  — thin Tauri IPC adapters: extract state/args, call a service
@@ -18,6 +19,7 @@
 //! error     — the single error type returned across the IPC boundary
 //! ```
 
+pub mod accounts;
 pub mod analytics;
 pub mod browser;
 pub mod commands;
@@ -42,10 +44,11 @@ use std::sync::Arc;
 use tauri::{App, Manager, RunEvent};
 
 use crate::{
+    accounts::{claude_console::ClaudeConsole, codex::CodexRuntime, Accounts},
     db::Database,
     events::TauriEvents,
     integrations::google::{GoogleContext, GoogleEndpoints},
-    llm::HttpLanguageModel,
+    llm::ProviderLanguageModel,
     secrets::{KeyringStore, SecretVault},
     services::{chat::Generations, scheduler, scheduler::SchedulerHandle},
     state::{AppInfo, AppState},
@@ -83,6 +86,7 @@ pub fn run() {
                 state.scheduler.shutdown();
                 state.analytics.stop();
                 state.generations.cancel_all();
+                state.accounts.shutdown();
             }
         }
     });
@@ -102,12 +106,24 @@ fn init_state(app: &App) -> Result<AppState, Box<dyn std::error::Error>> {
         Ok(())
     })?;
 
+    // The providers' official runtimes, each with a ReMa-private home: the
+    // user's own Codex and Anthropic CLI settings are neither read nor changed.
+    let info = AppInfo::from_package(app.package_info());
+    let runtimes = data_dir.join("runtimes");
+    let codex = Arc::new(CodexRuntime::new(
+        runtimes.join("codex"),
+        runtimes.join("codex-workspace"),
+        info.version.clone(),
+    ));
+    let claude_console = Arc::new(ClaudeConsole::new(runtimes.join("anthropic")));
+
     Ok(AppState {
-        info: Arc::new(AppInfo::from_package(app.package_info())),
+        info: Arc::new(info),
         data_dir: Arc::new(data_dir),
         db,
         vault: SecretVault::new(Arc::new(KeyringStore)),
-        llm: Arc::new(HttpLanguageModel::new()),
+        accounts: Accounts::new(codex.clone(), claude_console),
+        llm: Arc::new(ProviderLanguageModel::new(Some(codex))),
         events: Arc::new(TauriEvents(app.handle().clone())),
         generations: Generations::default(),
         scheduler: SchedulerHandle::default(),
