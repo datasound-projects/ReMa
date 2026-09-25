@@ -5,6 +5,7 @@
 //!
 //! Commands are `async` so they run off the main thread and never block the UI.
 
+pub mod analytics;
 pub mod browser;
 pub mod chat;
 pub mod google;

@@ -1,9 +1,13 @@
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 
+import { useLinkedRuns } from '../../hooks/useLinkedRuns';
+import { mayListJobs } from '../../lib/analytics';
 import { modelName } from '../../lib/format';
+import { analyzeAnswer, listConversationJobRuns, type LinkedRun } from '../../services/analyticsService';
 import type { Message } from '../../services/chatService';
 import type { ModelCatalog } from '../../services/providerService';
 import { CheckIcon, CopyIcon, RetryIcon } from '../icons';
+import { AnalyzeButton } from '../analytics/AnalyzeButton';
 import { IconButton } from '../ui/IconButton';
 import { Markdown } from './Markdown';
 
@@ -15,6 +19,12 @@ interface MessageListProps {
 
 export function MessageList({ messages, catalog, onRetry }: MessageListProps) {
   const lastId = messages.at(-1)?.id;
+  const conversationId = messages[0]?.conversationId ?? null;
+  const load = useCallback(
+    () => listConversationJobRuns(conversationId ?? 0),
+    [conversationId],
+  );
+  const runs = useLinkedRuns(conversationId == null ? null : load, `conversation-runs:${conversationId}`);
   return (
     <div className="thread">
       {messages.map((message) =>
@@ -29,6 +39,7 @@ export function MessageList({ messages, catalog, onRetry }: MessageListProps) {
             catalog={catalog}
             canRetry={message.id === lastId}
             onRetry={() => onRetry(message)}
+            run={runs.get(message.id)}
           />
         ),
       )}
@@ -41,9 +52,11 @@ interface AssistantMessageProps {
   catalog: ModelCatalog | null;
   canRetry: boolean;
   onRetry: () => void;
+  /** The job search Analytics made from this answer, if any. */
+  run: LinkedRun | undefined;
 }
 
-function AssistantMessage({ message, catalog, canRetry, onRetry }: AssistantMessageProps) {
+function AssistantMessage({ message, catalog, canRetry, onRetry, run }: AssistantMessageProps) {
   const streaming = message.status === 'streaming';
   return (
     <div className="message message--assistant" aria-busy={streaming}>
@@ -72,6 +85,9 @@ function AssistantMessage({ message, catalog, canRetry, onRetry }: AssistantMess
             </IconButton>
           )}
           {message.status === 'stopped' && <span className="message__note">Stopped</span>}
+          {message.status === 'complete' && (run || mayListJobs(message.content)) && (
+            <AnalyzeButton run={run} analyze={() => analyzeAnswer(message.id)} />
+          )}
           {message.model && (
             <span className="message__model">{modelName(catalog, message.model)}</span>
           )}

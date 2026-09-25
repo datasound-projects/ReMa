@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useState } from 'react';
 
+import { AnalyticsProvider } from '../components/analytics/AnalyticsProvider';
 import { BrowserProvider } from '../components/browser/BrowserProvider';
 import { ConversationList } from '../components/chat/ConversationList';
 import { AppShell } from '../components/layout/AppShell';
@@ -36,6 +37,7 @@ export function App() {
   return (
     <NavigationContext value={navigation}>
       <BrowserProvider>
+      <AnalyticsProvider>
       <AppShell
         sidebar={
           <Sidebar items={MAIN_NAV} footerItems={FOOTER_NAV} activeId={view.page} onSelect={selectPage}>
@@ -61,6 +63,7 @@ export function App() {
         {view.page === 'profile' && <ProfilePage />}
         {view.page === 'settings' && <SettingsPage />}
       </AppShell>
+      </AnalyticsProvider>
       </BrowserProvider>
     </NavigationContext>
   );

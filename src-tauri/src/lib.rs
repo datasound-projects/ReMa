@@ -4,6 +4,7 @@
 //!
 //! ```text
 //! ipc       — the command list and generated TypeScript bindings
+//! analytics — the deterministic job analytics engine (ingestion → dashboard)
 //! browser   — the isolated built-in browser workspace and Auto Fill
 //! commands  — thin Tauri IPC adapters: extract state/args, call a service
 //! services  — deterministic business logic (chat, providers, tasks, scheduler)
@@ -17,6 +18,7 @@
 //! error     — the single error type returned across the IPC boundary
 //! ```
 
+pub mod analytics;
 pub mod browser;
 pub mod commands;
 pub mod db;
@@ -68,6 +70,7 @@ pub fn run() {
             ipc.mount_events(app);
             let state = init_state(app)?;
             scheduler::start(state.clone());
+            analytics::enrich::start(state.clone());
             app.manage(state);
             Ok(())
         })
@@ -78,6 +81,7 @@ pub fn run() {
         if let RunEvent::Exit = event {
             if let Some(state) = handle.try_state::<AppState>() {
                 state.scheduler.shutdown();
+                state.analytics.stop();
                 state.generations.cancel_all();
             }
         }
@@ -94,6 +98,7 @@ fn init_state(app: &App) -> Result<AppState, Box<dyn std::error::Error>> {
     db.call(|conn| {
         db::conversations::mark_interrupted(conn)?;
         db::tasks::mark_interrupted_executions(conn, now)?;
+        db::analytics::mark_interrupted_research(conn)?;
         Ok(())
     })?;
 
@@ -108,5 +113,6 @@ fn init_state(app: &App) -> Result<AppState, Box<dyn std::error::Error>> {
         scheduler: SchedulerHandle::default(),
         google: GoogleContext::new(GoogleEndpoints::from_env()),
         browser: Default::default(),
+        analytics: Default::default(),
     })
 }

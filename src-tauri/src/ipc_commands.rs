@@ -63,4 +63,18 @@ pub const APP_COMMANDS: &[&str] = &[
     "delete_task",
     "run_task_now",
     "list_task_executions",
+    // Job analytics
+    "get_analytics_preferences",
+    "save_analytics_preferences",
+    "list_job_search_runs",
+    "delete_job_search_run",
+    "get_analytics_overview",
+    "get_skill_gap",
+    "get_requirements_analysis",
+    "get_learning",
+    "research_learning",
+    "analyze_answer",
+    "analyze_task_result",
+    "list_conversation_job_runs",
+    "list_task_job_runs",
 ];

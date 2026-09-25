@@ -9,6 +9,7 @@ use tauri::AppHandle;
 use tauri_specta::Event;
 
 use crate::models::{
+    analytics::AnalyticsChanged,
     browser::{BrowserChanged, BrowserStatus},
     chat::{ChatEvent, ConversationsChanged},
     google::GoogleChanged,
@@ -25,6 +26,7 @@ pub trait EventSink: Send + Sync {
     fn google_changed(&self);
     fn profile_changed(&self);
     fn browser_changed(&self, status: BrowserStatus);
+    fn analytics_changed(&self);
 }
 
 pub struct TauriEvents(pub AppHandle);
@@ -58,6 +60,10 @@ impl EventSink for TauriEvents {
     fn browser_changed(&self, status: BrowserStatus) {
         let _ = BrowserChanged(status).emit(&self.0);
     }
+
+    fn analytics_changed(&self) {
+        let _ = AnalyticsChanged.emit(&self.0);
+    }
 }
 
 /// Collects events for assertions in tests.
@@ -70,6 +76,7 @@ pub struct RecordingEvents {
     pub google: Mutex<usize>,
     pub profile: Mutex<usize>,
     pub browser: Mutex<Vec<BrowserStatus>>,
+    pub analytics: Mutex<usize>,
 }
 
 impl EventSink for RecordingEvents {
@@ -99,5 +106,9 @@ impl EventSink for RecordingEvents {
 
     fn browser_changed(&self, status: BrowserStatus) {
         self.browser.lock().unwrap().push(status);
+    }
+
+    fn analytics_changed(&self) {
+        *self.analytics.lock().unwrap() += 1;
     }
 }

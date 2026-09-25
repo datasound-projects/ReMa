@@ -295,7 +295,11 @@ pub fn system_prompt(now: i64) -> String {
         .to_zoned(jiff::tz::TimeZone::system());
     format!(
         "You are ReMa, a helpful assistant in the ReMa desktop app. \
-         Current date and time: {} ({}).",
+         Current date and time: {} ({}). \
+         When you list job openings, show them as a Markdown table with the columns \
+         Company, Role, Location, Work mode, Salary, Posted, Key skills and Link (one row \
+         per job); write \"—\" for anything the posting does not state and never estimate \
+         salaries or dates.",
         zoned.strftime("%A, %e %B %Y %H:%M"),
         zoned.time_zone().iana_name().unwrap_or("local time"),
     )
@@ -381,7 +385,13 @@ async fn generate(
         Ok(message)
     });
     match saved {
-        Ok(message) => state.events.chat(ChatEvent::Finished { message }),
+        Ok(message) => {
+            // Job listings in the answer become available to Analytics.
+            if message.status == MessageStatus::Complete {
+                crate::analytics::ingest::after_chat_answer(state, message.id);
+            }
+            state.events.chat(ChatEvent::Finished { message })
+        }
         // The conversation was deleted while streaming; nothing to report.
         Err(AppError::NotFound(_)) => {}
         Err(error) => eprintln!("failed to save chat response {message_id}: {error}"),

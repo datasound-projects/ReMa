@@ -56,10 +56,6 @@
   min-width: 0;
 }
 
-.app-shell__workspace--left {
-  flex-direction: row-reverse;
-}
-
 .app-shell__main[hidden] {
   display: none;
 }

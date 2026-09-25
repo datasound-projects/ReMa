@@ -47,6 +47,8 @@ getrandom = "0.3"
 pdf-extract = "0.12"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 quick-xml = "0.38"
+# Job analytics: deterministic text patterns (salaries, dates, requirements)
+regex = "1"
 
 # Linux: the browser workspace is layered over the app with a GTK overlay.
 [target.'cfg(target_os = "linux")'.dependencies]

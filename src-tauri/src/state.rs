@@ -3,6 +3,7 @@ use std::{path::PathBuf, sync::Arc};
 use tauri::PackageInfo;
 
 use crate::{
+    analytics::AnalyticsContext,
     browser::BrowserContext,
     db::Database,
     events::EventSink,
@@ -46,6 +47,7 @@ pub struct AppState {
     pub scheduler: SchedulerHandle,
     pub google: GoogleContext,
     pub browser: BrowserContext,
+    pub analytics: AnalyticsContext,
 }
 
 #[cfg(test)]
@@ -83,6 +85,7 @@ pub mod testing {
             scheduler: SchedulerHandle::default(),
             google: GoogleContext::new(GoogleEndpoints::default()),
             browser: Default::default(),
+            analytics: Default::default(),
         };
         (state, events)
     }

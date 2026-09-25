@@ -4,6 +4,7 @@
 //! every query is short, so this is simpler and faster than a pool. Callers
 //! hold the lock only for the duration of `Database::call`.
 
+pub mod analytics;
 pub mod conversations;
 pub mod jobs;
 pub mod profile;
@@ -24,6 +25,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0001_initial.sql"),
     include_str!("migrations/0002_google_jobs.sql"),
     include_str!("migrations/0003_profile.sql"),
+    include_str!("migrations/0004_job_analytics.sql"),
 ];
 
 #[derive(Clone)]

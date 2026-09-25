@@ -1,6 +1,9 @@
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 
 import { dataOr } from '../../hooks/useAsyncData';
+import { useLinkedRuns } from '../../hooks/useLinkedRuns';
+import { mayListJobs } from '../../lib/analytics';
+import { analyzeTaskResult, listTaskJobRuns, type LinkedRun } from '../../services/analyticsService';
 import { useTaskExecutions } from '../../hooks/useTasks';
 import {
   describeSchedule,
@@ -12,6 +15,7 @@ import {
 import { toApiError } from '../../services/ipc';
 import type { ModelCatalog } from '../../services/providerService';
 import { runTaskNow, type ScheduledTask, type TaskExecution } from '../../services/taskService';
+import { AnalyzeButton } from '../analytics/AnalyzeButton';
 import { Markdown } from '../chat/Markdown';
 import { ChevronLeftIcon, ChevronRightIcon } from '../icons';
 import { JobReport } from './JobReport';
@@ -32,6 +36,8 @@ export function TaskDetail({ task, catalog, onBack, onEdit }: TaskDetailProps) {
   const executions = dataOr(history.state, []);
   const [openId, setOpenId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const loadRuns = useCallback(() => listTaskJobRuns(task.id), [task.id]);
+  const runs = useLinkedRuns(task.kind.type === 'prompt' ? loadRuns : null, `task-runs:${task.id}`);
 
   return (
     <div className="page">
@@ -104,6 +110,7 @@ export function TaskDetail({ task, catalog, onBack, onEdit }: TaskDetailProps) {
                   key={execution.id}
                   execution={execution}
                   open={openId === execution.id}
+                  run={runs.get(execution.id)}
                   onToggle={() => setOpenId(openId === execution.id ? null : execution.id)}
                 />
               ))}
@@ -119,10 +126,13 @@ function HistoryRow({
   execution,
   open,
   onToggle,
+  run,
 }: {
   execution: TaskExecution;
   open: boolean;
   onToggle: () => void;
+  /** The job search Analytics made from this run, if any. */
+  run: LinkedRun | undefined;
 }) {
   const status =
     execution.status === 'running' ? (
@@ -157,7 +167,14 @@ function HistoryRow({
           ) : execution.report ? (
             <JobReport report={execution.report} />
           ) : (
-            <Markdown source={execution.result ?? ''} />
+            <>
+              <Markdown source={execution.result ?? ''} />
+              {(run || mayListJobs(execution.result ?? '')) && (
+                <div className="history__actions">
+                  <AnalyzeButton run={run} analyze={() => analyzeTaskResult(execution.id)} />
+                </div>
+              )}
+            </>
           )}
         </div>
       )}

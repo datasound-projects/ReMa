@@ -3493,6 +3493,7 @@ dependencies = [
  "keyring",
  "pdf-extract",
  "quick-xml 0.38.4",
+ "regex",
  "reqwest",
  "rusqlite",
  "serde",

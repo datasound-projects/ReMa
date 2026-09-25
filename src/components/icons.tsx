@@ -259,3 +259,46 @@ export function UploadIcon(props: IconProps) {
     </Icon>
   );
 }
+
+/** Analytics: three bars on a baseline. */
+export function ChartIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M4 16h12M6.5 13V9.5M10 13V5.5M13.5 13v-5" />
+    </Icon>
+  );
+}
+
+/** Minimize to an indicator: a bar at the bottom. */
+export function MinimizeIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M5 14.5h10" />
+    </Icon>
+  );
+}
+
+export function FilterIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M3.5 5h13M6 10h8M8.5 15h3" />
+    </Icon>
+  );
+}
+
+export function SortIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M6.5 4v12M4 13.5 6.5 16 9 13.5M13.5 16V4M11 6.5 13.5 4 16 6.5" />
+    </Icon>
+  );
+}
+
+export function DatabaseIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <ellipse cx="10" cy="5.5" rx="5.5" ry="2" />
+      <path d="M4.5 5.5v9c0 1.1 2.5 2 5.5 2s5.5-.9 5.5-2v-9M4.5 10c0 1.1 2.5 2 5.5 2s5.5-.9 5.5-2" />
+    </Icon>
+  );
+}

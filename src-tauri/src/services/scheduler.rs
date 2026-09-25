@@ -277,7 +277,7 @@ pub async fn execute(
     };
 
     let finished_at = now_ms();
-    state.db.call(|conn| {
+    let execution = state.db.call(|conn| {
         repo::finish_execution(
             conn,
             execution.id,
@@ -290,7 +290,12 @@ pub async fn execute(
             },
         )?;
         repo::get_execution(conn, execution.id)
-    })
+    })?;
+    // Job listings in a prompt task's result become available to Analytics.
+    if status == ExecutionStatus::Succeeded && task.kind == TaskKind::Prompt {
+        crate::analytics::ingest::after_task_result(state, execution.id);
+    }
+    Ok(execution)
 }
 
 /// What one run produced.

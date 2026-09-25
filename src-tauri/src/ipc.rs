@@ -17,6 +17,7 @@ use tauri_specta::{collect_commands, collect_events, Builder, ErrorHandlingMode}
 use crate::{
     commands,
     models::{
+        analytics::AnalyticsChanged,
         browser::BrowserChanged,
         chat::{ChatEvent, ConversationsChanged},
         google::GoogleChanged,
@@ -91,8 +92,23 @@ pub fn builder() -> Builder<tauri::Wry> {
             commands::tasks::delete_task,
             commands::tasks::run_task_now,
             commands::tasks::list_task_executions,
+            // Job analytics
+            commands::analytics::get_analytics_preferences,
+            commands::analytics::save_analytics_preferences,
+            commands::analytics::list_job_search_runs,
+            commands::analytics::delete_job_search_run,
+            commands::analytics::get_analytics_overview,
+            commands::analytics::get_skill_gap,
+            commands::analytics::get_requirements_analysis,
+            commands::analytics::get_learning,
+            commands::analytics::research_learning,
+            commands::analytics::analyze_answer,
+            commands::analytics::analyze_task_result,
+            commands::analytics::list_conversation_job_runs,
+            commands::analytics::list_task_job_runs,
         ])
         .events(collect_events![
+            AnalyticsChanged,
             BrowserChanged,
             ChatEvent,
             ConversationsChanged,

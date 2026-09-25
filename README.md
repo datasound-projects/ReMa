@@ -15,6 +15,7 @@ Rust owns application state, persistence, scheduling, validation, provider confi
 - **Built-in browser**: links in Chat and task results open in a panel next to ReMa. You can collapse, maximize, dock left or right, and resize it. "Open in external browser" is always available.
 - **ReMa Auto Fill**: fills the standard fields of an application form in the built-in browser from your Profile. You review and submit yourself. ReMa never submits.
 - **Profile context**: a **Profile** switch in the chat composer (and an option on scheduled prompt tasks) gives the model a summary of your Profile. It is off unless you turn it on.
+- **Analytics**: a deterministic dashboard over every job search ReMa has run, from Chat or scheduled tasks. It opens from the **Analytics** button in the header as a panel beside the current page. You can filter and rank the jobs, compare their requirements with your Profile (skill gap), see which requirements are common or rare, and research learning resources for the gaps that matter.
 
 ## Architecture
 
@@ -31,6 +32,7 @@ Rust services               src-tauri/src/services   (chat, providers, tasks, sc
                                                       profile, documents, profile_import, profile_context)
                             src-tauri/src/jobs       (job-application workflow, run by the scheduler)
                             src-tauri/src/browser    (built-in browser webview, navigation policy, Auto Fill)
+                            src-tauri/src/analytics  (job ingestion, dedupe, filters, ranking, skill gap, learning)
       ↓
 Persistence / providers     src-tauri/src/db (SQLite) · src-tauri/src/llm (adapters) · src-tauri/src/secrets (OS keychain)
 Integrations                src-tauri/src/integrations/google (OAuth, Gmail tool, Calendar tool)
@@ -122,6 +124,36 @@ The context builder (`services/profile_context.rs`) creates a short, provider-in
 
 Otherwise no Profile data is sent.
 
+## Analytics
+
+**Opening it.** The **Analytics** button in the header opens a panel at half the width of the workspace, beside the current page. It is not a page in the navigation. The panel can be resized, collapsed to a strip, maximized, minimized to the header button, and closed. It reopens as you left it: size and mode are kept in the window, and the scope, filters, ranking, columns, tab and options are saved in SQLite. **Analyze** on a chat answer or task result opens it with that search selected. A job row opens the job in the built-in browser, and Analytics and the browser can sit side by side.
+
+**Where the jobs come from.** Every chat answer and prompt-task result that contains a job table is read automatically when it finishes, and older history is read once at start. (The chat system prompt asks the model to list jobs as a table with company, role, location, work mode, salary, posting date, key skills and link.) Answers that list jobs as text can be read with **Analyze**, which parses common list formats and then asks the model; the model's values must appear verbatim in the answer. Each answer or run becomes a *job search run*, which keeps its own list of jobs even when those jobs are shared with other runs.
+
+**Normalization.** Rust normalizes each job: role (seniority words removed), seniority, work mode, employment type, cities and countries, salary (minimum, maximum, currency, period) and posting date. A value the source does not state stays empty. ReMa never guesses a salary, seniority, location, date or requirement. Estimated salaries are ignored. Relative dates ("3 days ago") count from when the job was found, and the date it was found is never used as a posting date. Ambiguous dates such as `03/04/2026` are not guessed.
+
+**Deduplication.** A job is the same job when it shares any of these keys (checked in this order):
+
+1. the job board's own id (LinkedIn, Indeed, Greenhouse, Lever, Workday, Personio, StepStone, Glassdoor, SmartRecruiters, Ashby, karriere.at, XING);
+2. the canonical URL, without tracking parameters (when the URL points to one job);
+3. the company's own reference number;
+4. a fingerprint of the job description;
+5. company + normalized title + location.
+
+A job listed as "Austria" and the same job listed as "Vienna, Austria" also match, but two jobs in different cities do not. Merged jobs keep every run they appeared in, so "Analyze" on one search still shows that search's jobs.
+
+**Job details.** A background worker reads each job's own page, one at a time: it follows only public addresses (never this computer or the local network, also after redirects), reads at most 3 MB, stops at pages that refuse it (401, 403, 429), and prefers the page's `JobPosting` structured data. Requirements are then extracted deterministically with a skill dictionary and aliases (K8s → Kubernetes, Postgres → PostgreSQL). Optionally, the default model extracts them from the description as JSON; every item must quote the description, and Rust rejects anything it cannot find there. Both options can be turned off in the scope editor. In debug builds, `REMA_DEV_ALLOW_LOCAL_PAGES=1` lets the worker read pages from a local test server.
+
+**Filters and ranking.** Filters are typed conditions (country, city, work mode, role, company, seniority, salary, posting date, skill, language, certification, Profile match, missing skill, search…), combined with AND; a condition with several values matches any of them. They run in Rust. Ranking is an ordered list of criteria (for example highest salary, then preferred country, then newest), each with its own direction. Jobs without a value always rank last. There is no hidden score. "Analyze only the top N" limits the analysis to the best-ranked jobs.
+
+**Salary.** Salaries are compared only per year and only in one currency: yearly and monthly amounts are converted to yearly, hourly and daily rates are not compared, and jobs in other currencies are listed but not compared (the dashboard says so). The midpoint of a range is used. A missing salary is never zero.
+
+**Skill gap.** Each requirement of each job is compared with the Profile: **Matched**, **Partial** (a related skill, fewer years, a lower language level or degree), **Missing**, or **Unknown** (for example soft skills, which a Profile cannot prove). Unknown requirements never count as gaps. Coverage = (matched + ½ partial) ÷ (matched + partial + missing). Gap priority = share of jobs weighted by importance (required 1, preferred 0.5) and gap (missing 1, partial 0.5), optionally weighted by rank. It is raised a little when the skill is more common among the better-paid jobs, and only when at least 5 salaries can be compared. Charts: demand frequency, coverage vs demand, a job × skill matrix, and gap priority; each has a table view. Without a Profile, the dashboard says "Profile required for personal skill-gap comparison." and shows demand only.
+
+**Requirements.** Every normalized requirement with its category, number of jobs and share of jobs, classed as very common (≥ 70%), common (40–70%), occasional (15–40%) or rare (< 15%, only with 5 or more jobs). The table can be searched, filtered by category, class or Profile state, and sorted, and selected requirements can become filters.
+
+**Learning.** Rust picks the gaps to learn from the deterministic priorities and your criteria (minimum share, ignore single-job skills, include partial matches, maximum number of gaps). **Research learning resources** sends only those gaps to the default model and asks for resources as JSON. Rust validates it: the gaps must be the ones it sent, links must be public `http(s)` URLs, and each link is checked once for reachability. The explanation of why each gap matters is written by Rust from the jobs themselves. Research is stored with the date, dataset and gap snapshot, is marked outdated when the data changes, and runs again only when you click **Refresh**.
+
 ## Scheduler behaviour
 
 - Tasks run only while ReMa is open. If ReMa was closed through one or more scheduled times, the task runs **once** at the next start and then continues on schedule.
@@ -171,6 +203,8 @@ rema/
 │   ├── components/
 │   │   ├── layout/               # AppShell, Sidebar, PageContainer
 │   │   ├── browser/              # BrowserProvider, BrowserPanel, Auto Fill button and report
+│   │   ├── analytics/            # AnalyticsPanel, scope/filter/ranking editors, Jobs, Skill gap,
+│   │   │                         # Requirements and Learning tabs, charts, Analyze button
 │   │   ├── chat/                 # Composer, MessageList, Markdown, ModelSelector, ConversationList
 │   │   ├── profile/              # Profile sections, documents, custom fields, import review
 │   │   ├── tasks/                # TaskDialog, TaskDetail, JobReport, TaskActions, TaskStatus
@@ -179,8 +213,8 @@ rema/
 │   ├── hooks/                    # useAsyncData, useChat, useTasks, useProfile, useAutofill, …
 │   ├── services/                 # ipc.ts (callBackend, ApiError), events.ts, one service per area
 │   ├── generated/bindings.ts     # Generated from Rust (do not edit)
-│   ├── lib/                      # markdown.ts (safe rendering), format.ts, taskForm.ts, profileMerge.ts
-│   └── styles/                   # tokens → base → layout → components → chat/tasks/settings/profile/browser
+│   ├── lib/                      # markdown.ts (safe rendering), format.ts, taskForm.ts, profileMerge.ts, analytics.ts
+│   └── styles/                   # tokens → base → layout → components → chat/tasks/settings/profile/browser/analytics
 │
 └── src-tauri/src/                # Backend (Rust)
     ├── lib.rs                    # Startup: database, keychain, scheduler, IPC
@@ -190,6 +224,9 @@ rema/
     ├── services/                 # chat, providers, tasks, scheduler, schedule (pure math), system,
     │                             # profile, documents (storage + text extraction), profile_import, profile_context
     ├── browser/                  # Built-in browser: webview, navigation policy, Linux embedding, autofill
+    ├── analytics/                # Job analytics: table/list parsing, normalize, skills dictionary, ingest
+    │                             # (dedupe), page reader + background worker, dataset, filter, rank,
+    │                             # matching, overview, gap, unique (requirements), learning
     ├── jobs/                     # Job-application workflow: extract, interviews, applications, calendar_sync, report
     ├── integrations/google/      # OAuth (PKCE, refresh, revoke), Gmail and Calendar tools
     ├── llm/                      # LanguageModel trait, SSE, HTTP, OpenAI/Anthropic/Gemini adapters

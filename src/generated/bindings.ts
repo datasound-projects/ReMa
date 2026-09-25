@@ -87,10 +87,32 @@ export const commands = {
 	deleteTask: (id: number) => __TAURI_INVOKE<null>("delete_task", { id }),
 	runTaskNow: (id: number) => __TAURI_INVOKE<null>("run_task_now", { id }),
 	listTaskExecutions: (taskId: number) => __TAURI_INVOKE<TaskExecution[]>("list_task_executions", { taskId }),
+	getAnalyticsPreferences: () => __TAURI_INVOKE<AnalyticsPreferences>("get_analytics_preferences"),
+	saveAnalyticsPreferences: (preferences: AnalyticsPreferences) => __TAURI_INVOKE<null>("save_analytics_preferences", { preferences }),
+	listJobSearchRuns: () => __TAURI_INVOKE<JobSearchRun[]>("list_job_search_runs"),
+	deleteJobSearchRun: (id: number) => __TAURI_INVOKE<null>("delete_job_search_run", { id }),
+	getAnalyticsOverview: (query: AnalyticsQuery) => __TAURI_INVOKE<AnalyticsOverview>("get_analytics_overview", { query }),
+	getSkillGap: (query: AnalyticsQuery, options: SkillGapOptions) => __TAURI_INVOKE<SkillGapView>("get_skill_gap", { query, options }),
+	getRequirementsAnalysis: (query: AnalyticsQuery, table: RequirementTableQuery) => __TAURI_INVOKE<RequirementsView>("get_requirements_analysis", { query, table }),
+	getLearning: (query: AnalyticsQuery, criteria: LearningCriteria, options: SkillGapOptions) => __TAURI_INVOKE<LearningView>("get_learning", { query, criteria, options }),
+	/**  Starts learning-resource research in the background. */
+	researchLearning: (query: AnalyticsQuery, criteria: LearningCriteria, options: SkillGapOptions) => __TAURI_INVOKE<LearningView>("research_learning", { query, criteria, options }),
+	/**
+	 *  Makes a chat answer's job listings available to Analytics (reading a
+	 *  list written as text with the model if needed). Returns the search run.
+	 */
+	analyzeAnswer: (messageId: number) => __TAURI_INVOKE<number>("analyze_answer", { messageId }),
+	/**  Same for a scheduled task's result. */
+	analyzeTaskResult: (executionId: number) => __TAURI_INVOKE<number>("analyze_task_result", { executionId }),
+	/**  Search runs created from a conversation's answers. */
+	listConversationJobRuns: (conversationId: number) => __TAURI_INVOKE<LinkedRun[]>("list_conversation_job_runs", { conversationId }),
+	/**  Search runs created from a task's runs. */
+	listTaskJobRuns: (taskId: number) => __TAURI_INVOKE<LinkedRun[]>("list_task_job_runs", { taskId }),
 };
 
 /** Events */
 export const events = {
+	analyticsChanged: makeEvent<AnalyticsChanged>("analytics-changed"),
 	browserChanged: makeEvent<BrowserChanged>("browser-changed"),
 	chatEvent: makeEvent<ChatEvent>("chat-event"),
 	conversationsChanged: makeEvent<ConversationsChanged>("conversations-changed"),
@@ -101,6 +123,40 @@ export const events = {
 };
 
 /* Types */
+/**  Job data or research changed (ingestion, background details, research). */
+export type AnalyticsChanged = null;
+
+export type AnalyticsOverview = {
+	summary: DatasetSummary,
+	jobs: RankedJob[],
+	/**  Rows beyond `jobs` that were not sent. */
+	more: number,
+	facets: Facets,
+	status: PipelineStatus,
+};
+
+/**  The dashboard's working state, restored when it opens again. */
+export type AnalyticsPreferences = {
+	query: AnalyticsQuery,
+	columns: JobColumn[],
+	tab: DashboardTab,
+	gap: SkillGapOptions,
+	learning: LearningCriteria,
+	/**  Read job pages in the background for descriptions and details. */
+	readPages: boolean,
+	/**  Let the default model extract requirements from descriptions. */
+	useModel: boolean,
+};
+
+/**  The analytical dataset: scope → filters → ranking → optional top N. */
+export type AnalyticsQuery = {
+	scope: DataScope,
+	filters?: FilterCondition[],
+	ranking?: SortCriterion[],
+	/**  Keep only the first N jobs of the ranking. */
+	limit?: number | null,
+};
+
 /**  Response of the `get_app_status` command. */
 export type AppStatus = {
 	status: BackendStatus,
@@ -208,12 +264,30 @@ export type CalendarReport = {
 	items: CalendarItem[],
 };
 
+export type CategoryCount = {
+	category: RequirementCategory,
+	requirements: number,
+	mentions: number,
+};
+
+/**  One cell of the job × skill matrix. */
+export type CellState = "matched" | "partial" | "missing" | "unknown" | "not_required" | 
+/**  ReMa has no requirement data for this job. */
+"no_data";
+
 /**  Streaming updates for an assistant message, emitted by the backend. */
 export type ChatEvent = 
 /**  New text appended to a streaming message. */
 { type: "delta"; conversationId: number; messageId: number; text: string } | 
 /**  The message reached a final state (complete, stopped or error). */
 { type: "finished"; message: Message };
+
+export type ClassCount = {
+	class: FrequencyClass,
+	requirements: number,
+	/**  Lower bound of the class in percent. */
+	threshold: number | null,
+};
 
 /**  An existing Calendar event overlapping an interview. */
 export type ConflictingEvent = {
@@ -241,6 +315,14 @@ export type ConversationDetail = {
 /**  The conversation list changed (created, renamed, updated, deleted). */
 export type ConversationsChanged = null;
 
+export type CoverageCounts = {
+	requirements: number,
+	matched: number,
+	partial: number,
+	missing: number,
+	unknown: number,
+};
+
 /**  A field the user defines, e.g. "Research profile" → URL. */
 export type CustomField = {
 	label: string,
@@ -266,6 +348,38 @@ export type CustomProviderInput = {
 	apiKey: string | null,
 };
 
+export type DashboardTab = "jobs" | "skill_gap" | "requirements" | "learning";
+
+/**  Which stored jobs are analyzed. */
+export type DataScope = {
+	kind: ScopeKind,
+	/**  For `Searches`. */
+	runIds: number[],
+	/**  For `Jobs`. */
+	jobIds: number[],
+};
+
+export type DatasetSummary = {
+	/**  Human description of scope, filters and limit. */
+	label: string,
+	inScope: number,
+	/**  After filters. */
+	matching: number,
+	/**  After the optional top-N limit: the analyzed jobs. */
+	analyzed: number,
+	runs: number,
+	/**  Search results that pointed to an already known job. */
+	duplicatesMerged: number,
+	postedKnown: number,
+	requirementsKnown: number,
+	salary: SalaryCoverage,
+	/**  Explanations (missing data, ignored conditions, …). */
+	notes: string[],
+};
+
+/**  Progress of the background job-details reader for one job. */
+export type DetailsStatus = "pending" | "done" | "failed" | "skipped";
+
 /**  File formats ReMa accepts. Text is extracted from all but images. */
 export type DocumentFormat = "pdf" | "docx" | "text" | "markdown" | "png" | "jpeg";
 
@@ -279,6 +393,8 @@ export type Education = {
 	end: string,
 	description: string,
 };
+
+export type EmploymentType = "full_time" | "part_time" | "contract" | "freelance" | "temporary" | "internship";
 
 /**  When a recurring task stops. */
 export type EndCondition = { kind: "never" } | 
@@ -314,6 +430,24 @@ export type Experience = {
 	description: string,
 };
 
+export type FacetValue = {
+	value: string,
+	count: number,
+};
+
+/**  Values present in the scoped data, for filter suggestions. */
+export type Facets = {
+	companies: FacetValue[],
+	roles: FacetValue[],
+	countries: FacetValue[],
+	cities: FacetValue[],
+	sources: FacetValue[],
+	skills: FacetValue[],
+	languages: FacetValue[],
+	certifications: FacetValue[],
+	currencies: FacetValue[],
+};
+
 /**  A file upload field on the page. */
 export type FileField = {
 	/**  Identifies the field for `attach_profile_document`. */
@@ -330,6 +464,66 @@ export type FilledField = {
 	label: string,
 	/**  Which profile value was used, e.g. "Email". */
 	source: string,
+};
+
+/**
+ *  One condition. All conditions must hold (AND); `values` are
+ *  alternatives within a condition (OR).
+ */
+export type FilterCondition = {
+	field: FilterField,
+	op: FilterOp,
+	values?: string[],
+	/**  Threshold for numeric operators (salary, days, percent, count). */
+	number?: number | null,
+	/**  Currency of a salary threshold (ISO code, e.g. "EUR"). */
+	currency?: string | null,
+};
+
+export type FilterField = "company" | "title" | 
+/**  The normalized role (title without seniority and gender markers). */
+"role" | "location" | "country" | "city" | "source" | "work_mode" | "employment_type" | "seniority" | "salary" | "date_posted" | "date_discovered" | 
+/**  A requirement the job states (skill, technology, …). */
+"skill" | 
+/**  A requirement the job states that the Profile does not cover. */
+"missing_skill" | 
+/**  Profile match in percent. */
+"match" | 
+/**  Number of requirements missing from the Profile. */
+"skill_gap" | "language" | "certification" | "search_run";
+
+export type FilterOp = 
+/**  Equal to any of `values`. */
+"is" | 
+/**  Equal to none of `values` (unknown values are kept). */
+"is_not" | "contains" | "not_contains" | "at_least" | "at_most" | "within_days" | "older_than_days" | 
+/**  `values[0]` is a date, `YYYY-MM-DD`. */
+"on_or_after" | "before" | "has_any" | "has_all" | "has_none" | 
+/**  The value is known (e.g. "has a salary"). */
+"known" | "unknown";
+
+export type FrequencyClass = "very_common" | "common" | "occasional" | "rare";
+
+export type GapMatrix = {
+	skills: string[],
+	/**  Per skill: analyzed jobs where it is a gap (missing or partial). */
+	gapJobs: number[],
+	rows: MatrixRow[],
+	/**  Jobs not shown as rows. */
+	moreRows: number,
+};
+
+export type GapPriority = {
+	name: string,
+	kind: RequirementKind,
+	category: RequirementCategory,
+	state: MatchState,
+	score: number | null,
+	level: PriorityLevel,
+	jobs: number,
+	percent: number | null,
+	/**  Facts behind the priority, e.g. "Required by 22 of 35 jobs (63%)". */
+	reasons: string[],
 };
 
 /**  The Google connection changed. */
@@ -364,7 +558,21 @@ export type GoogleStatus = {
 	connecting: boolean,
 };
 
+export type Importance = "required" | "preferred";
+
 export type IntervalUnit = "minutes" | "hours";
+
+export type JobColumn = "rank" | "company" | "role" | "location" | "work_mode" | "salary" | "seniority" | "match" | "skill_gap" | "posted" | "discovered" | "source";
+
+/**  Skill gap of a single job. */
+export type JobGap = {
+	jobId: number,
+	title: string,
+	company: string | null,
+	coverage: number | null,
+	counts: CoverageCounts,
+	requirements: RequirementState[],
+};
 
 /**
  *  Structured result of one job-application monitoring run. Built from
@@ -392,10 +600,120 @@ export type JobRunReport = {
 	issues: string[],
 };
 
+export type JobSearchRun = {
+	id: number,
+	title: string,
+	query: string,
+	source: RunSource,
+	taskId: number | null,
+	conversationId: number | null,
+	createdAt: number,
+	/**  Distinct jobs in this run. */
+	resultCount: number,
+};
+
 export type Language = {
 	name: string,
 	/**  E.g. "Native", "C1", "Fluent". */
 	level: string,
+};
+
+/**  Which gaps are worth researching learning resources for. */
+export type LearningCriteria = {
+	/**  Only gaps required by at least this share of the jobs (0–100). */
+	minPercent: number | null,
+	/**  Ignore requirements that appear in a single job. */
+	ignoreSingle: boolean,
+	includePartial: boolean,
+	/**  At most this many gaps. */
+	maxGaps: number,
+	/**  Only these requirements (empty: all). */
+	focus?: string[],
+};
+
+export type LearningGap = {
+	name: string,
+	kind: RequirementKind,
+	category: RequirementCategory,
+	state: MatchState,
+	jobs: number,
+	totalJobs: number,
+	percent: number | null,
+	score: number | null,
+	level: PriorityLevel,
+	reasons: string[],
+};
+
+export type LearningRecommendation = {
+	skill: string,
+	level: PriorityLevel,
+	/**  Deterministic facts from the selected jobs. */
+	why: string[],
+	path: string[],
+	resources: LearningResource[],
+};
+
+/**  One stored research result with the snapshot it was based on. */
+export type LearningResearch = {
+	id: number,
+	datasetLabel: string,
+	jobCount: number,
+	generatedAt: number,
+	status: ResearchStatus,
+	error: string | null,
+	model: string | null,
+	gaps: LearningGap[],
+	recommendations: LearningRecommendation[],
+	/**  Researched for the current selection and criteria. */
+	current: boolean,
+	/**  The selection's gaps changed since the research. */
+	stale: boolean,
+};
+
+export type LearningResource = {
+	title: string,
+	provider: string | null,
+	url: string,
+	kind: ResourceType,
+	level: string | null,
+	cost: string | null,
+	note: string | null,
+	/**  Whether ReMa could open the link when it checked (None: not checked). */
+	reachable: boolean | null,
+};
+
+export type LearningView = {
+	profileAvailable: boolean,
+	jobs: number,
+	jobsWithRequirements: number,
+	gaps: LearningGap[],
+	/**  The research for this selection, or else the latest one. */
+	research: LearningResearch | null,
+	model: string | null,
+	notes: string[],
+};
+
+/**
+ *  A search run created from a chat answer or task run (`source_id` is the
+ *  message or execution id).
+ */
+export type LinkedRun = {
+	sourceId: number,
+	runId: number,
+	jobs: number,
+};
+
+/**  How the user's Profile relates to one requirement. */
+export type MatchState = "matched" | "partial" | "missing" | 
+/**  The Profile neither shows nor rules out the requirement. */
+"unknown";
+
+export type MatrixRow = {
+	jobId: number,
+	title: string,
+	company: string | null,
+	coverage: number | null,
+	cells: CellState[],
 };
 
 export type Message = {
@@ -437,6 +755,19 @@ export type ModelRef = {
 	providerId: string,
 	modelId: string,
 };
+
+export type PipelineStatus = {
+	jobs: number,
+	runs: number,
+	/**  Jobs whose details are still being read. */
+	pendingDetails: number,
+	readPages: boolean,
+	useModel: boolean,
+	/**  The model that reads descriptions, if one is set up. */
+	model: string | null,
+};
+
+export type PriorityLevel = "high" | "medium" | "low";
 
 /**  The structured profile. Every field is optional (empty) and editable. */
 export type Profile = {
@@ -544,6 +875,100 @@ export type ProviderView = {
 /**  Provider configuration or models changed. */
 export type ProvidersChanged = null;
 
+export type RankedJob = {
+	rank: number,
+	id: number,
+	title: string,
+	company: string | null,
+	location: string | null,
+	workMode: WorkMode | null,
+	employmentType: EmploymentType | null,
+	seniority: Seniority | null,
+	/**  Salary as ReMa understood it, e.g. "€90k–110k / year". */
+	salary: string | null,
+	salaryComparable: boolean,
+	matchPercent: number | null,
+	missing: number | null,
+	datePosted: number | null,
+	dateDiscovered: number,
+	source: string | null,
+	url: string | null,
+	/**  Search runs that found this job. */
+	appearances: number,
+	details: DetailsStatus,
+};
+
+export type RequirementCategory = "technical_skills" | "programming_languages" | "frameworks" | "cloud_infrastructure" | "ai_ml" | "data_engineering" | "databases" | "professional_experience" | "industry_experience" | "education" | "certifications" | "languages" | "soft_skills" | "other";
+
+/**  What kind of requirement a job states. */
+export type RequirementKind = "skill" | "experience" | "education" | "certification" | "language" | "soft_skill" | "other";
+
+export type RequirementRow = {
+	name: string,
+	kind: RequirementKind,
+	category: RequirementCategory,
+	jobs: number,
+	percent: number | null,
+	class: FrequencyClass,
+	required: number,
+	preferred: number,
+	state: MatchState | null,
+	/**  Most common level (languages, degrees, years). */
+	level: string | null,
+	/**  How job postings phrased it. */
+	examples: string[],
+};
+
+export type RequirementSort = "jobs" | "name" | "category" | "state";
+
+export type RequirementState = {
+	name: string,
+	kind: RequirementKind,
+	category: RequirementCategory,
+	importance: Importance,
+	state: MatchState,
+	evidence: string | null,
+	original: string,
+};
+
+/**  Table controls; applied in Rust. */
+export type RequirementTableQuery = {
+	search: string,
+	categories: RequirementCategory[],
+	classes: FrequencyClass[],
+	states: MatchState[],
+	sort: RequirementSort,
+	direction: SortDirection,
+};
+
+export type RequirementsView = {
+	jobs: number,
+	jobsWithRequirements: number,
+	/**  Distinct requirements before the table controls. */
+	total: number,
+	rows: RequirementRow[],
+	categories: CategoryCount[],
+	classes: ClassCount[],
+	profileAvailable: boolean,
+	summary: string[],
+};
+
+export type ResearchStatus = "running" | "done" | "failed";
+
+export type ResourceType = "certification" | "course" | "university" | "documentation" | "book" | "lab" | "tutorial" | "project" | "program";
+
+/**  How a search run reached ReMa. */
+export type RunSource = "chat" | "task" | "manual" | "tool";
+
+export type SalaryCoverage = {
+	/**  Jobs stating a salary. */
+	known: number,
+	/**  Jobs whose salary can be compared (reference currency, yearly or monthly). */
+	comparable: number,
+	/**  Currency salary comparisons use. */
+	currency: string | null,
+};
+
 /**
  *  How often a task repeats. The time of day for `Daily` and `Weekly` is the
  *  local time of the task's start (in the task's timezone).
@@ -586,6 +1011,10 @@ export type ScheduledTask = {
 	updatedAt: number,
 };
 
+export type ScopeKind = 
+/**  Every stored job search (the default). */
+"all" | "searches" | "jobs";
+
 export type SendMessageInput = {
 	/**  `None` starts a new conversation. */
 	conversationId: number | null,
@@ -600,6 +1029,75 @@ export type SendMessageResult = {
 	userMessage: Message,
 	/**  Placeholder that fills in through `ChatEvent`s. */
 	assistantMessage: Message,
+};
+
+export type Seniority = "intern" | "entry" | "mid" | "senior" | "lead" | "executive";
+
+export type SkillDemand = {
+	name: string,
+	kind: RequirementKind,
+	category: RequirementCategory,
+	/**  Jobs requiring it. */
+	jobs: number,
+	/**  Share of jobs with requirement data (0–100). */
+	percent: number | null,
+	state: MatchState | null,
+	/**  Why the state was chosen (e.g. "Skills: Kubernetes"). */
+	evidence: string | null,
+};
+
+export type SkillGapOptions = {
+	/**  Higher-ranked jobs count more (1.0 for the first, 0.5 for the last). */
+	weightByRank: boolean,
+};
+
+export type SkillGapView = {
+	profileAvailable: boolean,
+	jobs: number,
+	jobsWithRequirements: number,
+	averageCoverage: number | null,
+	/**  Summed over the analyzed jobs. */
+	counts: CoverageCounts,
+	demand: SkillDemand[],
+	coverage: StateShare[],
+	matrix: GapMatrix,
+	priorities: GapPriority[],
+	/**  Present when exactly one job is analyzed. */
+	job: JobGap | null,
+	summary: string[],
+	notes: string[],
+};
+
+/**
+ *  One ranking priority. Criteria apply in order; unknown values always
+ *  rank after known ones.
+ */
+export type SortCriterion = {
+	key: SortKey,
+	direction: SortDirection,
+	value?: string | null,
+};
+
+export type SortDirection = "asc" | "desc";
+
+export type SortKey = 
+/**  Remote → hybrid → on-site. */
+"work_mode" | "salary" | "match" | 
+/**  Number of missing requirements. */
+"skill_gap" | "date_posted" | "date_discovered" | "company" | "title" | "seniority" | 
+/**  Jobs in `value` (a country) first. */
+"prefer_country" | "prefer_city" | 
+/**  Jobs whose title contains `value` first. */
+"prefer_role" | "prefer_company" | 
+/**  Jobs requiring the skill `value` first. */
+"prefer_skill";
+
+/**  Share of all requirement mentions per Profile state. */
+export type StateShare = {
+	state: MatchState,
+	requirements: number,
+	mentions: number,
+	percent: number | null,
 };
 
 export type TaskExecution = {
@@ -665,6 +1163,8 @@ export type TaskStatus =
 export type TasksChanged = null;
 
 export type Weekday = "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun";
+
+export type WorkMode = "remote" | "hybrid" | "onsite";
 
 /* Tauri Specta runtime */
 type EventEmit<T> = [T] extends [null] ? () => Promise<void> : (payload: T) => Promise<void>;
