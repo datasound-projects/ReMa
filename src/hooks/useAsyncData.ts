@@ -5,14 +5,17 @@ import type { AsyncState } from '../types/async';
 
 /**
  * Loads data from a frontend service and tracks loading / success / error.
- * `retry` runs the load again.
+ *
+ * - `retry` shows the loading state again and reloads (after an error).
+ * - `refresh` reloads in the background, keeping the current data visible
+ *   (used when the backend reports a change).
  *
  * `load` must be stable between renders (a module-level service function,
  * or wrapped in `useCallback`), otherwise it re-runs on every render.
  */
 export function useAsyncData<T>(load: () => Promise<T>) {
   const [state, setState] = useState<AsyncState<T, ApiError>>({ status: 'loading' });
-  const [attempt, setAttempt] = useState(0);
+  const [version, setVersion] = useState(0);
 
   useEffect(() => {
     let active = true;
@@ -28,12 +31,19 @@ export function useAsyncData<T>(load: () => Promise<T>) {
     return () => {
       active = false;
     };
-  }, [load, attempt]);
+  }, [load, version]);
 
   const retry = useCallback(() => {
     setState({ status: 'loading' });
-    setAttempt((n) => n + 1);
+    setVersion((n) => n + 1);
   }, []);
 
-  return { state, retry };
+  const refresh = useCallback(() => setVersion((n) => n + 1), []);
+
+  return { state, retry, refresh };
+}
+
+/** The loaded data, or `fallback` while loading or on error. */
+export function dataOr<T, F>(state: AsyncState<T, ApiError>, fallback: F): T | F {
+  return state.status === 'success' ? state.data : fallback;
 }

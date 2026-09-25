@@ -5,4 +5,7 @@
 //!
 //! Commands are `async` so they run off the main thread and never block the UI.
 
+pub mod chat;
+pub mod providers;
 pub mod system;
+pub mod tasks;

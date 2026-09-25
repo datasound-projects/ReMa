@@ -25,6 +25,12 @@
   --color-success: #057642;
   --color-warning: #b26a00;
   --color-danger: #cc1016;
+  --color-danger-subtle: #fdf1f1;
+  --color-danger-border: #f3cfcf;
+
+  /* Chat */
+  --color-user-bubble: #edf3fa;
+  --color-code-bg: #f5f5f3;
 
   /* Typography */
   --font-sans:
@@ -57,6 +63,7 @@
   --radius-pill: 999px;
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
   --shadow-md: 0 1px 2px rgba(0, 0, 0, 0.04), 0 4px 16px rgba(0, 0, 0, 0.04);
+  --shadow-lg: 0 2px 6px rgba(0, 0, 0, 0.06), 0 12px 32px rgba(0, 0, 0, 0.1);
   --focus-ring: 0 0 0 3px rgba(10, 102, 194, 0.28);
 
   /* Layout */
@@ -65,6 +72,7 @@
   --traffic-light-inset: 88px;
   --sidebar-width: 232px;
   --page-max-width: 880px;
+  --thread-max-width: 760px;
 
   /* Motion */
   --transition-fast: 120ms ease;

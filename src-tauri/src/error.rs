@@ -31,6 +31,18 @@ pub enum AppError {
     #[error("Configuration error: {0}")]
     Configuration(String),
 
+    /// Credentials are missing, invalid, expired or were rejected.
+    #[error("{0}")]
+    Authentication(String),
+
+    /// An LLM provider returned an error (rate limit, bad request, outage).
+    #[error("{0}")]
+    Provider(String),
+
+    /// The network request failed (offline, DNS, TLS, timeout).
+    #[error("Network error: {0}")]
+    Network(String),
+
     /// An unexpected failure inside the application.
     #[error("{0}")]
     Internal(String),
@@ -45,6 +57,9 @@ pub enum ErrorCode {
     Io,
     Database,
     Configuration,
+    Authentication,
+    Provider,
+    Network,
     Internal,
 }
 
@@ -72,6 +87,18 @@ impl AppError {
         Self::Configuration(message.into())
     }
 
+    pub fn authentication(message: impl Into<String>) -> Self {
+        Self::Authentication(message.into())
+    }
+
+    pub fn provider(message: impl Into<String>) -> Self {
+        Self::Provider(message.into())
+    }
+
+    pub fn network(message: impl Into<String>) -> Self {
+        Self::Network(message.into())
+    }
+
     pub fn internal(message: impl Into<String>) -> Self {
         Self::Internal(message.into())
     }
@@ -83,6 +110,9 @@ impl AppError {
             Self::Io(_) => ErrorCode::Io,
             Self::Database(_) => ErrorCode::Database,
             Self::Configuration(_) => ErrorCode::Configuration,
+            Self::Authentication(_) => ErrorCode::Authentication,
+            Self::Provider(_) => ErrorCode::Provider,
+            Self::Network(_) => ErrorCode::Network,
             Self::Internal(_) => ErrorCode::Internal,
         }
     }
@@ -91,6 +121,28 @@ impl AppError {
         ErrorPayload {
             code: self.code(),
             message: self.to_string(),
+        }
+    }
+}
+
+impl From<rusqlite::Error> for AppError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Database(error.to_string())
+    }
+}
+
+impl From<reqwest::Error> for AppError {
+    fn from(error: reqwest::Error) -> Self {
+        // Never leak URLs (they may carry credentials for custom endpoints).
+        let error = error.without_url();
+        if error.is_timeout() {
+            Self::Network("the request timed out".into())
+        } else if error.is_connect() {
+            Self::Network("could not connect to the server".into())
+        } else if error.is_decode() {
+            Self::Provider(format!("unexpected response from provider: {error}"))
+        } else {
+            Self::Network(error.to_string())
         }
     }
 }
@@ -158,6 +210,28 @@ mod tests {
             to_json(AppError::configuration("missing data directory")),
             json!({ "code": "configuration", "message": "Configuration error: missing data directory" })
         );
+    }
+
+    #[test]
+    fn serializes_authentication_provider_and_network() {
+        assert_eq!(
+            to_json(AppError::authentication("OpenAI rejected the API key")),
+            json!({ "code": "authentication", "message": "OpenAI rejected the API key" })
+        );
+        assert_eq!(
+            to_json(AppError::provider("rate limited")),
+            json!({ "code": "provider", "message": "rate limited" })
+        );
+        assert_eq!(
+            to_json(AppError::network("offline")),
+            json!({ "code": "network", "message": "Network error: offline" })
+        );
+    }
+
+    #[test]
+    fn converts_database_errors() {
+        let error: AppError = rusqlite::Error::InvalidQuery.into();
+        assert_eq!(error.code(), ErrorCode::Database);
     }
 
     #[test]

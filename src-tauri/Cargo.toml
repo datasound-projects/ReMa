@@ -3,7 +3,7 @@ name = "rema"
 version = "0.1.0"
 description = "ReMa — Career UI Harness"
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.88"
 publish = false
 
 # The application core is a library so it can be unit-tested and, later,
@@ -17,14 +17,28 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 thiserror = "2"
-tauri-specta = { version = "=2.0.0-rc.25", features = ["typescript"] }
+# IPC bindings (release candidates: keep versions pinned exactly).
+tauri-specta = { version = "=2.0.0-rc.25", features = ["derive", "typescript"] }
 specta = { version = "=2.0.0-rc.25", features = ["derive"] }
 specta-typescript = "=0.0.12"
+# Persistence
+rusqlite = { version = "0.40", features = ["bundled"] }
+# LLM providers (HTTP + streaming)
+reqwest = { version = "0.13", default-features = false, features = ["native-tls", "http2", "json", "query", "stream", "system-proxy"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+tokio = { version = "1", features = ["sync", "time", "macros", "rt"] }
+tokio-util = "0.7"
+# Scheduling (timezone-aware date math)
+jiff = "0.2"
+# Secure credential storage (macOS Keychain, Windows Credential Manager, Secret Service)
+keyring = "4"
 
 [dev-dependencies]
-serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util"] }
 
 # Small, fast release binaries.
 [profile.release]

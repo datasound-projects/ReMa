@@ -1,23 +1,14 @@
-import type { ComponentType } from 'react';
+import { ChatIcon, ClockIcon, SettingsIcon } from '../components/icons';
+import type { SidebarItem } from '../components/layout/Sidebar';
+import type { PageId } from './navigation';
 
-import { HomeIcon, type IconProps } from '../components/icons';
-import { HomePage } from '../pages/HomePage';
+/** Main navigation. Adding a page means adding an entry here. */
+export const MAIN_NAV: readonly SidebarItem<PageId>[] = [
+  { id: 'chat', label: 'Chat', icon: ChatIcon },
+  { id: 'tasks', label: 'Scheduled Tasks', icon: ClockIcon },
+];
 
-export interface PageDefinition {
-  id: string;
-  label: string;
-  icon: ComponentType<IconProps>;
-  component: ComponentType;
-}
-
-/**
- * Page registry. Each entry appears in the sidebar and is rendered in the
- * main area when selected — adding a page means adding one entry here.
- */
-export const PAGES = [
-  { id: 'home', label: 'Home', icon: HomeIcon, component: HomePage },
-] as const satisfies readonly PageDefinition[];
-
-export type PageId = (typeof PAGES)[number]['id'];
-
-export const DEFAULT_PAGE_ID: PageId = 'home';
+/** Pinned to the bottom of the sidebar. */
+export const FOOTER_NAV: readonly SidebarItem<PageId>[] = [
+  { id: 'settings', label: 'Settings', icon: SettingsIcon },
+];

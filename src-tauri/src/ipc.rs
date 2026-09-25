@@ -12,9 +12,16 @@ use std::{
 };
 
 use specta_typescript::Typescript;
-use tauri_specta::{collect_commands, Builder, ErrorHandlingMode};
+use tauri_specta::{collect_commands, collect_events, Builder, ErrorHandlingMode};
 
-use crate::commands;
+use crate::{
+    commands,
+    models::{
+        chat::{ChatEvent, ConversationsChanged},
+        provider::ProvidersChanged,
+        task::TasksChanged,
+    },
+};
 
 /// Path of the generated bindings, relative to this crate.
 pub const BINDINGS_PATH: &str =
@@ -22,10 +29,47 @@ pub const BINDINGS_PATH: &str =
 
 const HEADER: &str = "// Source of truth: the Rust commands and models in src-tauri.\n// Regenerate with `pnpm bindings` (or run `pnpm tauri dev`).";
 
-/// Every command the frontend may call. Register new commands here.
+/// Every command and event the frontend may use. Register new ones here.
 pub fn builder() -> Builder<tauri::Wry> {
     Builder::<tauri::Wry>::new()
-        .commands(collect_commands![commands::system::get_app_status])
+        .commands(collect_commands![
+            // System
+            commands::system::get_app_status,
+            commands::system::get_system_timezone,
+            commands::system::open_external_url,
+            // Providers & models
+            commands::providers::get_provider_settings,
+            commands::providers::get_model_catalog,
+            commands::providers::connect_provider,
+            commands::providers::disconnect_provider,
+            commands::providers::save_custom_provider,
+            commands::providers::refresh_provider_models,
+            commands::providers::set_model_enabled,
+            commands::providers::set_default_model,
+            // Chat
+            commands::chat::list_conversations,
+            commands::chat::get_conversation,
+            commands::chat::send_message,
+            commands::chat::retry_message,
+            commands::chat::stop_generation,
+            commands::chat::delete_conversation,
+            // Scheduled tasks
+            commands::tasks::list_tasks,
+            commands::tasks::create_task,
+            commands::tasks::update_task,
+            commands::tasks::set_task_enabled,
+            commands::tasks::delete_task,
+            commands::tasks::run_task_now,
+            commands::tasks::list_task_executions,
+        ])
+        .events(collect_events![
+            ChatEvent,
+            ConversationsChanged,
+            ProvidersChanged,
+            TasksChanged,
+        ])
+        // Ids and epoch-millisecond timestamps are far below 2^53.
+        .dangerously_cast_bigints_to_number()
         // Failed commands reject the promise; `src/services/ipc.ts` turns the
         // rejection into an `ApiError`.
         .error_handling(ErrorHandlingMode::Throw)

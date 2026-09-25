@@ -1,4 +1,4 @@
-export type StatusTone = 'ready' | 'pending' | 'error';
+export type StatusTone = 'ready' | 'pending' | 'error' | 'idle';
 
 interface StatusIndicatorProps {
   tone: StatusTone;
