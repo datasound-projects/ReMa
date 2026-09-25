@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="rema-tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2F8AEA"/>
+      <stop offset="1" stop-color="#0A66C2"/>
+    </linearGradient>
+  </defs>
+  <rect x="64" y="84" width="896" height="896" rx="208" fill="#084F98"/>
+  <rect x="64" y="56" width="896" height="896" rx="208" fill="url(#rema-tile)"/>
+  <path fill="#FFFFFF" fill-rule="evenodd" d="M297 252H542C647 252 717 322 717 417C717 492 672 547 607 570L727 756H589L482 584H419V756H297ZM419 354V484H532C577 484 599 457 599 419C599 381 577 354 532 354Z"/>
+</svg>

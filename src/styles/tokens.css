@@ -1,0 +1,69 @@
+/*
+ * Design tokens — the single source for colors, type, spacing and depth.
+ * Palette follows the ReMa website: LinkedIn-style blue on white and soft gray.
+ */
+:root {
+  /* Brand */
+  --color-brand: #0a66c2;
+  --color-brand-hover: #004182;
+  --color-brand-bright: #378fe9;
+  --color-brand-subtle: #e8f1fb;
+  --color-brand-subtle-border: #cfe2f7;
+
+  /* Neutrals */
+  --color-bg: #f4f4f2;
+  --color-surface: #ffffff;
+  --color-surface-sunken: #f9f9f8;
+  --color-hover: rgba(0, 0, 0, 0.045);
+  --color-border: #e5e4e0;
+  --color-border-strong: #d4d3ce;
+  --color-text: #191919;
+  --color-text-secondary: #5c5c59;
+  --color-text-tertiary: #8b8b87;
+
+  /* Status */
+  --color-success: #057642;
+  --color-warning: #b26a00;
+  --color-danger: #cc1016;
+
+  /* Typography */
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI Variable', 'Segoe UI', Inter,
+    Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono:
+    ui-monospace, 'SF Mono', SFMono-Regular, Menlo, 'Cascadia Mono', Consolas, 'Liberation Mono',
+    monospace;
+  --text-xs: 11px;
+  --text-sm: 13px;
+  --text-md: 14px;
+  --text-lg: 16px;
+  --text-display: 40px;
+
+  /* Spacing (4px grid) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+
+  /* Shape & depth */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 14px;
+  --radius-pill: 999px;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 1px 2px rgba(0, 0, 0, 0.04), 0 4px 16px rgba(0, 0, 0, 0.04);
+  --focus-ring: 0 0 0 3px rgba(10, 102, 194, 0.28);
+
+  /* Layout */
+  --topbar-height: 52px;
+  --sidebar-width: 232px;
+  --page-max-width: 880px;
+
+  /* Motion */
+  --transition-fast: 120ms ease;
+}

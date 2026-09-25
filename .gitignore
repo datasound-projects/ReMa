@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+
+# Frontend build output
+dist/
+*.tsbuildinfo
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Editor / OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+*.swp
+
+# Local env
+.env
+.env.*
+!.env.example
