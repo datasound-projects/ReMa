@@ -1,11 +1,107 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
   <defs>
-    <linearGradient id="rema-tile" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#2F8AEA"/>
-      <stop offset="1" stop-color="#0A66C2"/>
+    <!-- Subtle blue ambient glow against dark slate-grey background -->
+    <radialGradient id="ambient-blue-glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#0a66c2" stop-opacity="0.20" />
+      <stop offset="45%" stop-color="#084d94" stop-opacity="0.09" />
+      <stop offset="75%" stop-color="#042a54" stop-opacity="0.02" />
+      <stop offset="100%" stop-color="#1c1d21" stop-opacity="0" />
+    </radialGradient>
+
+    <!-- Subtle squircle ground shadow onto dark slate-grey -->
+    <filter id="tile-subtle-shadow" x="-10%" y="-10%" width="120%" height="125%">
+      <feDropShadow dx="0" dy="20" stdDeviation="24" flood-color="#090a0d" flood-opacity="0.75" />
+      <feDropShadow dx="0" dy="5" stdDeviation="10" flood-color="#0e0f13" flood-opacity="0.4" />
+    </filter>
+
+    <!-- Controlled minimal depth for R and dot -->
+    <filter id="r-subtle-depth" x="-15%" y="-15%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#021633" flood-opacity="0.5" />
+      <feDropShadow dx="0" dy="1" stdDeviation="2" flood-color="#010b1a" flood-opacity="0.35" />
+    </filter>
+
+    <!-- LinkedIn-inspired multi-tone blue gradient -->
+    <linearGradient id="linkedin-blue-gradient" x1="0.18" y1="0.02" x2="0.82" y2="0.98">
+      <stop offset="0%" stop-color="#1d7fe6" />
+      <stop offset="26%" stop-color="#0d6ecc" />
+      <stop offset="56%" stop-color="#0a66c2" />
+      <stop offset="82%" stop-color="#074f99" />
+      <stop offset="100%" stop-color="#053b75" />
+    </linearGradient>
+
+    <!-- Refined dark edge vignette -->
+    <radialGradient id="edge-tonal-depth" cx="48%" cy="42%" r="65%">
+      <stop offset="0%" stop-color="#000000" stop-opacity="0" />
+      <stop offset="60%" stop-color="#000000" stop-opacity="0.02" />
+      <stop offset="85%" stop-color="#021633" stop-opacity="0.35" />
+      <stop offset="100%" stop-color="#010d21" stop-opacity="0.65" />
+    </radialGradient>
+
+    <!-- Soft internal light strike -->
+    <radialGradient id="internal-light" cx="32%" cy="22%" r="52%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.18" />
+      <stop offset="40%" stop-color="#ffffff" stop-opacity="0.05" />
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0" />
+    </radialGradient>
+
+    <!-- Controlled Apple-like glass reflection sheen -->
+    <linearGradient id="controlled-glass-sheen" x1="0.5" y1="0" x2="0.5" y2="1">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.24" />
+      <stop offset="35%" stop-color="#ffffff" stop-opacity="0.08" />
+      <stop offset="75%" stop-color="#ffffff" stop-opacity="0.01" />
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0" />
+    </linearGradient>
+
+    <!-- Refined 1.5px edge lighting -->
+    <linearGradient id="refined-edge-stroke" x1="0.15" y1="0.05" x2="0.85" y2="0.95">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.55" />
+      <stop offset="30%" stop-color="#9ac8f5" stop-opacity="0.30" />
+      <stop offset="70%" stop-color="#0a529e" stop-opacity="0.35" />
+      <stop offset="100%" stop-color="#031b3b" stop-opacity="0.75" />
+    </linearGradient>
+
+    <!-- Clean white glyph gradient -->
+    <linearGradient id="white-glyph-clean" x1="0.5" y1="0" x2="0.5" y2="1">
+      <stop offset="0%" stop-color="#ffffff" />
+      <stop offset="100%" stop-color="#f2f7fc" />
     </linearGradient>
   </defs>
-  <rect x="64" y="84" width="896" height="896" rx="208" fill="#084F98"/>
-  <rect x="64" y="56" width="896" height="896" rx="208" fill="url(#rema-tile)"/>
-  <path fill="#FFFFFF" fill-rule="evenodd" d="M297 252H542C647 252 717 322 717 417C717 492 672 547 607 570L727 756H589L482 584H419V756H297ZM419 354V484H532C577 484 599 457 599 419C599 381 577 354 532 354Z"/>
+
+  <!-- Dark Slate-Grey Canvas Background (matches screenshot) -->
+  <rect width="1024" height="1024" fill="#1c1d21" />
+
+  <!-- Subtle Blue Ambient Glow against Slate-Grey -->
+  <circle cx="512" cy="512" r="480" fill="url(#ambient-blue-glow)" />
+
+  <!-- Main Squircle Icon Tile -->
+  <g id="icon-tile" filter="url(#tile-subtle-shadow)">
+    <!-- Base Surface: Elevated LinkedIn Multi-tone Blue Gradient -->
+    <rect x="96" y="96" width="832" height="832" rx="192" fill="url(#linkedin-blue-gradient)" />
+
+    <!-- Tonal Edge Depth (Subtle Dark Edges) -->
+    <rect x="96" y="96" width="832" height="832" rx="192" fill="url(#edge-tonal-depth)" />
+
+    <!-- Soft Internal Light Highlight -->
+    <rect x="96" y="96" width="832" height="832" rx="192" fill="url(#internal-light)" />
+
+    <!-- Controlled Glass Reflection Across Upper Tile -->
+    <path d="M 96 288 C 96 182 182 96 288 96 L 736 96 C 842 96 928 182 928 288 L 928 410 C 800 455 620 485 500 465 C 345 440 210 385 96 420 Z"
+          fill="url(#controlled-glass-sheen)" />
+
+    <!-- Refined Top Edge Micro-Highlight -->
+    <path d="M 210 97 L 814 97" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round" opacity="0.45" />
+
+    <!-- Refined 1.5px Edge Rim Lighting -->
+    <rect x="96" y="96" width="832" height="832" rx="192" fill="none" stroke="url(#refined-edge-stroke)" stroke-width="1.8" />
+  </g>
+
+  <!-- Clean, Minimal White R with Dot Inside -->
+  <g id="brand-mark" filter="url(#r-subtle-depth)">
+    <!-- White R Path -->
+    <path fill="url(#white-glyph-clean)" fill-rule="evenodd"
+          d="M297 252H542C647 252 717 322 717 417C717 492 672 547 607 570L727 756H589L482 584H419V756H297ZM419 354V484H532C577 484 599 457 599 419C599 381 577 354 532 354Z" />
+
+    <!-- Clearly Visible White Dot Inside the R Counter -->
+    <circle cx="506" cy="419" r="34" fill="url(#white-glyph-clean)" />
+  </g>
 </svg>
