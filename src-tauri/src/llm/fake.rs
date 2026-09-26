@@ -40,6 +40,8 @@ pub struct FakeLanguageModel {
     pub web_events: Vec<WebEvent>,
     /// Replies for the next requests, in order; `chunks` once used up.
     pub scripted: Mutex<VecDeque<Vec<String>>>,
+    /// Errors the next requests fail with, in order, before anything else.
+    pub failures: Mutex<VecDeque<AppError>>,
 }
 
 impl FakeLanguageModel {
@@ -59,7 +61,14 @@ impl FakeLanguageModel {
             tool_outputs: Mutex::default(),
             web_events: Vec::new(),
             scripted: Mutex::default(),
+            failures: Mutex::default(),
         }
+    }
+
+    /// Fails the next requests with these errors, in order.
+    pub fn failing_first(self, errors: Vec<AppError>) -> Self {
+        self.failures.lock().unwrap().extend(errors);
+        self
     }
 
     /// Replies to the next request with this text (then the next script,
@@ -122,6 +131,9 @@ impl LanguageModel for FakeLanguageModel {
                 .lock()
                 .unwrap()
                 .push((model_id.to_string(), request.clone()));
+            if let Some(error) = self.failures.lock().unwrap().pop_front() {
+                return Err(error);
+            }
             // Like a provider that calls every offered tool first.
             if let Some(tools) = &request.tools {
                 let mut round = ToolRound::default();

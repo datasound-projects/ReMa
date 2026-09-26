@@ -1363,6 +1363,108 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn a_rate_limited_search_is_retried_once() {
+            let site = job_site().await;
+            let url = format!("{}/jobs/ai-engineer-4411", site.base_url);
+            let postings =
+                json!({ "postings": [{ "title": "Senior AI Engineer", "url": url }] }).to_string();
+            let llm = FakeLanguageModel::replying(&["Fits."])
+                .searching(searched(std::slice::from_ref(&url)))
+                .then_reply(&postings)
+                .failing_first(vec![AppError::provider("Rate limit reached (429)")]);
+            let (state, _, llm) = setup(llm).await;
+            let sent = send_message(&state, send(None, REQUEST)).await.unwrap();
+            let done = finished(&state, sent.assistant_message.id).await;
+
+            assert_eq!(done.status, MessageStatus::Complete, "{:?}", done.error);
+            assert!(
+                done.content.contains("| Senior AI Engineer |"),
+                "{}",
+                done.content
+            );
+            let requests = llm.requests.lock().unwrap().clone();
+            assert_eq!(requests.len(), 3, "the search again, then the assessment");
+            assert!(requests[..2]
+                .iter()
+                .all(|(_, r)| r.web.as_ref().is_some_and(|w| w.required)));
+        }
+
+        /// A SearXNG instance that finds the job site's current posting.
+        async fn searxng_finding(site: &MockServer) -> MockServer {
+            let base = site.base_url.clone();
+            MockServer::start(move |r| {
+                r.target.starts_with("/search?").then(|| {
+                    let results = json!({ "results": [
+                        { "title": "Senior AI Engineer", "url": format!("{base}/jobs/ai-engineer-4411") },
+                    ]});
+                    (200, results.to_string())
+                })
+            })
+            .await
+        }
+
+        fn use_searxng(state: &AppState, url: &str) {
+            let url = url.to_string();
+            state
+                .db
+                .call(move |c| {
+                    crate::db::providers::set_setting(c, retrieval::backend::KIND_KEY, "searxng")?;
+                    crate::db::providers::set_setting(c, retrieval::backend::URL_KEY, &url)
+                })
+                .unwrap();
+        }
+
+        #[tokio::test]
+        async fn an_expired_sign_in_falls_back_to_the_search_service() {
+            let site = job_site().await;
+            let searxng = searxng_finding(&site).await;
+            let expired =
+                || AppError::authentication("The sign-in expired. Sign in again in Settings.");
+            let llm =
+                FakeLanguageModel::replying(&["Unused."]).failing_first(vec![expired(), expired()]);
+            let (state, _, llm) = setup(llm).await;
+            use_searxng(&state, &searxng.base_url);
+            let sent = send_message(&state, send(None, REQUEST)).await.unwrap();
+            let done = finished(&state, sent.assistant_message.id).await;
+
+            assert_eq!(done.status, MessageStatus::Complete, "{:?}", done.error);
+            let content = &done.content;
+            assert!(content.contains("Searched with SearXNG"), "{content}");
+            assert!(content.contains("| Senior AI Engineer |"));
+            assert!(content.contains(
+                "OpenAI web search: The sign-in expired. Sign in again in Settings. Used SearXNG instead."
+            ));
+            assert!(content.contains("_ReMa could not add an assessment: The sign-in expired."));
+            assert_eq!(
+                llm.requests.lock().unwrap().len(),
+                2,
+                "the search and the assessment, neither retried"
+            );
+        }
+
+        #[tokio::test]
+        async fn an_unreachable_provider_is_reported_not_answered_around() {
+            let llm = FakeLanguageModel::replying(&["From memory."])
+                .failing_first(vec![AppError::network("connection refused")]);
+            let (state, _, llm) = setup(llm).await;
+            let sent = send_message(&state, send(None, REQUEST)).await.unwrap();
+            let done = finished(&state, sent.assistant_message.id).await;
+
+            assert_eq!(done.status, MessageStatus::Error);
+            assert!(done.content.is_empty(), "nothing unverified is shown");
+            let error = done.error.unwrap();
+            assert!(
+                error.contains(
+                    "OpenAI web search: could not reach the service (connection refused); \
+                     check the internet connection"
+                ),
+                "{error}"
+            );
+            assert!(error.contains("No other search service is set up"));
+            assert_eq!(llm.requests.lock().unwrap().len(), 1);
+        }
+
+        #[tokio::test]
         async fn no_matching_postings_is_an_answer_not_a_failure() {
             let llm = FakeLanguageModel::replying(&["unused"])
                 .searching(searched(&[]))
