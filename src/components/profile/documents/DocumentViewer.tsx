@@ -25,10 +25,13 @@ const ZOOMS = [0.5, 0.75, 1, 1.25, 1.5, 2];
  */
 export function DocumentViewer({ document: doc, onClose }: { document: ProfileDocument; onClose: () => void }) {
   const ref = useRef<HTMLDialogElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
   useCoverBrowser();
   useEffect(() => {
     const dialog = ref.current;
     if (dialog && !dialog.open) dialog.showModal();
+    // The document gets focus (arrow keys scroll it), not the first button.
+    bodyRef.current?.focus();
   }, []);
 
   const isPdf = doc.format === 'pdf';
@@ -100,7 +103,7 @@ export function DocumentViewer({ document: doc, onClose }: { document: ProfileDo
           {openError}
         </p>
       )}
-      <div className="viewer__body">
+      <div className="viewer__body" ref={bodyRef} tabIndex={-1}>
         {isPdf ? (
           <PdfView document={doc} zoom={zoom} />
         ) : isImage ? (

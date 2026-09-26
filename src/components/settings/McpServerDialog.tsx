@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { toApiError } from '../../services/ipc';
 import {
@@ -95,9 +95,15 @@ export function McpServerDialog({ server, onClose }: { server: McpServer | null;
   const [busy, setBusy] = useState<'save' | 'test' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [test, setTest] = useState<McpTestResult | null>(null);
+  const testRef = useRef<HTMLDivElement>(null);
+  // The result can be below the fold of a long form.
+  useEffect(() => {
+    if (test) testRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }, [test]);
   const set = (patch: Partial<Form>) => {
     setForm((f) => ({ ...f, ...patch }));
     setTest(null);
+    setError(null);
   };
   // Renaming a stored variable needs its value again.
   const setEnv = (index: number, patch: Partial<EnvRow>) =>
@@ -329,7 +335,7 @@ export function McpServerDialog({ server, onClose }: { server: McpServer | null;
       )}
 
       {test && (
-        <div className={test.ok ? 'notice mcp-test' : 'notice notice--danger mcp-test'} role="status">
+        <div ref={testRef} className={test.ok ? 'notice mcp-test' : 'notice notice--danger mcp-test'} role="status">
           <p>{test.message}</p>
           {test.tools.length > 0 && (
             <p className="mcp-test__tools">{test.tools.map((t) => t.name).join(', ')}</p>

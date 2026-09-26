@@ -29,7 +29,10 @@ export function DocumentsTab({ view }: { view: ProfileView }) {
   const [preview, setPreview] = useState<ProfileDocument | null>(null);
   const [editing, setEditing] = useState<ProfileCredential | 'new' | null>(null);
 
-  const cvs = view.documents.filter((d) => d.kind === 'cv');
+  // The primary CV first, then the newest.
+  const cvs = view.documents
+    .filter((d) => d.kind === 'cv')
+    .sort((a, b) => Number(b.isPrimary) - Number(a.isPrimary) || b.createdAt - a.createdAt);
   const attached = new Set(view.credentials.flatMap((c) => (c.document ? [c.document.id] : [])));
   const others = view.documents.filter(
     (d) => d.kind !== 'cv' && !attached.has(d.id) && !(d.kind === 'certificate' && editing !== null),
@@ -80,20 +83,22 @@ export function DocumentsTab({ view }: { view: ProfileView }) {
 function UploadSummary({ result, onDismiss }: { result: AddDocumentsResult; onDismiss: () => void }) {
   const added = result.added.length;
   return (
-    <div className={result.failed.length > 0 ? 'notice notice--danger upload-summary' : 'notice upload-summary'} role="status">
-      <div className="upload-summary__text">
-        {added > 0 && (
-          <p>
-            Added {added === 1 ? `“${result.added[0]?.name}”` : `${added} CVs`}.
-          </p>
-        )}
-        {result.failed.map((f) => (
-          <p key={f.name}>
-            <strong>{f.name}</strong>: {f.reason}
-          </p>
-        ))}
-      </div>
-      <button type="button" className="link-button" onClick={onDismiss}>
+    <div className="upload-summary" role="status">
+      {added > 0 && (
+        <p className="notice">
+          Added {added === 1 ? `“${result.added[0]?.name}”` : `${added} CVs`}.
+        </p>
+      )}
+      {result.failed.length > 0 && (
+        <div className="notice notice--danger upload-summary__failed">
+          {result.failed.map((f) => (
+            <p key={f.name}>
+              <strong>{f.name}</strong>: {f.reason}
+            </p>
+          ))}
+        </div>
+      )}
+      <button type="button" className="link-button upload-summary__dismiss" onClick={onDismiss}>
         Dismiss
       </button>
     </div>

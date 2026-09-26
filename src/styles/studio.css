@@ -238,13 +238,19 @@
 }
 
 .upload-summary {
-  justify-content: space-between;
-}
-
-.upload-summary__text {
   display: flex;
   flex-direction: column;
+  gap: var(--space-2);
+}
+
+.upload-summary__failed {
+  flex-direction: column;
   gap: 2px;
+}
+
+.upload-summary__dismiss {
+  align-self: flex-start;
+  font-size: var(--text-xs);
 }
 
 /* ── Credentials ───────────────────────────────────────── */
@@ -1036,6 +1042,7 @@
 
 .segmented {
   display: inline-flex;
+  align-self: flex-start;
   gap: 2px;
   padding: 2px;
   border: 1px solid var(--color-border);
@@ -1244,4 +1251,27 @@
     flex-direction: column;
     align-items: flex-start;
   }
+}
+
+.viewer__body:focus-visible {
+  outline: none;
+}
+
+/* Groups of options (radio sets, pickers) look like any other field. */
+fieldset.field {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: none;
+}
+
+fieldset.field > legend {
+  float: left;
+  width: 100%;
+  margin-bottom: var(--space-2);
+  padding: 0;
+}
+
+fieldset.field > legend + * {
+  clear: both;
 }
