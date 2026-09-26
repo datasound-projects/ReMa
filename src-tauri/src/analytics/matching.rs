@@ -556,7 +556,11 @@ mod tests {
         assert_eq!(state("Terraform").0, MatchState::Missing);
         // Blank sources are not evidence.
         let blank = ("CV: empty.pdf".to_string(), "  ".to_string());
-        let e = Evidence::from_sources(&Profile::default(), &[blank], Date::new(2025, 1, 1).unwrap());
+        let e = Evidence::from_sources(
+            &Profile::default(),
+            &[blank],
+            Date::new(2025, 1, 1).unwrap(),
+        );
         assert!(!e.available);
     }
 

@@ -131,7 +131,10 @@ export function AgentsPage() {
         <AgentDialog
           key={editing === 'new' ? 'new' : editing.id}
           agent={editing === 'new' ? null : editing}
-          onClose={() => setEditing(null)}
+          onClose={() => {
+            setEditing(null);
+            setNotice(null);
+          }}
           onDuplicate={(agent) => duplicate(agent)}
         />
       )}
@@ -215,6 +218,7 @@ function AgentCard({
         />
       </div>
       <p className="agent-card__description">{agent.description || 'No description.'}</p>
+      {agent.updatedAt !== null && <span className="agent-card__meta">Edited {formatDateTime(agent.updatedAt)}</span>}
       {confirming ? (
         <div className="doc-card__confirm" role="group" aria-label="Confirm deletion">
           <span>Delete this agent? Chats that use it stop using it.</span>
@@ -232,7 +236,6 @@ function AgentCard({
         </div>
       ) : (
         <div className="agent-card__foot">
-          {agent.updatedAt !== null && <span className="agent-card__meta">Edited {formatDateTime(agent.updatedAt)}</span>}
           <span className="agent-card__spacer" />
           <button type="button" className="button button--ghost button--small" onClick={onOpen}>
             {agent.builtin ? 'View' : 'Edit'}

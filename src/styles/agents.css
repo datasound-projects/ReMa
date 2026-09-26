@@ -313,8 +313,9 @@
 }
 
 .chat__selection-notice {
-  align-self: center;
-  margin-bottom: var(--space-2);
+  width: fit-content;
+  max-width: 100%;
+  margin: 0 auto var(--space-2);
   padding: 4px var(--space-3);
   border-radius: var(--radius-pill);
   background: var(--color-surface-muted);
@@ -604,4 +605,8 @@
   font-family: var(--font-mono);
   font-size: var(--text-xs);
   overflow-wrap: anywhere;
+}
+
+.mcp {
+  scroll-margin-top: var(--space-6);
 }

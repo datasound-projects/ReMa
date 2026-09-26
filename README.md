@@ -11,10 +11,13 @@ Rust owns application state, persistence, scheduling, validation, provider confi
 - **Scheduled Tasks**: schedule the prompt you are writing, straight from the composer. Supports one-time, daily, every N days, selected weekdays, and intervals of 15 minutes or more. A task can end on a date or after N runs. You can edit, pause, resume, delete or run tasks now, and each task keeps its run history with results.
 - **Settings**: connect providers, choose which models appear in the chat, and set the default model. Connect Google Workspace (Gmail and Calendar) with one sign-in.
 - **Job applications (Gmail)**: a scheduled task type that finds job-application emails, keeps one record per application (Confirmed, Application in Process, Needs Your Action, Upcoming Interview, Rejected), and shows an overview table in the task history. It can add confirmed interviews to Google Calendar and report calendar conflicts.
-- **Profile**: your career details, entered once. Import a CV (PDF, Word, text, Markdown) and review what ReMa read, or build it by hand. Also stores documents (CVs, certificates, portfolios) and custom fields.
+- **Profile**: your career context, in three independent parts. **Documents & Credentials** (the default) keeps your CV files and optional credentials (degrees, certificates, courses, licenses, badges) with an in-app preview. **Custom Profile** is an optional structured form. **Portfolio Studio** builds new CVs from 12 templates and exports them as PDF. Uploading a CV never fills the Custom Profile or opens the builder.
+- **Agents**: reusable instructions for the model (a page directly below Chat). Six built-in agents (Job Search, Job Match Analyst, CV Tailoring, Interview Prep, Application Strategist, Career Research) and your own custom agents.
+- **MCP (Model Context Protocol)**: connect local or remote MCP servers in Settings, turn them on, and pick them per chat. The model can then call their tools; tools that may change something wait for your approval.
 - **Built-in browser**: links in Chat and task results open in a panel next to ReMa. You can collapse, maximize, dock left or right, and resize it. "Open in external browser" is always available.
 - **ReMa Auto Fill**: fills the standard fields of an application form in the built-in browser from your Profile. You review and submit yourself. ReMa never submits.
-- **Profile context**: a **Profile** switch in the chat composer (and an option on scheduled prompt tasks) gives the model a summary of your Profile. It is off unless you turn it on.
+- **Chat + menu**: the **+** button in the composer selects agents and MCP servers for the chat (shown as removable chips), independently of the **Profile** switch.
+- **Profile context**: the **Profile** switch in the chat composer (and an option on scheduled prompt tasks) adds your CVs, credentials, Custom Profile and Portfolio Studio CVs to the request. It is off unless you turn it on.
 - **Analytics**: a deterministic dashboard over every job search ReMa has run, from Chat or scheduled tasks. It opens from the **Analytics** button in the header as a panel beside the current page. You can filter and rank the jobs, compare their requirements with your Profile (skill gap), see which requirements are common or rare, and research learning resources for the gaps that matter.
 - **Light and dark**: the small sun/moon button at the top-right corner switches between the light and the dark theme. ReMa remembers your choice.
 
@@ -29,8 +32,10 @@ Generated typed IPC         src/generated/bindings.ts (from Rust, via tauri-spec
       ↓
 Thin Tauri commands         src-tauri/src/commands
       ↓
-Rust services               src-tauri/src/services   (chat, providers, tasks, scheduler, schedule,
-                                                      profile, documents, profile_import, profile_context)
+Rust services               src-tauri/src/services   (chat, chat_tools, providers, tasks, scheduler, schedule,
+                                                      profile, documents, profile_import, profile_context,
+                                                      portfolio, agents, mcp)
+                            src-tauri/src/mcp        (MCP client on the official Rust SDK: stdio, Streamable HTTP, OAuth)
                             src-tauri/src/jobs       (job-application workflow, run by the scheduler)
                             src-tauri/src/browser    (built-in browser webview, navigation policy, Auto Fill)
                             src-tauri/src/analytics  (job ingestion, dedupe, filters, ranking, skill gap, learning)
@@ -50,7 +55,8 @@ Rules:
 ## Data and credentials
 
 - **Database**: SQLite at `<app data dir>/rema.db`. On macOS that is `~/Library/Application Support/cloud.datasound.rema/`. Schema changes are versioned migrations in `src-tauri/src/db/migrations/`.
-- **Profile documents**: copied into `<app data dir>/profile-documents/` under generated names. The original file name, size, SHA-256 and extracted text are stored in SQLite. The original file is never changed or moved.
+- **Profile documents**: copied into `<app data dir>/profile-documents/` under generated names. The original file name, size, SHA-256 and extracted text are stored in SQLite. The original file is never changed or moved. The interface reads a stored file only through the `rema-doc` protocol (by id, ReMa's own window only), never by path.
+- **Portfolio Studio CVs, custom agents and MCP server settings** are stored in SQLite. MCP secrets (tokens, header values, environment variable values, OAuth credentials) are in the OS credential store, never in the database or the interface.
 - **Credentials**: API keys and Google OAuth tokens are stored in the operating system's credential store: macOS Keychain, Windows Credential Manager, or Secret Service on Linux. They never go in the database, config files or the frontend. The UI can only save, replace or remove a key.
 - **Authentication**: OpenAI — ChatGPT account (through OpenAI's Codex runtime) or API key. Anthropic — Claude Console account (through Anthropic's CLI) or API key. Gemini — API key. OpenAI-compatible endpoints take an optional key. Account credentials are kept by the provider's own runtime, never by ReMa. See [Provider accounts](#provider-accounts).
 
@@ -67,11 +73,11 @@ React → Tauri command → services::accounts → accounts::{codex, claude_cons
 - **Sign-in.** **Continue with ChatGPT** calls `account/login/start`. ReMa opens the returned `auth.openai.com` page in your browser, and Codex receives the result on its own local callback.
 - **Device code.** **Use a code instead** switches to device-code sign-in: ReMa shows a one-time code to enter on OpenAI's page.
 - **Credentials and requests.** Codex stores and refreshes the credentials, in the OS keychain when available (`cli_auth_credentials_store = "auto"`). It also sends every model request.
-- **Chat.** Each chat turn runs on an ephemeral thread. ReMa's system prompt replaces Codex's instructions, earlier messages are added as history, and every agent tool is turned off (shell, file edits, web search, apps, plugins, sub-agents). The thread uses a read-only sandbox in an empty folder, and approvals are always declined.
+- **Chat.** Each chat turn runs on an ephemeral thread. ReMa's system prompt replaces Codex's instructions, earlier messages are added as history, and every Codex tool is turned off (shell, file edits, web search, apps, plugins, sub-agents). The only tools are the MCP tools you selected in the chat, offered as Codex dynamic tools and run by ReMa (with the same approvals as other providers). The thread uses a read-only sandbox in an empty folder, and Codex's own approvals are always declined.
 - **Isolation.** The runtime is private to ReMa: its own `CODEX_HOME` under the app data folder, so your Codex CLI settings, sessions and MCP servers are neither read nor changed. It keeps no history.
-- **Install.** Requires Codex 0.151 or newer: `brew install --cask codex` or `npm install -g @openai/codex`.
+- **Install.** Release builds of ReMa ship the latest Codex (see [Bundled runtimes](#bundled-runtimes)). ReMa uses the newest of the bundled and any installed copy (0.151 or newer).
 
-**Anthropic: Claude Console account.** **Continue with Claude Console** runs `ant auth login`, from Anthropic's official CLI (`brew install anthropics/tap/ant`).
+**Anthropic: Claude Console account.** **Continue with Claude Console** runs `ant auth login`, from Anthropic's official CLI. Release builds ship it; it can also be installed with `brew install anthropics/tap/ant`.
 
 - **Sign-in.** `ant` opens the Claude Console sign-in in your browser, receives the result on a local callback, and stores and refreshes the token.
 - **Requests.** For requests, ReMa asks `ant auth print-credentials --access-token` for a short-lived token. This is the documented way to hand the credential to another program. ReMa keeps the token in memory for at most a minute and calls the Anthropic API with `Authorization: Bearer` and `anthropic-beta: oauth-2025-04-20`.
@@ -131,11 +137,23 @@ Events are idempotent. The event id is stored, and each event also carries a pri
 
 ## Profile
 
-The structured Profile in SQLite is the source of truth, and documents are attachments to it. Every field, list entry and document is editable, and list entries can be reordered.
+The Profile page has three independent parts, chosen with the tabs under its title. The selected part is part of the navigation state: uploading, previewing or re-rendering never switches it.
 
-**Supported documents.** PDF, Word (`.docx`), plain text and Markdown. Rust extracts their text. PNG and JPEG can be stored, but ReMa does not read them. The format is detected from the file's content, not only its extension. Files are limited to 20 MB. PDFs that are scanned images have no text to read.
+**Documents & Credentials** (default).
 
-**CV import.** Rust extracts the text, then finds email addresses, phone numbers and links deterministically. The default model structures the rest (experience, education, skills, languages) as JSON. Rust validates that JSON, and drops any name, email, phone or link that does not appear in the document. The result is only a proposal: a review dialog shows every value, pre-selects only empty fields, and never replaces an existing value unless you tick it. If no model is available, the deterministic details are still offered.
+- **CVs.** Upload one or several files at once (PDF, Word `.docx`, text, Markdown). Each appears as a card with its type, size and date, and can be previewed, renamed, replaced, removed or marked as the **primary** CV. Files that cannot be added are listed with the reason. Nothing is copied into the Custom Profile.
+- **Credentials.** Optional entries for degrees, professional and course certificates, training, licenses, badges and other evidence, each with an optional file (PDF, PNG, JPEG, WebP, Word) and optional details: title, issuer, issue and expiry dates, credential ID, URL and a note.
+- **Preview.** Documents open inside ReMa: PDFs are drawn by PDF.js, images as images, and Word/text files as plain text blocks extracted by Rust (no HTML, scripts or macros ever reach the webview).
+- **Storage rules.** The format is detected from the file's content (signatures), not only its extension; symbolic links and non-regular files are refused; files are limited to 20 MB; stored names are generated.
+
+**Custom Profile** (optional). The structured form: personal details, professional title and summary, experience, education, skills, languages, links and custom fields. Empty fields are fine. **Fill from a CV…** is the only way to copy details from a document: Rust extracts the text, finds email addresses, phone numbers and links deterministically, and the default model structures the rest as JSON, which Rust validates (a name, email, phone or link that does not appear in the document is dropped). A review dialog shows every value; nothing is saved until you choose.
+
+**Portfolio Studio.** CVs built in ReMa, separate from uploaded files (which are never changed).
+
+- **Templates.** 12 designs in a registry (`src/lib/portfolio/templates.ts`): Minimal, Modern, Executive, Technical, Data / AI, Consulting, Product, Creative, Academic, Compact, Two-column and ATS-friendly. A template is data read by one layout engine (`src/lib/portfolio/layout.ts`), so adding one means adding an entry.
+- **Editor.** Header and sections (summary, experience, projects, education, skills, languages, certifications, links, custom): add, remove, reorder, show or hide, rename. Switch templates, paper size (A4, Letter) and accent color at any time without losing content. Changes save automatically.
+- **Preview and export.** pdfmake renders the PDF in the interface with embedded open-license fonts (Inter, Source Sans 3, Source Serif 4, Source Code Pro, Playfair Display); the live preview shows that same file through PDF.js, and **Export PDF** saves it where you choose (the save dialog runs in Rust). Text is real and selectable, margins follow the template, and long entries flow onto further pages without being cut.
+- **Start.** A new CV starts with empty sections or a one-time copy of the Custom Profile and credentials.
 
 ## Built-in browser
 
@@ -164,12 +182,40 @@ Auto Fill never clicks buttons and never submits a form. Forms inside cross-orig
 
 ## Profile context
 
-The context builder (`services/profile_context.rs`) creates a short, provider-independent summary from the structured Profile: name, title, location, summary, skills, experience, education, languages, links, custom fields, and document **names**. Email and phone are left out, and so is document text. It is added to the system prompt only when:
+The **Profile** switch in the chat composer is the single control for career context. When it is on (it is saved per conversation), or when a scheduled prompt task has **Include my Profile** checked, the context builder (`services/profile_context.rs`) assembles the available sources locally, in this order:
 
-- the **Profile** switch in the chat composer is on for that conversation (it is saved per conversation), or
-- a scheduled prompt task has **Include my Profile** checked.
+1. the primary CV's extracted text,
+2. the Custom Profile (structured fields),
+3. credentials (type, title, issuer, dates, ID, URL, note),
+4. Portfolio Studio CVs (visible sections only),
+5. other CVs, then the names of other documents.
 
-Otherwise no Profile data is sent.
+Empty sources are skipped. Each source is wrapped with its type and name, so the model (and ReMa) know where every part came from. Email addresses and phone numbers are removed. The whole context is limited to about 24,000 characters, with per-source limits; when it must be shortened, the primary CV and structured data keep their share and long texts are cut at line boundaries. Extracted text is cached in SQLite when a document is stored, so nothing is re-read or uploaded in the background. Nothing is sent until you send a message, and with the switch off no Profile data is sent.
+
+## Agents
+
+An agent is a named, locally stored set of instructions. The **Agents** page (below Chat) lists the built-in agents and your own:
+
+- Built-in agents are fixed; **Customize a copy** creates an editable custom agent.
+- Custom agents can be created, edited, renamed, duplicated and deleted. Deleting one removes it from every chat that used it.
+- **Use in chat** opens a new chat with the agent selected.
+
+In Chat, the **+** menu selects any number of agents (up to 8). Their instructions are added to the system prompt once each, in the order you selected them. Selecting an agent never turns the Profile switch on. Selections are saved per conversation.
+
+## MCP (Model Context Protocol)
+
+**Settings → MCP** manages MCP servers. The client (`src-tauri/src/mcp/`) uses the official Rust SDK (`rmcp`) and speaks the current protocol (2026-07-28, stateless `server/discover`) with a fallback for servers on 2025-11-25.
+
+- **Transports.** *Local program* (stdio): a program and its arguments, run directly (never through a shell). Shells, relative paths and shell syntax are refused; arguments are passed one per line exactly as written; the process gets only a minimal environment plus the variables you set; it runs in its own process group and stops with the connection. *Remote server* (Streamable HTTP): an HTTPS URL (plain HTTP only for this computer) with no authentication, a bearer token, an API-key header, or **OAuth** sign-in in the browser (MCP authorization with a loopback redirect).
+- **Secrets** (tokens, header values, environment values, OAuth credentials) are stored in the OS credential store and never shown again or sent to the interface; leaving a field empty keeps the stored value.
+- **States.** A new server is **off**. *Configured* → *turned on* in Settings → *available* in the chat's + menu → *selected* in a chat → a tool *called* by the model. Only servers that are on appear in the + menu, and only the ones selected in a chat are offered to the model in that chat.
+- **Approvals.** Tools the server marks read-only run directly; every other call shows its arguments and waits for **Allow once**, **Allow for this chat** or **Deny**. Stopping the answer denies what is still waiting.
+- **Turning a server off** closes its connection (and stops a local program). Chats that selected it drop it with a short note; turning it on again does not re-add it.
+- **Test**, **Connect/Reconnect**, **Disconnect**, **Sign in/Sign out**, **Edit** and **Remove** are on each server row; connection failures show the server's reason.
+
+## Bundled runtimes
+
+Release builds include the official **Codex** runtime (latest `@openai/codex` from npm) and Anthropic's **`ant`** CLI (from Anthropic's Homebrew tap), so the account sign-ins work without installing anything. `pnpm build:app` downloads the current versions for the target platform (checking their published SHA-512 / SHA-256), then builds the app with them as sidecars (`src-tauri/tauri.runtimes.conf.json`). At run time ReMa uses the newest of the bundled and any installed copy. `pnpm tauri dev` and `pnpm tauri build` work without them.
 
 ## Analytics
 
@@ -234,9 +280,12 @@ Then open **Settings**, connect a provider (or add an OpenAI-compatible endpoint
 | ------------------------ | --------------------------------------------------------- |
 | `pnpm tauri dev`         | Run the desktop app in development mode                   |
 | `pnpm tauri build`       | Build an optimized, bundled release of the app            |
+| `pnpm build:app`         | Same, with the latest Codex and `ant` runtimes bundled    |
+| `pnpm runtimes`          | Download the latest Codex and `ant` into src-tauri/runtimes |
 | `pnpm build`             | Typecheck and build the frontend only                     |
 | `pnpm typecheck`         | Typecheck the frontend                                    |
 | `pnpm lint`              | Lint the frontend with oxlint                             |
+| `pnpm test`              | Run the frontend tests (Vitest, incl. real PDF rendering) |
 | `pnpm test:rust`         | Run the Rust tests (fails if bindings are stale)          |
 | `pnpm bindings`          | Regenerate `src/generated/bindings.ts` from Rust          |
 | `pnpm brand`             | Regenerate the logo files from the master mark            |
@@ -248,27 +297,32 @@ Then open **Settings**, connect a provider (or add an OpenAI-compatible endpoint
 rema/
 ├── src/                          # Frontend (React + TypeScript)
 │   ├── app/                      # App root, navigation, sidebar entries
-│   ├── pages/                    # ChatPage, ScheduledTasksPage, ProfilePage, SettingsPage
+│   ├── pages/                    # ChatPage, AgentsPage, ScheduledTasksPage, ProfilePage, SettingsPage
 │   ├── assets/brand/             # Master mark (mark.json) and the generated logo variants
 │   ├── components/
 │   │   ├── layout/               # AppShell, Sidebar, PageContainer, ThemeToggle, LaunchIntro
 │   │   ├── browser/              # BrowserProvider, BrowserPanel, Auto Fill button and report
 │   │   ├── analytics/            # AnalyticsPanel, scope/filter/ranking editors, Jobs, Skill gap,
 │   │   │                         # Requirements and Learning tabs, charts, Analyze button
-│   │   ├── chat/                 # Composer, MessageList, Markdown, ModelSelector, ConversationList
-│   │   ├── profile/              # Overview, sections, documents, custom fields, import review
+│   │   ├── chat/                 # Composer, + menu and chips, tool activity and approvals, MessageList, …
+│   │   ├── agents/               # Agent icons, create/edit dialog
+│   │   ├── profile/              # Profile tabs: documents & credentials (cards, viewer), Custom Profile
+│   │   ├── portfolio/            # Portfolio Studio: gallery, new CV, editor, section editor
+│   │   ├── pdf/                  # PDF.js page renderer (viewer and preview)
 │   │   ├── tasks/                # TaskDialog, TaskDetail, JobReport, TaskActions, TaskStatus
-│   │   ├── settings/             # Provider connections (account or key), endpoints, Google Workspace
+│   │   ├── settings/             # Provider connections (account or key), endpoints, MCP servers, Google
 │   │   └── ui/                   # Menu, Dialog, Switch, EmptyState, IconButton, StatusIndicator,
 │   │                             # BrandMark, BrandLogo
 │   ├── hooks/                    # useAsyncData, useChat, useTasks, useProfile, useAutofill, …
 │   ├── services/                 # ipc.ts (callBackend, ApiError), events.ts, one service per area
 │   ├── generated/bindings.ts     # Generated from Rust (do not edit)
 │   ├── lib/                      # markdown.ts (safe rendering), format.ts, taskForm.ts, profileMerge.ts, analytics.ts,
-│   │                             # theme.ts
+│   │                             # theme.ts, chatSelection.ts, documents.ts, pdf/ (PDF.js setup),
+│   │                             # portfolio/ (templates, layout engine, fonts, PDF rendering)
 │   └── styles/                   # tokens → base → layout → components → chat/tasks/settings/profile/browser/analytics
 ├── public/theme-init.js          # Applies the saved theme before the first paint
 ├── scripts/brand/                # Logo generator (build-brand.mjs), app icons (app-icons.mjs), outlined wordmark
+├── scripts/runtimes/fetch.mjs    # Downloads the latest Codex and ant for bundling
 │
 └── src-tauri/src/                # Backend (Rust)
     ├── lib.rs                    # Startup: database, keychain, scheduler, IPC
@@ -276,7 +330,10 @@ rema/
     ├── ipc_commands.rs           # Command list for the permission manifest (checked by a test)
     ├── commands/                 # Thin Tauri commands
     ├── services/                 # chat, providers, tasks, scheduler, schedule (pure math), system,
-    │                             # profile, documents (storage + text extraction), profile_import, profile_context
+    │                             # profile, documents (storage + text extraction), profile_import, profile_context,
+    │                             # portfolio, agents, mcp, chat_tools (MCP tools in chat, approvals)
+    ├── mcp/                      # MCP client: config validation, connections (stdio/HTTP), OAuth
+    ├── protocol.rs               # rema-doc:// document files for the main window
     ├── browser/                  # Built-in browser: webview, navigation policy, Linux embedding, autofill
     ├── analytics/                # Job analytics: table/list parsing, normalize, skills dictionary, ingest
     │                             # (dedupe), page reader + background worker, dataset, filter, rank,

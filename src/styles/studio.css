@@ -1266,12 +1266,7 @@ fieldset.field {
 }
 
 fieldset.field > legend {
-  float: left;
-  width: 100%;
-  margin-bottom: var(--space-2);
+  display: block;
+  margin-bottom: 6px;
   padding: 0;
-}
-
-fieldset.field > legend + * {
-  clear: both;
 }

@@ -39,8 +39,38 @@ export function McpSection({ focus = false }: { focus?: boolean }) {
   const [editing, setEditing] = useState<McpServer | 'new' | null>(null);
   const ref = useRef<HTMLElement>(null);
 
+  // Opened from the chat's + menu: bring the section into view, and keep
+  // it there while the sections above finish loading (until the user
+  // scrolls, the layout settles or a few seconds pass).
   useEffect(() => {
-    if (focus) ref.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    const el = ref.current;
+    if (!focus || !el) return;
+    let stopped = false;
+    let last = Number.NaN;
+    let stableFrames = 0;
+    const deadline = performance.now() + 4000;
+    const stop = () => {
+      stopped = true;
+    };
+    const events = ['wheel', 'touchstart', 'keydown', 'pointerdown'] as const;
+    for (const name of events) window.addEventListener(name, stop, { passive: true, once: true });
+    const tick = () => {
+      if (stopped || performance.now() > deadline) return;
+      const top = el.getBoundingClientRect().top;
+      if (Math.abs(top - last) > 1) {
+        el.scrollIntoView({ block: 'start' });
+        stableFrames = 0;
+      } else {
+        stableFrames += 1;
+      }
+      last = el.getBoundingClientRect().top;
+      if (stableFrames < 30) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+    return () => {
+      stopped = true;
+      for (const name of events) window.removeEventListener(name, stop);
+    };
   }, [focus]);
 
   const list = servers.state.status === 'success' ? servers.state.data : [];
