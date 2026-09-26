@@ -107,69 +107,77 @@ export function Composer({
           {error}
         </p>
       )}
-      <div className="composer">
-        <textarea
-          ref={textareaRef}
-          className="composer__input"
-          rows={1}
-          value={text}
-          placeholder={model ? 'Ask anything…' : 'Connect a model in Settings to start chatting'}
-          aria-label="Message"
-          autoFocus={autoFocus}
-          onChange={(event) => setText(event.target.value)}
-          onKeyDown={onKeyDown}
-        />
-        <div className="composer__bar">
-          <div className="composer__tools">
-            <ModelSelector catalog={catalog} value={model} onChange={onModelChange} />
-            <button
-              type="button"
-              className={profileOn ? 'tool-toggle tool-toggle--on' : 'tool-toggle'}
-              aria-pressed={profileOn}
-              title={
-                profileOn
-                  ? 'Profile ON: ReMa gives the model your Profile (no email or phone). Click to turn off.'
-                  : 'Profile OFF: the model gets no Profile details. Click to share your Profile in this chat.'
-              }
-              onClick={() => onProfileChange(!profileOn)}
-            >
-              <ProfileIcon className="button__icon" />
-              Profile
-              <span className="tool-toggle__switch" aria-hidden="true" />
-            </button>
-          </div>
-          <div className="composer__actions">
-            <button
-              type="button"
-              className="button button--ghost"
-              disabled={!hasText || !model}
-              onClick={() => onSchedule(text)}
-            >
-              <ClockIcon className="button__icon" />
-              Schedule
-            </button>
-            {streaming ? (
+      <div className="composer__stage">
+        {/* A slow, soft glow that shows only around the composer's edges. */}
+        <div className="composer-aurora" aria-hidden="true">
+          <span className="composer-aurora__blob composer-aurora__blob--blue" />
+          <span className="composer-aurora__blob composer-aurora__blob--sky" />
+          <span className="composer-aurora__blob composer-aurora__blob--indigo" />
+        </div>
+        <div className="composer">
+          <textarea
+            ref={textareaRef}
+            className="composer__input"
+            rows={1}
+            value={text}
+            placeholder={model ? 'Ask anything…' : 'Connect a model in Settings to start chatting'}
+            aria-label="Message"
+            autoFocus={autoFocus}
+            onChange={(event) => setText(event.target.value)}
+            onKeyDown={onKeyDown}
+          />
+          <div className="composer__bar">
+            <div className="composer__tools">
+              <ModelSelector catalog={catalog} value={model} onChange={onModelChange} />
               <button
                 type="button"
-                className="send-button send-button--stop"
-                aria-label="Stop generating"
-                title="Stop generating"
-                onClick={onStop}
+                className={profileOn ? 'tool-toggle tool-toggle--on' : 'tool-toggle'}
+                aria-pressed={profileOn}
+                title={
+                  profileOn
+                    ? 'Profile ON: ReMa gives the model your Profile (no email or phone). Click to turn off.'
+                    : 'Profile OFF: the model gets no Profile details. Click to share your Profile in this chat.'
+                }
+                onClick={() => onProfileChange(!profileOn)}
               >
-                <StopIcon />
+                <ProfileIcon className="button__icon" />
+                Profile
+                <span className="tool-toggle__switch" aria-hidden="true" />
               </button>
-            ) : (
+            </div>
+            <div className="composer__actions">
               <button
                 type="button"
-                className="send-button"
-                aria-label="Send"
-                title="Send (Enter)"
-                disabled={!canSend}
-                onClick={() => void send()}
+                className="button button--ghost"
+                disabled={!hasText || !model}
+                onClick={() => onSchedule(text)}
               >
-                <ArrowUpIcon />
+                <ClockIcon className="button__icon" />
+                Schedule
               </button>
-            )}
+              {streaming ? (
+                <button
+                  type="button"
+                  className="send-button send-button--stop"
+                  aria-label="Stop generating"
+                  title="Stop generating"
+                  onClick={onStop}
+                >
+                  <StopIcon />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="send-button"
+                  aria-label="Send"
+                  title="Send (Enter)"
+                  disabled={!canSend}
+                  onClick={() => void send()}
+                >
+                  <ArrowUpIcon />
+                </button>
+              )}
+            </div>
           </div>
         </div>
       </div>

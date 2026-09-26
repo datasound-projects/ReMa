@@ -5,7 +5,7 @@ import { PageContainer } from '../components/layout/PageContainer';
 import { GoogleSection } from '../components/settings/GoogleSection';
 import { CloudProviderRow } from '../components/settings/CloudProviderRow';
 import { CustomEndpointRow } from '../components/settings/ProviderRows';
-import { BrandMark } from '../components/ui/BrandMark';
+import { BrandLogo } from '../components/ui/BrandLogo';
 import { StatusIndicator } from '../components/ui/StatusIndicator';
 import { useAppStatus } from '../hooks/useAppStatus';
 import { useModelCatalog } from '../hooks/useModelCatalog';
@@ -141,9 +141,11 @@ export function SettingsPage() {
         </h2>
         <div className="panel panel--list">
           <div className="setting-row">
-            <BrandMark size={32} />
+            <BrandLogo height={30} />
             <div className="setting-row__text">
-              <span className="setting-row__label">ReMa {status.status === 'success' ? status.data.version : ''}</span>
+              <span className="setting-row__label">
+                Version {status.status === 'success' ? status.data.version : '…'}
+              </span>
               <span className="setting-row__hint">Career UI harness. Your chats, tasks and Profile are stored in a local database on this computer.</span>
             </div>
             {status.status === 'success' ? (

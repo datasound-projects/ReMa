@@ -19,8 +19,9 @@ let playedThisLaunch = false;
 type Phase = 'show' | 'leave' | 'done';
 
 /**
- * The launch intro: "ReMa — Your Career Agent" over a warm-white canvas,
- * drawn above the already-mounted app, then faded out and removed.
+ * The launch intro: "ReMa — Your Career Agent" over a plain canvas (warm
+ * white, or warm charcoal in the dark theme), drawn above the already-mounted
+ * app, then faded out and removed.
  */
 export function LaunchIntro() {
   const [phase, setPhase] = useState<Phase>(() => (playedThisLaunch ? 'done' : 'show'));
@@ -68,7 +69,7 @@ export function LaunchIntro() {
       <div className="launch-intro__glow" />
       <div className="launch-intro__content">
         <div className="launch-intro__brand">
-          <BrandMark size={40} />
+          <BrandMark size={44} variant="full" />
           <span className="launch-intro__wordmark">ReMa</span>
         </div>
         <p className="launch-intro__headline">

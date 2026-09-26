@@ -4,6 +4,8 @@
   display: flex;
   flex-direction: column;
   height: 100%;
+  /* The composer's glow may reach past the pane's sides; never scroll for it. */
+  overflow-x: clip;
 }
 
 .chat__scroll {
@@ -26,7 +28,7 @@
   right: 0;
   bottom: 100%;
   height: 24px;
-  background: linear-gradient(to bottom, rgba(244, 244, 242, 0), var(--color-bg));
+  background: linear-gradient(to bottom, transparent, var(--color-bg));
   pointer-events: none;
 }
 
@@ -97,7 +99,7 @@
 .suggestion svg {
   width: 15px;
   height: 15px;
-  color: var(--color-brand);
+  color: var(--color-accent);
 }
 
 .suggestion:hover {
@@ -270,16 +272,16 @@
 }
 
 .markdown a {
-  color: var(--color-brand);
+  color: var(--color-accent);
   text-decoration: underline;
-  text-decoration-color: rgba(10, 102, 194, 0.35);
+  text-decoration-color: var(--color-brand-subtle-border);
   text-underline-offset: 2px;
   cursor: pointer;
   transition: text-decoration-color var(--transition-fast);
 }
 
 .markdown a:hover {
-  color: var(--color-brand-hover);
+  color: var(--color-accent-strong);
   text-decoration-color: currentColor;
 }
 
@@ -373,6 +375,125 @@
   margin: 0 auto;
 }
 
+/* The composer and, behind it, its glow. */
+.composer__stage {
+  position: relative;
+  isolation: isolate;
+}
+
+/*
+ * Aurora: a soft, even halo just outside the composer's edges, plus three
+ * color fields drifting slowly along it (left, right, top and bottom). The
+ * composer's surface covers the middle, so only the rim glows. Only
+ * transforms animate, so it stays cheap.
+ */
+.composer-aurora {
+  position: absolute;
+  inset: -24px -40px -26px;
+  z-index: -1;
+  opacity: 0.75;
+  pointer-events: none;
+  transition: opacity 1.2s var(--ease-standard);
+}
+
+.composer__stage:focus-within .composer-aurora {
+  opacity: 1;
+}
+
+.composer-aurora::before {
+  content: '';
+  position: absolute;
+  inset: 12px 22px 12px;
+  border-radius: 36px;
+  background: linear-gradient(
+    100deg,
+    var(--color-aurora-blue),
+    var(--color-aurora-sky) 50%,
+    var(--color-aurora-indigo)
+  );
+  filter: blur(18px);
+  opacity: 0.55;
+}
+
+.composer-aurora__blob {
+  position: absolute;
+  border-radius: 50%;
+  will-change: transform;
+  animation: aurora-drift-a 26s ease-in-out infinite alternate;
+}
+
+.composer-aurora__blob--blue {
+  left: -8%;
+  top: -12%;
+  width: 42%;
+  height: 124%;
+  background: radial-gradient(closest-side, var(--color-aurora-blue), transparent);
+}
+
+.composer-aurora__blob--sky {
+  right: -8%;
+  top: -12%;
+  width: 42%;
+  height: 124%;
+  background: radial-gradient(closest-side, var(--color-aurora-sky), transparent);
+  animation-name: aurora-drift-b;
+  animation-duration: 32s;
+}
+
+.composer-aurora__blob--indigo {
+  left: 28%;
+  top: -34%;
+  width: 44%;
+  height: 168%;
+  background: radial-gradient(closest-side, var(--color-aurora-indigo), transparent);
+  animation-name: aurora-drift-c;
+  animation-duration: 38s;
+}
+
+/* Drift along the rim: left field moves right, right field moves left,
+   the middle one sways; small scale changes keep it organic. */
+@keyframes aurora-drift-a {
+  0% {
+    transform: translate(0, 0) scale(1);
+  }
+  50% {
+    transform: translate(40%, -4%) scale(1.1);
+  }
+  100% {
+    transform: translate(80%, 3%) scale(0.95);
+  }
+}
+
+@keyframes aurora-drift-b {
+  0% {
+    transform: translate(0, 3%) scale(0.96);
+  }
+  50% {
+    transform: translate(-45%, -3%) scale(1.08);
+  }
+  100% {
+    transform: translate(-85%, 2%) scale(1);
+  }
+}
+
+@keyframes aurora-drift-c {
+  0% {
+    transform: translate(-60%, 0) scale(1.04);
+  }
+  50% {
+    transform: translate(10%, -3%) scale(0.94);
+  }
+  100% {
+    transform: translate(62%, 2%) scale(1.06);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .composer-aurora__blob {
+    animation: none;
+  }
+}
+
 .composer {
   display: flex;
   flex-direction: column;
@@ -381,9 +502,7 @@
   border: 1px solid var(--color-border-strong);
   border-radius: 22px;
   background: var(--color-surface);
-  box-shadow:
-    0 1px 2px rgba(24, 24, 20, 0.04),
-    0 6px 20px rgba(24, 24, 20, 0.06);
+  box-shadow: var(--shadow-composer);
   transition:
     border-color var(--transition-base),
     box-shadow var(--transition-base);
@@ -391,9 +510,7 @@
 
 .composer:focus-within {
   border-color: var(--color-brand-subtle-border);
-  box-shadow:
-    0 0 0 4px rgba(10, 102, 194, 0.08),
-    0 6px 20px rgba(24, 24, 20, 0.07);
+  box-shadow: var(--shadow-composer-focus);
 }
 
 .composer__input {
@@ -458,7 +575,7 @@
 .tool-toggle--on:hover {
   background: var(--color-brand-subtle);
   border-color: var(--color-brand-subtle-border);
-  color: var(--color-brand-hover);
+  color: var(--color-accent-strong);
 }
 
 .tool-toggle__switch {
@@ -479,7 +596,7 @@
   width: 9px;
   height: 9px;
   border-radius: 50%;
-  background: #fff;
+  background: var(--color-knob);
   box-shadow: 0 1px 1px rgba(0, 0, 0, 0.2);
   transition: transform var(--duration-base) var(--ease-out);
 }
@@ -554,11 +671,12 @@
 
 .send-button--stop {
   background: var(--color-text);
+  color: var(--color-bg);
   box-shadow: none;
 }
 
 .send-button--stop:hover:not(:disabled) {
-  background: #000;
+  background: var(--color-text-secondary);
 }
 
 /* ── Model selector ────────────────────────────────────── */
@@ -621,7 +739,7 @@
 .model-menu__check {
   width: 16px;
   height: 16px;
-  color: var(--color-brand);
+  color: var(--color-accent);
 }
 
 .model-menu__footer {

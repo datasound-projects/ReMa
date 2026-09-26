@@ -1,16 +1,5 @@
 /* ── Analytics workspace ───────────────────────────────── */
 
-:root {
-  /* Profile states: status meaning, always paired with an icon and a label. */
-  --state-matched: #057642;
-  --state-partial: #e8a317;
-  --state-missing: #cc1016;
-  --state-unknown: #b9b8b3;
-  --state-matched-subtle: #e6f3ec;
-  --state-partial-subtle: #fdf4e1;
-  --state-missing-subtle: #fbeaea;
-}
-
 /* Header control: small, next to the browser button. */
 .analytics-button {
   display: inline-flex;
@@ -44,13 +33,13 @@
 .analytics-button--on:hover {
   border-color: var(--color-brand-subtle-border);
   background: var(--color-brand-subtle);
-  color: var(--color-brand-hover);
+  color: var(--color-accent-strong);
 }
 
 .analytics-button--minimized,
 .analytics-button--minimized:hover {
   border-color: var(--color-brand);
-  color: var(--color-brand);
+  color: var(--color-accent);
 }
 
 .analytics-button__icon {
@@ -63,7 +52,7 @@
   padding: 0 5px;
   border-radius: var(--radius-pill);
   background: var(--color-brand);
-  color: #fff;
+  color: var(--color-on-brand);
   font-size: var(--text-2xs);
   font-weight: var(--weight-bold);
   line-height: 18px;
@@ -172,7 +161,7 @@
   width: 16px;
   height: 16px;
   margin: 0 6px 0 4px;
-  color: var(--color-brand);
+  color: var(--color-accent);
 }
 
 .analytics__title {
@@ -228,7 +217,7 @@
 }
 
 .a-control--open .a-control__icon {
-  color: var(--color-brand);
+  color: var(--color-accent);
 }
 
 .a-control__label {
@@ -330,7 +319,7 @@
 
 .analytics__tab--active,
 .analytics__tab--active:hover {
-  color: var(--color-brand);
+  color: var(--color-accent);
 }
 
 .analytics__tab--active::after {
@@ -485,7 +474,7 @@
 }
 
 .a-link {
-  color: var(--color-brand);
+  color: var(--color-accent);
   text-decoration: underline;
   text-underline-offset: 2px;
 }
@@ -604,7 +593,7 @@
   border: 1px solid var(--color-brand-subtle-border);
   border-radius: var(--radius-pill);
   background: var(--color-brand-subtle);
-  color: var(--color-brand-hover);
+  color: var(--color-accent-strong);
   font-size: var(--text-sm);
   font-weight: 500;
   text-align: left;
@@ -647,7 +636,7 @@
 .a-chip-button--on {
   border-color: var(--color-brand);
   background: var(--color-brand-subtle);
-  color: var(--color-brand-hover);
+  color: var(--color-accent-strong);
 }
 
 .a-values {
@@ -716,7 +705,7 @@
   height: 20px;
   border-radius: 50%;
   background: var(--color-brand);
-  color: #fff;
+  color: var(--color-on-brand);
   font-size: var(--text-xs);
   font-weight: 700;
   line-height: 20px;
@@ -974,7 +963,7 @@
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  color: #fff;
+  color: var(--state-icon-ink);
   font-size: 10px;
   line-height: 1;
 }
@@ -1026,13 +1015,13 @@
 .priority--high {
   border-color: var(--color-brand);
   background: var(--color-brand);
-  color: #fff;
+  color: var(--color-on-brand);
 }
 
 .priority--medium {
   border-color: var(--color-brand-subtle-border);
   background: var(--color-brand-subtle);
-  color: var(--color-brand-hover);
+  color: var(--color-accent-strong);
 }
 
 /* ── Charts ────────────────────────────────────────────── */
@@ -1243,7 +1232,7 @@
 
 .matrix__cell--partial {
   background: var(--state-partial-subtle);
-  color: #8a5a00;
+  color: var(--state-partial-text);
 }
 
 .matrix__cell--missing {
@@ -1405,13 +1394,13 @@
 }
 
 .analyze-button .analyze-button__icon {
-  color: var(--color-brand);
+  color: var(--color-accent);
 }
 
 .analyze-button:hover:not(:disabled) {
   border-color: var(--color-brand-subtle-border);
   background: var(--color-brand-subtle);
-  color: var(--color-brand-hover);
+  color: var(--color-accent-strong);
 }
 
 .analyze-button__icon {

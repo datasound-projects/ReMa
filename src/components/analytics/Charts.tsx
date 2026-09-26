@@ -9,6 +9,8 @@ import {
 } from 'chart.js';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 
+import { useTheme } from '../../hooks/useTheme';
+
 // Only the pieces the dashboard uses (keeps the bundle small).
 Chart.register(BarController, BarElement, CategoryScale, LinearScale, Tooltip);
 // Axis labels and tooltips use the app's own typeface.
@@ -67,12 +69,16 @@ export function BarChart({ rows, max, ariaLabel, thresholds = [], tick, onSelect
   const selectRef = useRef(onSelect);
   const thresholdsRef = useRef(thresholds);
   const tickRef = useRef(tick);
+  const maxRef = useRef(max);
+  // The chart is drawn with the theme's colors; a new theme redraws it.
+  const theme = useTheme();
 
   useEffect(() => {
     rowsRef.current = rows;
     selectRef.current = onSelect;
     thresholdsRef.current = thresholds;
     tickRef.current = tick;
+    maxRef.current = max;
   });
 
   useEffect(() => {
@@ -181,7 +187,9 @@ export function BarChart({ rows, max, ariaLabel, thresholds = [], tick, onSelect
           legend: { display: false },
           tooltip: {
             displayColors: false,
-            backgroundColor: ink,
+            backgroundColor: token('--color-inverse-surface', '#191919'),
+            titleColor: token('--color-inverse-text', '#ffffff'),
+            bodyColor: token('--color-inverse-text', '#ffffff'),
             padding: { x: 10, y: 8 },
             cornerRadius: 8,
             caretSize: 5,
@@ -208,11 +216,12 @@ export function BarChart({ rows, max, ariaLabel, thresholds = [], tick, onSelect
       plugins: [valueLabels, thresholdLines],
     });
     chartRef.current = chart;
+    showRows(chart, rowsRef.current, maxRef.current);
     return () => {
       chart.destroy();
       chartRef.current = null;
     };
-  }, []);
+  }, [theme]);
 
   useEffect(() => {
     if (chartRef.current) showRows(chartRef.current, rows, max);

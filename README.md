@@ -16,6 +16,7 @@ Rust owns application state, persistence, scheduling, validation, provider confi
 - **ReMa Auto Fill**: fills the standard fields of an application form in the built-in browser from your Profile. You review and submit yourself. ReMa never submits.
 - **Profile context**: a **Profile** switch in the chat composer (and an option on scheduled prompt tasks) gives the model a summary of your Profile. It is off unless you turn it on.
 - **Analytics**: a deterministic dashboard over every job search ReMa has run, from Chat or scheduled tasks. It opens from the **Analytics** button in the header as a panel beside the current page. You can filter and rank the jobs, compare their requirements with your Profile (skill gap), see which requirements are common or rare, and research learning resources for the gaps that matter.
+- **Light and dark**: the small sun/moon button at the top-right corner switches between the light and the dark theme. ReMa remembers your choice.
 
 ## Architecture
 
@@ -238,6 +239,8 @@ Then open **Settings**, connect a provider (or add an OpenAI-compatible endpoint
 | `pnpm lint`              | Lint the frontend with oxlint                             |
 | `pnpm test:rust`         | Run the Rust tests (fails if bindings are stale)          |
 | `pnpm bindings`          | Regenerate `src/generated/bindings.ts` from Rust          |
+| `pnpm brand`             | Regenerate the logo files from the master mark            |
+| `pnpm icons`             | Regenerate the desktop app icons from the app icon SVG    |
 
 ## Project structure
 
@@ -246,8 +249,9 @@ rema/
 ├── src/                          # Frontend (React + TypeScript)
 │   ├── app/                      # App root, navigation, sidebar entries
 │   ├── pages/                    # ChatPage, ScheduledTasksPage, ProfilePage, SettingsPage
+│   ├── assets/brand/             # Master mark (mark.json) and the generated logo variants
 │   ├── components/
-│   │   ├── layout/               # AppShell, Sidebar, PageContainer
+│   │   ├── layout/               # AppShell, Sidebar, PageContainer, ThemeToggle, LaunchIntro
 │   │   ├── browser/              # BrowserProvider, BrowserPanel, Auto Fill button and report
 │   │   ├── analytics/            # AnalyticsPanel, scope/filter/ranking editors, Jobs, Skill gap,
 │   │   │                         # Requirements and Learning tabs, charts, Analyze button
@@ -255,12 +259,16 @@ rema/
 │   │   ├── profile/              # Overview, sections, documents, custom fields, import review
 │   │   ├── tasks/                # TaskDialog, TaskDetail, JobReport, TaskActions, TaskStatus
 │   │   ├── settings/             # Provider connections (account or key), endpoints, Google Workspace
-│   │   └── ui/                   # Menu, Dialog, Switch, EmptyState, IconButton, StatusIndicator, BrandMark
+│   │   └── ui/                   # Menu, Dialog, Switch, EmptyState, IconButton, StatusIndicator,
+│   │                             # BrandMark, BrandLogo
 │   ├── hooks/                    # useAsyncData, useChat, useTasks, useProfile, useAutofill, …
 │   ├── services/                 # ipc.ts (callBackend, ApiError), events.ts, one service per area
 │   ├── generated/bindings.ts     # Generated from Rust (do not edit)
-│   ├── lib/                      # markdown.ts (safe rendering), format.ts, taskForm.ts, profileMerge.ts, analytics.ts
+│   ├── lib/                      # markdown.ts (safe rendering), format.ts, taskForm.ts, profileMerge.ts, analytics.ts,
+│   │                             # theme.ts
 │   └── styles/                   # tokens → base → layout → components → chat/tasks/settings/profile/browser/analytics
+├── public/theme-init.js          # Applies the saved theme before the first paint
+├── scripts/brand/                # Logo generator (build-brand.mjs), app icons (app-icons.mjs), outlined wordmark
 │
 └── src-tauri/src/                # Backend (Rust)
     ├── lib.rs                    # Startup: database, keychain, scheduler, IPC
@@ -301,13 +309,39 @@ On macOS the window uses Tauri's overlay title bar, so the traffic lights sit in
 
 The look is defined once, in `src/styles/tokens.css`, and every stylesheet uses those tokens:
 
-- **Color**: LinkedIn blue (`#0A66C2`, hover `#004182`) for actions, selection and focus; white surfaces on a warm light-gray canvas (`#F4F4F2`); charcoal text. Secondary and meta text meet WCAG AA contrast on both surfaces. Status colors (success, warning, danger) always come with an icon or a label.
+- **Color**: LinkedIn blue (`#0A66C2`, hover `#004182`) for actions, selection and focus; white surfaces on a warm light-gray canvas (`#F4F4F2`); charcoal text. Secondary and meta text meet WCAG AA contrast on both surfaces. Status colors (success, warning, danger) always come with an icon or a label. Two blue roles: `--color-brand` fills controls (white text on it) and `--color-accent` is blue text, icons and outlines; they are the same in light and differ in dark.
+- **Themes**: light is the default. Dark (`:root[data-theme='dark']` in `tokens.css`) is a calm, warm charcoal in the spirit of Claude's desktop app: a `#262624` canvas, `#2E2D2B` cards and a `#1F1E1D` title bar and rail, quiet borders, deeper but restrained shadows, warm off-white text (12.7:1; secondary 8.4:1), and ReMa blue only for actions, selection and accents (`#5BA3EF` for blue text, 5.7:1). The sun/moon button (`ThemeToggle`) switches it. The choice is kept in two places: the webview's storage, read by `public/theme-init.js` before the first paint so there is no flash, and ReMa's settings table (`set_appearance`), from which Rust sets the native window theme and background at startup. Charts redraw in the new colors; checkboxes, radios, selects, scrollbars and text selection follow the theme.
+- **Composer glow**: a slow, soft blue aurora behind the chat composer (`.composer-aurora` in `chat.css`). It stays within about 40 px of the composer's edges, never covers the page, and drifts with transform-only animations of 26–38 s; it brightens slightly while the composer has focus. It is still under "Reduce motion".
 - **Type**: the native system font (SF Pro on macOS, Segoe UI on Windows), with Inter bundled for other platforms (`@fontsource-variable/inter`). The scale: 28px page titles, 15px section titles, 14px body, 13px secondary text and controls, 12px meta, and 11px monospace uppercase eyebrows, a nod to the ReMa website.
 - **Space and shape**: a 4px grid; 28, 32 and 36px controls; 8px radius for inputs, 12px for cards, 16px for dialogs; pill buttons.
 - **Depth**: hairline borders carry separation; shadows stay light and are stronger only for popovers and dialogs.
 - **Motion**: 110–220ms with ease-out curves, used for hover and press states, popovers, dialogs, panels and page changes. Everything is off with "Reduce motion".
 - **Sidebar**: the button next to the ReMa wordmark (or ⌘B on macOS, Ctrl+B elsewhere) collapses the sidebar to an icon rail with Chat, Scheduled Tasks, Profile, New chat and Settings; ReMa remembers the choice on this computer.
-- **Launch intro**: each start of ReMa opens with "ReMa — Your Career Agent" on warm white (about 3 seconds, `src/components/layout/LaunchIntro.tsx`) while the app loads underneath. It plays once per launch (in-memory, nothing is stored); any key or click skips it.
+- **Launch intro**: each start of ReMa opens with "ReMa — Your Career Agent" on the theme's canvas, warm white or warm charcoal (about 3 seconds, `src/components/layout/LaunchIntro.tsx`), while the app loads underneath. It plays once per launch (in-memory, nothing is stored); any key or click skips it.
 - **Desktop conventions**: buttons keep the arrow cursor (only text links show the hand), and there is one focus ring for keyboard users everywhere. Thin scrollbars appear outside macOS, which keeps its native overlay scrollbars.
 
-Shared building blocks live in `src/styles/components.css` (buttons, inputs and styled native selects, switches, badges, menus, dialogs, data tables, empty and loading states) and `src/components/ui/` (`Dialog`, `Menu`, `Switch`, `EmptyState`, `StatusIndicator`, `IconButton`).
+Shared building blocks live in `src/styles/components.css` (buttons, inputs and styled native selects, checkboxes and radios, switches, badges, menus, dialogs, data tables, empty and loading states) and `src/components/ui/` (`Dialog`, `Menu`, `Switch`, `EmptyState`, `StatusIndicator`, `IconButton`, `BrandMark`, `BrandLogo`).
+
+## Brand
+
+The ReMa mark is one abstract symbol: an R drawn as two forms that meet at a node.
+
+- **The loop** (stem and bowl) is where the search starts: you and your Profile.
+- **The path** (the leg) leaves it toward the lower right: the way forward, the next role.
+- **The node**, held in a small clearing where the two meet: the match.
+
+The geometry is defined once, in `src/assets/brand/mark.json`: two round-capped strokes and a node on a 120 × 120 grid, with no fine detail, so the silhouette holds at 16 px. Every variant is generated from it; only color, lighting and scale change.
+
+| Variant | For | Files (`src/assets/brand/`) and in-app use |
+| --- | --- | --- |
+| A. App icon | macOS, Windows and Linux app icon, Dock, taskbar, launcher, website hero | `rema-app-icon.svg` → `src-tauri/icons/` |
+| B. Navigation | 16–32 px: title bar, rails, compact UI. Flat, two tones, no effects | `rema-nav-light.svg`, `rema-nav-dark.svg`; `<BrandMark />` |
+| C. Logo + wordmark | Website header, About, onboarding, marketing | `rema-logo-light.svg`, `rema-logo-dark.svg`; `<BrandLogo />` (Settings → About) |
+| D. Monochrome | Print, overlays, system integrations, high-contrast contexts | `rema-mark-white.svg`, `rema-mark-black.svg`, `rema-mark-blue.svg` |
+| E. Dark mode | Dark surfaces: brighter blues, edge light, a controlled glow | `rema-mark-dark.svg`; `<BrandMark variant="full" />` in dark |
+| F. Light mode | Light surfaces: deeper blues, crisp edges, no glow | `rema-mark-light.svg`; `<BrandMark variant="full" />` in light |
+
+- **Color and finish**: the ReMa blue family, from deep blue through cobalt to a cyan-leaning path and a light node, with a soft top highlight. The app icon sets a white-to-ice mark on a blue tile (cobalt `#2A8CF0` → LinkedIn blue `#0A66C2` → deep `#062F66`) with a soft internal light, a thin rim light and a faint cyan glow. It is not metallic or neon.
+- **App icon shape**: a rounded square on the macOS icon grid (an 824 px tile on a 1024 px canvas, transparent corners), so it sits with other apps in the Dock and the Windows taskbar.
+- **Wordmark**: "ReMa" in Inter (weight 650, −2% tracking), outlined to paths (`scripts/brand/wordmark.json`) so it looks the same everywhere.
+- **Changing the mark**: edit `mark.json`, then run `pnpm brand` (writes the SVG variants) and `pnpm icons` (renders the app icon into `src-tauri/icons/`). The in-app `BrandMark` reads `mark.json` directly, in the current theme's colors.

@@ -1,9 +1,16 @@
 /*
  * Design tokens — the single source for colors, type, spacing, depth and motion.
  *
- * Palette: the ReMa website — LinkedIn blue on white surfaces over a calm,
- * warm light-gray canvas, with charcoal text. Text colors meet WCAG AA on
- * white and on the canvas (secondary 8.2:1, tertiary 5.3:1).
+ * Light (default): the ReMa website — LinkedIn blue on white surfaces over a
+ * calm, warm light-gray canvas, with charcoal text. Text colors meet WCAG AA
+ * on white and on the canvas (secondary 8.2:1, tertiary 5.3:1).
+ *
+ * Dark (`:root[data-theme='dark']`, below): warm charcoal surfaces, quiet
+ * borders and restrained shadows, with ReMa blue kept for accents.
+ *
+ * `--color-brand` fills controls (white text on it); `--color-accent` is
+ * blue text, icons and outlines on surfaces. They match in light and
+ * differ in dark, where text needs a lighter blue.
  */
 :root {
   color-scheme: light;
@@ -17,14 +24,18 @@
   --color-brand-subtle-hover: #dde9f8;
   --color-brand-subtle-border: #c7dcf3;
   --color-brand-ring: rgba(10, 102, 194, 0.3);
+  --color-accent: #0a66c2;
+  --color-accent-strong: #004182;
 
   /* Neutrals */
   /* The launch intro's canvas (also the window's first frame). */
-  --color-warm-white: #f8f7f4;
+  --color-intro-canvas: #f8f7f4;
   --color-bg: #f4f4f2;
   --color-surface: #ffffff;
   --color-surface-sunken: #f8f8f7;
   --color-surface-muted: #f1f1ef;
+  /* The title bar. */
+  --color-chrome: #ffffff;
   --color-hover: rgba(24, 24, 20, 0.05);
   --color-pressed: rgba(24, 24, 20, 0.09);
   --color-border: #e4e3df;
@@ -48,8 +59,41 @@
   --color-danger-subtle: #fdf0f0;
   --color-danger-border: #f2cdcd;
 
+  /* Surfaces that invert the theme: tooltips and toasts. */
+  --color-inverse-surface: #191919;
+  --color-inverse-text: #ffffff;
+  --color-inverse-action: rgba(255, 255, 255, 0.12);
+  --color-inverse-action-hover: rgba(255, 255, 255, 0.2);
+
+  --color-selection: rgba(10, 102, 194, 0.18);
+  --color-scrollbar: rgba(24, 24, 20, 0.18);
+  --color-scrollbar-hover: rgba(24, 24, 20, 0.32);
+  --color-backdrop: rgba(24, 24, 20, 0.3);
+  /* Switch knobs. */
+  --color-knob: #ffffff;
+  --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%236b6b67' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4.5 6.25 8 9.75l3.5-3.5'/%3E%3C/svg%3E");
+
+  /* Profile match states (Analytics): always paired with an icon and a label. */
+  --state-matched: #057642;
+  --state-partial: #e8a317;
+  --state-partial-text: #8a5a00;
+  --state-missing: #cc1016;
+  --state-unknown: #b9b8b3;
+  --state-matched-subtle: #e6f3ec;
+  --state-partial-subtle: #fdf4e1;
+  --state-missing-subtle: #fbeaea;
+  --state-icon-ink: #ffffff;
+
   /* Chat */
   --color-user-bubble: #eaf2fb;
+  /* The composer's aurora glow: brand blue, sky and a soft indigo. */
+  --color-aurora-blue: rgba(10, 102, 194, 0.26);
+  --color-aurora-sky: rgba(56, 170, 240, 0.22);
+  --color-aurora-indigo: rgba(104, 112, 240, 0.19);
+  --shadow-composer: 0 1px 2px rgba(24, 24, 20, 0.04), 0 6px 20px rgba(24, 24, 20, 0.06);
+  --shadow-composer-focus: 0 0 0 4px rgba(10, 102, 194, 0.08), 0 6px 20px rgba(24, 24, 20, 0.07);
+  /* The launch intro's soft flash. */
+  --color-intro-glow: #ffffff;
   --color-code-bg: #f5f5f3;
 
   /* Typography — native on macOS (SF Pro) and Windows (Segoe UI), Inter elsewhere. */
@@ -142,4 +186,92 @@
   --z-toast: 30;
   --z-popover: 50;
   --z-intro: 1000;
+}
+
+/*
+ * Dark theme — warm near-black and charcoal, like a calm desktop app at night.
+ * Canvas #262624, cards #2e2d2b, sidebar #1f1e1d; text 12.7:1, secondary
+ * 8.4:1, tertiary 5.9:1 on the canvas; accent blue 5.7:1.
+ */
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --color-brand: #2a74c6;
+  --color-brand-hover: #3582d4;
+  --color-brand-pressed: #2466ae;
+  --color-brand-bright: #5ba3ef;
+  --color-brand-subtle: rgba(91, 163, 239, 0.14);
+  --color-brand-subtle-hover: rgba(91, 163, 239, 0.2);
+  --color-brand-subtle-border: rgba(91, 163, 239, 0.34);
+  --color-brand-ring: rgba(91, 163, 239, 0.4);
+  --color-accent: #5ba3ef;
+  --color-accent-strong: #8cc0f6;
+
+  --color-intro-canvas: #1f1e1d;
+  --color-bg: #262624;
+  --color-surface: #2e2d2b;
+  --color-surface-sunken: #1f1e1d;
+  --color-surface-muted: #353431;
+  --color-chrome: #1f1e1d;
+  --color-hover: rgba(255, 255, 255, 0.055);
+  --color-pressed: rgba(255, 255, 255, 0.09);
+  --color-border: #3a3936;
+  --color-border-strong: #4a4845;
+  --color-border-input: #4d4b47;
+  --color-border-input-hover: #65635e;
+  --color-text: #ecebe6;
+  --color-text-secondary: #c3c1b8;
+  --color-text-tertiary: #a3a198;
+  --color-text-quiet: #7f7d76;
+  --color-on-brand: #ffffff;
+
+  --color-success: #5fbf8a;
+  --color-success-subtle: rgba(95, 191, 138, 0.13);
+  --color-warning: #e3a651;
+  --color-warning-subtle: rgba(227, 166, 81, 0.13);
+  --color-danger: #f07a7d;
+  --color-danger-hover: #f49a9c;
+  --color-danger-subtle: rgba(240, 122, 125, 0.12);
+  --color-danger-border: rgba(240, 122, 125, 0.34);
+
+  --color-inverse-surface: #45443f;
+  --color-inverse-text: #f5f4ef;
+  --color-inverse-action: rgba(255, 255, 255, 0.1);
+  --color-inverse-action-hover: rgba(255, 255, 255, 0.16);
+
+  --color-selection: rgba(91, 163, 239, 0.3);
+  --color-scrollbar: rgba(255, 255, 255, 0.14);
+  --color-scrollbar-hover: rgba(255, 255, 255, 0.26);
+  --color-backdrop: rgba(0, 0, 0, 0.55);
+  --color-knob: #f5f4ef;
+  --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23a3a198' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4.5 6.25 8 9.75l3.5-3.5'/%3E%3C/svg%3E");
+
+  --state-matched: #5fbf8a;
+  --state-partial: #e3a651;
+  --state-partial-text: #e3a651;
+  --state-missing: #f07a7d;
+  --state-unknown: #6b6964;
+  --state-matched-subtle: rgba(95, 191, 138, 0.14);
+  --state-partial-subtle: rgba(227, 166, 81, 0.14);
+  --state-missing-subtle: rgba(240, 122, 125, 0.13);
+  --state-icon-ink: #1f1e1d;
+
+  --color-user-bubble: #393834;
+  --color-code-bg: #1f1e1d;
+  --color-aurora-blue: rgba(42, 116, 198, 0.32);
+  --color-aurora-sky: rgba(56, 170, 240, 0.2);
+  --color-aurora-indigo: rgba(120, 128, 255, 0.18);
+  --shadow-composer: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 24px rgba(0, 0, 0, 0.28);
+  --shadow-composer-focus: 0 0 0 4px rgba(91, 163, 239, 0.12), 0 8px 24px rgba(0, 0, 0, 0.3);
+  /* +20 on every channel over the intro canvas (#1f1e1d), so the gradient's
+     8-bit steps land together and stay neutral instead of forming tinted rings. */
+  --color-intro-glow: #333231;
+
+  --shadow-xs: 0 1px 1px rgba(0, 0, 0, 0.24);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 1px 2px rgba(0, 0, 0, 0.24), 0 2px 8px rgba(0, 0, 0, 0.2);
+  --shadow-lg: 0 2px 6px rgba(0, 0, 0, 0.3), 0 12px 32px rgba(0, 0, 0, 0.42);
+  --shadow-xl: 0 4px 12px rgba(0, 0, 0, 0.36), 0 24px 56px rgba(0, 0, 0, 0.5);
+  --shadow-brand: 0 1px 2px rgba(0, 0, 0, 0.3), 0 2px 6px rgba(42, 116, 198, 0.24);
+  --focus-ring-offset: 0 0 0 2px var(--color-surface), 0 0 0 4px rgba(91, 163, 239, 0.7);
 }

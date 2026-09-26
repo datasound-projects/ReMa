@@ -72,6 +72,10 @@ pub fn run() {
         .setup(move |app| {
             ipc.mount_events(app);
             let state = init_state(app)?;
+            // Open in the saved theme (the page itself reads it too).
+            if let Ok(appearance) = services::system::appearance(&state.db) {
+                commands::system::apply_appearance(app.handle(), appearance);
+            }
             scheduler::start(state.clone());
             analytics::enrich::start(state.clone());
             app.manage(state);

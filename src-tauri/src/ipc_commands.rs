@@ -12,6 +12,7 @@ pub const APP_COMMANDS: &[&str] = &[
     "get_app_status",
     "get_system_timezone",
     "open_external_url",
+    "set_appearance",
     // Providers & models
     "get_provider_settings",
     "get_model_catalog",

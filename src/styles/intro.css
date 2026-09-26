@@ -2,8 +2,9 @@
 
 /*
  * Timeline (≈ 3 s):
- *   0 ms      warm-white canvas (opaque from the first frame; the app loads underneath)
- *   0–1200    a soft white glow fades in, then settles ("flash in")
+ *   0 ms      a plain canvas, warm white or (dark theme) warm charcoal, opaque
+ *             from the first frame; the app loads underneath
+ *   0–1200    a soft glow fades in, then settles ("flash in")
  *   200       ReMa (mark + wordmark) rises in
  *   650       "Your Career" rises in
  *   1050      "Agent" rises in, in ReMa blue
@@ -20,7 +21,7 @@
   align-items: center;
   justify-content: center;
   overflow: hidden;
-  background: var(--color-warm-white);
+  background: var(--color-intro-canvas);
   opacity: 1;
   /* --intro-fade (set by the component) is the whole exit: words, then canvas. */
   transition: opacity calc(var(--intro-fade, 600ms) * 0.7) var(--ease-standard)
@@ -34,11 +35,19 @@
   pointer-events: none;
 }
 
-/* The soft flash: a white glow that brightens, then settles. */
+/*
+ * The soft flash: a glow that brightens, then settles. It fades into the
+ * opaque canvas color rather than `transparent`, which keeps the gradient's
+ * steps neutral (no faint tinted rings on dark canvases).
+ */
 .launch-intro__glow {
   position: absolute;
   inset: 0;
-  background: radial-gradient(ellipse 58% 52% at 50% 46%, #ffffff 0%, rgba(255, 255, 255, 0) 72%);
+  background: radial-gradient(
+    ellipse 58% 52% at 50% 46%,
+    var(--color-intro-glow) 0%,
+    var(--color-intro-canvas) 72%
+  );
   opacity: 0;
   animation: intro-glow 1200ms var(--ease-out) forwards;
 }
@@ -104,7 +113,7 @@
 .launch-intro__line--accent {
   /* Room for the descender of the "g". */
   padding-bottom: 0.06em;
-  color: var(--color-brand);
+  color: var(--color-accent);
   animation-delay: 1050ms;
 }
 

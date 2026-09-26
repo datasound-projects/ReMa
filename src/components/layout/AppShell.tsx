@@ -8,6 +8,7 @@ import { SIDEBAR_SHORTCUT } from '../../hooks/useSidebar';
 import { ChartIcon, GlobeIcon, PanelIcon } from '../icons';
 import { BrandMark } from '../ui/BrandMark';
 import { IconButton } from '../ui/IconButton';
+import { ThemeToggle } from './ThemeToggle';
 
 // The dashboard (and its charting library) loads when Analytics first opens.
 const AnalyticsPanel = lazy(() => import('../analytics/AnalyticsPanel').then((m) => ({ default: m.AnalyticsPanel })));
@@ -97,7 +98,7 @@ export function AppShell({ sidebar, sidebarCollapsed, onToggleSidebar, children 
       {/* The whole header moves the window; buttons and links inside stay clickable. */}
       <header className="app-shell__topbar" data-tauri-drag-region="deep">
         <div className="app-shell__brand">
-          <BrandMark />
+          <BrandMark size={26} />
           <span className="app-shell__wordmark">ReMa</span>
         </div>
         <IconButton
@@ -140,6 +141,7 @@ export function AppShell({ sidebar, sidebarCollapsed, onToggleSidebar, children 
           >
             <GlobeIcon />
           </IconButton>
+          <ThemeToggle />
         </div>
       </header>
       <div className="app-shell__body">

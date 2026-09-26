@@ -41,6 +41,7 @@ pub fn builder() -> Builder<tauri::Wry> {
             commands::system::get_app_status,
             commands::system::get_system_timezone,
             commands::system::open_external_url,
+            commands::system::set_appearance,
             // Providers & models
             commands::providers::get_provider_settings,
             commands::providers::get_model_catalog,

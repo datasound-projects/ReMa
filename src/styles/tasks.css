@@ -289,7 +289,7 @@
 .calendar-outcome--created,
 .calendar-outcome--updated {
   background: var(--color-brand-subtle);
-  color: var(--color-brand-hover);
+  color: var(--color-accent-strong);
 }
 
 .app-status--needs_action,

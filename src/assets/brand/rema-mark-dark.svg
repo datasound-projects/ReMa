@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120">
+  <defs>
+    <linearGradient id="d-loop" gradientUnits="userSpaceOnUse" x1="28" y1="20" x2="92" y2="100">
+      <stop offset="0" stop-color="#5aa9f2"/><stop offset="1" stop-color="#2a78cf"/>
+    </linearGradient>
+    <linearGradient id="d-path" gradientUnits="userSpaceOnUse" x1="58" y1="68" x2="92" y2="100">
+      <stop offset="0" stop-color="#6cc4fa"/><stop offset="1" stop-color="#3a93e6"/>
+    </linearGradient>
+    <linearGradient id="d-gloss" gradientUnits="userSpaceOnUse" x1="0" y1="18" x2="0" y2="62">
+      <stop offset="0" stop-color="#fff" stop-opacity="0.34"/><stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="d-glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="3.2" result="blur"/>
+      <feFlood flood-color="#3c9cf0" flood-opacity="0.45"/>
+      <feComposite in2="blur" operator="in" result="glow"/>
+      <feMerge><feMergeNode in="glow"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <mask id="d-clear" maskUnits="userSpaceOnUse" x="0" y="0" width="120" height="120">
+    <rect width="120" height="120" fill="#fff"/>
+    <circle cx="57" cy="68" r="11.2" fill="#000"/>
+  </mask>
+  <g filter="url(#d-glow)">
+    <g mask="url(#d-clear)" fill="none" stroke-width="17" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M36 92V40a12 12 0 0 1 12-12h14a20 20 0 0 1 0 40h-6" stroke="url(#d-loop)"/>
+      <path d="M58 68 84 94" stroke="url(#d-path)"/>
+      <path d="M36 92V40a12 12 0 0 1 12-12h14a20 20 0 0 1 0 40h-6" stroke="url(#d-gloss)"/><path d="M58 68 84 94" stroke="url(#d-gloss)"/>
+    </g>
+    <circle cx="57" cy="68" r="6.2" fill="#c9ecff"/>
+  </g>
+</svg>

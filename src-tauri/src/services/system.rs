@@ -1,7 +1,11 @@
 use crate::{
-    models::system::{AppStatus, BackendStatus},
+    db::{providers as settings_repo, Database},
+    error::AppResult,
+    models::system::{AppStatus, Appearance, BackendStatus},
     state::AppInfo,
 };
+
+const APPEARANCE_KEY: &str = "appearance.theme";
 
 /// Reports the current status of the application core.
 pub fn app_status(info: &AppInfo) -> AppStatus {
@@ -10,6 +14,20 @@ pub fn app_status(info: &AppInfo) -> AppStatus {
         app: info.name.clone(),
         version: info.version.clone(),
     }
+}
+
+/// The saved color theme (light when never chosen).
+pub fn appearance(db: &Database) -> AppResult<Appearance> {
+    db.call(|conn| {
+        Ok(settings_repo::get_setting(conn, APPEARANCE_KEY)?
+            .and_then(|v| Appearance::parse(&v))
+            .unwrap_or_default())
+    })
+}
+
+/// Remembers the color theme, so the window opens in it next time.
+pub fn save_appearance(db: &Database, appearance: Appearance) -> AppResult<()> {
+    db.call(|conn| settings_repo::set_setting(conn, APPEARANCE_KEY, appearance.as_str()))
 }
 
 /// Only web and mail links may be opened from rendered content.
@@ -49,6 +67,18 @@ mod tests {
         assert_eq!(
             json,
             serde_json::json!({ "status": "ready", "app": "ReMa", "version": "0.1.0" })
+        );
+    }
+
+    #[test]
+    fn remembers_the_appearance() {
+        let db = Database::open_in_memory().unwrap();
+        assert_eq!(appearance(&db).unwrap(), Appearance::Light);
+        save_appearance(&db, Appearance::Dark).unwrap();
+        assert_eq!(appearance(&db).unwrap(), Appearance::Dark);
+        assert_eq!(
+            serde_json::to_value(Appearance::Dark).unwrap(),
+            serde_json::json!("dark")
         );
     }
 

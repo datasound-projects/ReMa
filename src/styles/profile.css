@@ -43,7 +43,7 @@
   height: 48px;
   border-radius: 50%;
   background: var(--color-brand-subtle);
-  color: var(--color-brand);
+  color: var(--color-accent);
   font-size: 17px;
   font-weight: var(--weight-semibold);
   letter-spacing: 0.02em;
@@ -202,7 +202,7 @@
   margin-bottom: var(--space-2);
   border-radius: var(--radius-md);
   background: var(--color-brand-subtle);
-  color: var(--color-brand);
+  color: var(--color-accent);
 }
 
 .profile-start__title {
@@ -263,12 +263,12 @@
 .entries__add {
   align-self: flex-start;
   margin-left: calc(-1 * var(--space-3));
-  color: var(--color-brand);
+  color: var(--color-accent);
 }
 
 .entries__add:hover:not(:disabled) {
   background: var(--color-brand-subtle);
-  color: var(--color-brand-hover);
+  color: var(--color-accent-strong);
 }
 
 .entry {
@@ -372,7 +372,7 @@
   padding: 0 4px 0 10px;
   border-radius: var(--radius-pill);
   background: var(--color-brand-subtle);
-  color: var(--color-brand-hover);
+  color: var(--color-accent-strong);
   font-size: var(--text-sm);
   font-weight: var(--weight-medium);
 }
@@ -392,7 +392,7 @@
 }
 
 .chip__remove:hover {
-  background: rgba(10, 102, 194, 0.14);
+  background: var(--color-brand-subtle-hover);
 }
 
 .chips__input {

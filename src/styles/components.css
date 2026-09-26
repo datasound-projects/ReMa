@@ -1,8 +1,13 @@
 /* ── Brand mark ────────────────────────────────────────── */
 
-.brand-mark {
+.brand-mark,
+.brand-logo {
   flex-shrink: 0;
   -webkit-user-drag: none;
+}
+
+.brand-logo {
+  width: auto;
 }
 
 /* ── Section: a titled group on a page ─────────────────── */
@@ -157,7 +162,7 @@
 
 .badge--brand {
   background: var(--color-brand-subtle);
-  color: var(--color-brand-hover);
+  color: var(--color-accent-strong);
 }
 
 .badge--success {
@@ -240,14 +245,14 @@
 .button--secondary {
   background: var(--color-surface);
   border-color: var(--color-border-strong);
-  color: var(--color-brand);
+  color: var(--color-accent);
   box-shadow: var(--shadow-xs);
 }
 
 .button--secondary:hover:not(:disabled) {
   background: var(--color-brand-subtle);
   border-color: var(--color-brand-subtle-border);
-  color: var(--color-brand-hover);
+  color: var(--color-accent-strong);
 }
 
 .button--secondary:active:not(:disabled) {
@@ -289,13 +294,13 @@
   border: none;
   border-radius: var(--radius-xs);
   background: none;
-  color: var(--color-brand);
+  color: var(--color-accent);
   font-weight: var(--weight-semibold);
   cursor: pointer;
 }
 
 .link-button:hover {
-  color: var(--color-brand-hover);
+  color: var(--color-accent-strong);
   text-decoration: underline;
   text-underline-offset: 2px;
 }
@@ -329,7 +334,7 @@
 
 .icon-button[aria-pressed='true'] {
   background: var(--color-brand-subtle);
-  color: var(--color-brand);
+  color: var(--color-accent);
 }
 
 .icon-button:disabled {
@@ -429,7 +434,7 @@
 }
 
 .dialog::backdrop {
-  background: rgba(24, 24, 20, 0.3);
+  background: var(--color-backdrop);
   animation: backdrop-in var(--duration-base) var(--ease-standard);
 }
 
@@ -565,7 +570,7 @@
 /* Native pickers drawn in ReMa's style on every platform. */
 select.input {
   padding-right: 30px;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%236b6b67' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4.5 6.25 8 9.75l3.5-3.5'/%3E%3C/svg%3E");
+  background-image: var(--select-chevron);
   background-position: right 9px center;
   background-repeat: no-repeat;
   background-size: 16px;
@@ -608,14 +613,72 @@ select.input {
   font-size: var(--text-sm);
 }
 
+/* Drawn by ReMa so they match both themes on every platform. */
 .checkbox input,
 input[type='checkbox'],
 input[type='radio'] {
-  width: 15px;
-  height: 15px;
-  margin: 0;
+  display: inline-grid;
+  place-content: center;
   flex-shrink: 0;
-  accent-color: var(--color-brand);
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  border: 1.5px solid var(--color-border-input);
+  border-radius: 4px;
+  background: var(--color-surface);
+  transition:
+    background-color var(--transition-fast),
+    border-color var(--transition-fast);
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+input[type='radio'] {
+  border-radius: 50%;
+}
+
+input[type='checkbox']:hover:not(:disabled),
+input[type='radio']:hover:not(:disabled) {
+  border-color: var(--color-border-input-hover);
+}
+
+input[type='checkbox']:checked,
+input[type='checkbox']:indeterminate,
+input[type='radio']:checked {
+  border-color: var(--color-brand);
+  background: var(--color-brand);
+}
+
+input[type='checkbox']:checked::after,
+input[type='checkbox']:indeterminate::after {
+  content: '';
+  width: 10px;
+  height: 10px;
+  background: var(--color-on-brand);
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M2 5.2 4.1 7.2 8 3'/%3E%3C/svg%3E")
+    center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M2 5.2 4.1 7.2 8 3'/%3E%3C/svg%3E")
+    center / contain no-repeat;
+}
+
+input[type='checkbox']:indeterminate::after {
+  height: 2px;
+  border-radius: 1px;
+  -webkit-mask: none;
+  mask: none;
+}
+
+input[type='radio']:checked::after {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-on-brand);
+}
+
+input[type='checkbox']:disabled,
+input[type='radio']:disabled {
+  opacity: 0.5;
 }
 
 .checkbox__hint {
@@ -660,7 +723,7 @@ input[type='radio'] {
   width: 14px;
   height: 14px;
   border-radius: 50%;
-  background: #fff;
+  background: var(--color-knob);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.22);
   transition: transform var(--duration-base) var(--ease-out);
 }
@@ -674,7 +737,7 @@ input[type='radio'] {
 }
 
 .switch__input:focus-visible + .switch__track {
-  outline: 2px solid var(--color-brand);
+  outline: 2px solid var(--color-accent);
   outline-offset: 2px;
 }
 
@@ -785,7 +848,7 @@ input[type='radio'] {
   margin-bottom: var(--space-2);
   border-radius: 50%;
   background: var(--color-brand-subtle);
-  color: var(--color-brand);
+  color: var(--color-accent);
 }
 
 .empty-state__icon svg {
@@ -879,8 +942,8 @@ input[type='radio'] {
   gap: var(--space-3);
   max-width: calc(100% - 48px);
   padding: 6px 6px 6px var(--space-4);
-  background: var(--color-text);
-  color: #fff;
+  background: var(--color-inverse-surface);
+  color: var(--color-inverse-text);
   border-radius: var(--radius-pill);
   box-shadow: var(--shadow-lg);
   font-size: var(--text-sm);
@@ -900,13 +963,13 @@ input[type='radio'] {
   padding: 0 var(--space-3);
   border: none;
   border-radius: var(--radius-pill);
-  background: rgba(255, 255, 255, 0.12);
-  color: #fff;
+  background: var(--color-inverse-action);
+  color: var(--color-inverse-text);
   font-size: var(--text-sm);
   font-weight: var(--weight-semibold);
   transition: background-color var(--transition-fast);
 }
 
 .toast__action:hover {
-  background: rgba(255, 255, 255, 0.2);
+  background: var(--color-inverse-action-hover);
 }

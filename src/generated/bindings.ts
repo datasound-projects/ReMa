@@ -12,6 +12,11 @@ export const commands = {
 	getSystemTimezone: () => __TAURI_INVOKE<string>("get_system_timezone"),
 	/**  Opens a link from chat content in the default browser. */
 	openExternalUrl: (url: string) => __TAURI_INVOKE<null>("open_external_url", { url }),
+	/**
+	 *  Remembers the color theme and applies it to the window: native menus and
+	 *  pickers follow it, and the next launch opens in it without a flash.
+	 */
+	setAppearance: (appearance: Appearance) => __TAURI_INVOKE<null>("set_appearance", { appearance }),
 	getProviderSettings: () => __TAURI_INVOKE<ProviderSettings>("get_provider_settings"),
 	getModelCatalog: () => __TAURI_INVOKE<ModelCatalog>("get_model_catalog"),
 	connectProvider: (kind: ProviderKind, apiKey: string) => __TAURI_INVOKE<ProviderView>("connect_provider", { kind, apiKey }),
@@ -174,6 +179,9 @@ export type AppStatus = {
 	app: string,
 	version: string,
 };
+
+/**  ReMa's color theme. Light is the default. */
+export type Appearance = "light" | "dark";
 
 /**  One row of the application overview. */
 export type ApplicationRow = {
