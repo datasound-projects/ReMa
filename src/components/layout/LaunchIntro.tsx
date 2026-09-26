@@ -69,7 +69,7 @@ export function LaunchIntro() {
       <div className="launch-intro__glow" />
       <div className="launch-intro__content">
         <div className="launch-intro__brand">
-          <BrandMark size={44} variant="full" />
+          <BrandMark size={64} />
           <span className="launch-intro__wordmark">ReMa</span>
         </div>
         <p className="launch-intro__headline">

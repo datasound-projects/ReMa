@@ -82,12 +82,12 @@
 .launch-intro__brand {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 16px;
   animation: intro-rise 700ms var(--ease-out) 200ms both;
 }
 
 .launch-intro__wordmark {
-  font-size: 30px;
+  font-size: 36px;
   font-weight: var(--weight-bold);
   line-height: 1;
   letter-spacing: -0.035em;

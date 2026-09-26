@@ -1,9 +1,13 @@
-import logoDark from '../../assets/brand/rema-logo-dark.svg';
-import logoLight from '../../assets/brand/rema-logo-light.svg';
-import { useTheme } from '../../hooks/useTheme';
+import { BrandMark } from './BrandMark';
 
-/** The mark with the ReMa wordmark (About, onboarding). */
+/** The app icon with the ReMa name (Settings → About). */
 export function BrandLogo({ height = 32 }: { height?: number }) {
-  const dark = useTheme() === 'dark';
-  return <img className="brand-logo" src={dark ? logoDark : logoLight} height={height} alt="ReMa" />;
+  return (
+    <span className="brand-logo" role="img" aria-label="ReMa" style={{ fontSize: height * 0.56 }}>
+      <BrandMark size={height} />
+      <span className="brand-logo__name" aria-hidden="true">
+        ReMa
+      </span>
+    </span>
+  );
 }

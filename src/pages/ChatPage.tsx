@@ -6,6 +6,7 @@ import { Composer } from '../components/chat/Composer';
 import { BriefcaseIcon, ChartIcon, SearchIcon, SparkleIcon } from '../components/icons';
 import { MessageList } from '../components/chat/MessageList';
 import { TaskDialog } from '../components/tasks/TaskDialog';
+import { BrandMark } from '../components/ui/BrandMark';
 import { dataOr } from '../hooks/useAsyncData';
 import { useAgents } from '../hooks/useAgents';
 import { useChat } from '../hooks/useChat';
@@ -193,6 +194,7 @@ export function ChatPage({ conversationId, initialAgentIds }: ChatPageProps) {
       {empty ? (
         <div className="chat__welcome">
           <div className="chat__heading">
+            <BrandMark size={52} />
             <h1 className="chat__greeting">What can ReMa help with?</h1>
             <p className="chat__tagline">Search roles, compare them with your Profile, and plan your next step.</p>
           </div>

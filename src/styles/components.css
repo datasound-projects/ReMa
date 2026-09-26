@@ -1,13 +1,24 @@
 /* ── Brand mark ────────────────────────────────────────── */
 
-.brand-mark,
-.brand-logo {
+.brand-mark {
   flex-shrink: 0;
+  display: block;
   -webkit-user-drag: none;
+  user-select: none;
 }
 
 .brand-logo {
-  width: auto;
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 0.55em;
+}
+
+.brand-logo__name {
+  font-weight: var(--weight-bold);
+  line-height: 1;
+  letter-spacing: -0.03em;
+  color: var(--color-text);
 }
 
 /* ── Section: a titled group on a page ─────────────────── */

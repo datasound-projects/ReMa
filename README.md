@@ -288,8 +288,7 @@ Then open **Settings**, connect a provider (or add an OpenAI-compatible endpoint
 | `pnpm test`              | Run the frontend tests (Vitest, incl. real PDF rendering) |
 | `pnpm test:rust`         | Run the Rust tests (fails if bindings are stale)          |
 | `pnpm bindings`          | Regenerate `src/generated/bindings.ts` from Rust          |
-| `pnpm brand`             | Regenerate the logo files from the master mark            |
-| `pnpm icons`             | Regenerate the desktop app icons from the app icon SVG    |
+| `pnpm brand`             | Regenerate the app icons and logo files from the master icon |
 
 ## Project structure
 
@@ -298,7 +297,7 @@ rema/
 ├── src/                          # Frontend (React + TypeScript)
 │   ├── app/                      # App root, navigation, sidebar entries
 │   ├── pages/                    # ChatPage, AgentsPage, ScheduledTasksPage, ProfilePage, SettingsPage
-│   ├── assets/brand/             # Master mark (mark.json) and the generated logo variants
+│   ├── assets/brand/             # Master app icon (rema-icon-source.png), in-app icon, logo lockups
 │   ├── components/
 │   │   ├── layout/               # AppShell, Sidebar, PageContainer, ThemeToggle, LaunchIntro
 │   │   ├── browser/              # BrowserProvider, BrowserPanel, Auto Fill button and report
@@ -321,7 +320,7 @@ rema/
 │   │                             # portfolio/ (templates, layout engine, fonts, PDF rendering)
 │   └── styles/                   # tokens → base → layout → components → chat/tasks/settings/profile/browser/analytics
 ├── public/theme-init.js          # Applies the saved theme before the first paint
-├── scripts/brand/                # Logo generator (build-brand.mjs), app icons (app-icons.mjs), outlined wordmark
+├── scripts/brand/                # Icon and logo generator (build-brand.mjs), outlined wordmark
 ├── scripts/runtimes/fetch.mjs    # Downloads the latest Codex and ant for bundling
 │
 └── src-tauri/src/                # Backend (Rust)
@@ -381,24 +380,16 @@ Shared building blocks live in `src/styles/components.css` (buttons, inputs and 
 
 ## Brand
 
-The ReMa mark is one abstract symbol: an R drawn as two forms that meet at a node.
+The ReMa logo is the app icon: a glossy blue rounded tile with a white **R**, and a blue node in the R's bowl (the match). The same artwork is used everywhere; only its size changes.
 
-- **The loop** (stem and bowl) is where the search starts: you and your Profile.
-- **The path** (the leg) leaves it toward the lower right: the way forward, the next role.
-- **The node**, held in a small clearing where the two meet: the match.
+The master is `src/assets/brand/rema-icon-source.png` (1024 × 1024, full-bleed tile, transparent outside the rounded corners). `pnpm brand` (`scripts/brand/build-brand.mjs`) generates everything else from it:
 
-The geometry is defined once, in `src/assets/brand/mark.json`: two round-capped strokes and a node on a 120 × 120 grid, with no fine detail, so the silhouette holds at 16 px. Every variant is generated from it; only color, lighting and scale change.
-
-| Variant | For | Files (`src/assets/brand/`) and in-app use |
+| Output | For | In the app |
 | --- | --- | --- |
-| A. App icon | macOS, Windows and Linux app icon, Dock, taskbar, launcher, website hero | `rema-app-icon.svg` → `src-tauri/icons/` |
-| B. Navigation | 16–32 px: title bar, rails, compact UI. Flat, two tones, no effects | `rema-nav-light.svg`, `rema-nav-dark.svg`; `<BrandMark />` |
-| C. Logo + wordmark | Website header, About, onboarding, marketing | `rema-logo-light.svg`, `rema-logo-dark.svg`; `<BrandLogo />` (Settings → About) |
-| D. Monochrome | Print, overlays, system integrations, high-contrast contexts | `rema-mark-white.svg`, `rema-mark-black.svg`, `rema-mark-blue.svg` |
-| E. Dark mode | Dark surfaces: brighter blues, edge light, a controlled glow | `rema-mark-dark.svg`; `<BrandMark variant="full" />` in dark |
-| F. Light mode | Light surfaces: deeper blues, crisp edges, no glow | `rema-mark-light.svg`; `<BrandMark variant="full" />` in light |
+| `src-tauri/icons/` (`.icns`, `.ico`, PNGs) | macOS, Windows and Linux app icon: Dock, taskbar, launcher, bundles | Tauri bundle |
+| `src/assets/brand/rema-icon.png` (256 px) | Every in-app use | `<BrandMark />`: title bar, launch intro, the new-chat screen; `<BrandLogo />` (icon + name) in Settings → About |
+| `src/assets/brand/rema-logo-light.svg`, `rema-logo-dark.svg` | Icon + wordmark lockups for light and dark backgrounds (website, documents) | Not bundled |
 
-- **Color and finish**: the ReMa blue family, from deep blue through cobalt to a cyan-leaning path and a light node, with a soft top highlight. The app icon sets a white-to-ice mark on a blue tile (cobalt `#2A8CF0` → LinkedIn blue `#0A66C2` → deep `#062F66`) with a soft internal light, a thin rim light and a faint cyan glow. It is not metallic or neon.
-- **App icon shape**: a rounded square on the macOS icon grid (an 824 px tile on a 1024 px canvas, transparent corners), so it sits with other apps in the Dock and the Windows taskbar.
-- **Wordmark**: "ReMa" in Inter (weight 650, −2% tracking), outlined to paths (`scripts/brand/wordmark.json`) so it looks the same everywhere.
-- **Changing the mark**: edit `mark.json`, then run `pnpm brand` (writes the SVG variants) and `pnpm icons` (renders the app icon into `src-tauri/icons/`). The in-app `BrandMark` reads `mark.json` directly, in the current theme's colors.
+- **Desktop icon grid**: the tile sits at 824 px on a 1024 px canvas with a soft shadow (the macOS icon grid), so it lines up with other apps in the Dock and the Windows taskbar.
+- **Wordmark**: "ReMa" in Inter (weight 650, −2% tracking), outlined to paths (`scripts/brand/wordmark.json`) in the lockups; in the app it is live text next to the icon.
+- **Changing the logo**: replace `rema-icon-source.png` and run `pnpm brand`. Resizing is done by `tauri icon`, so no image tools are needed.

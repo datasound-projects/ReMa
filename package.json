@@ -19,8 +19,7 @@
     "bindings": "cargo test --manifest-path src-tauri/Cargo.toml --lib ipc::tests::export -- --ignored",
     "runtimes": "node scripts/runtimes/fetch.mjs",
     "build:app": "tauri build --config src-tauri/tauri.runtimes.conf.json",
-    "brand": "node scripts/brand/build-brand.mjs",
-    "icons": "node scripts/brand/app-icons.mjs"
+    "brand": "node scripts/brand/build-brand.mjs"
   },
   "dependencies": {
     "@expo-google-fonts/inter": "0.4.2",
