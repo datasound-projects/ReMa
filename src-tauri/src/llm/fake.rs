@@ -4,8 +4,20 @@ use std::{sync::Mutex, time::Duration};
 
 use tokio_util::sync::CancellationToken;
 
-use super::{BoxFuture, ChatRequest, DeltaSink, Endpoint, FetchedModel, Finish, LanguageModel};
+use super::{
+    BoxFuture, ChatRequest, DeltaSink, Endpoint, FetchedModel, Finish, LanguageModel, ToolCall,
+    ToolExecutor, ToolOutput, ToolRound,
+};
 use crate::error::{AppError, AppResult};
+
+/// An executor for requests that must not call tools.
+pub struct NoTools;
+
+impl ToolExecutor for NoTools {
+    fn execute<'a>(&'a self, _call: &'a ToolCall) -> BoxFuture<'a, ToolOutput> {
+        Box::pin(async { ToolOutput::error("no tools") })
+    }
+}
 
 pub struct FakeLanguageModel {
     pub models: Vec<FetchedModel>,
@@ -16,6 +28,11 @@ pub struct FakeLanguageModel {
     pub fail_with: Option<String>,
     /// Requests received (model id, request).
     pub requests: Mutex<Vec<(String, ChatRequest)>>,
+    /// Tool calls to make, in order, before streaming `chunks` (only when
+    /// the request offers tools). Each call's output is recorded.
+    pub tool_calls: Vec<ToolCall>,
+    /// What the tools returned, as a finished answer would have seen it.
+    pub tool_outputs: Mutex<Vec<ToolOutput>>,
 }
 
 impl FakeLanguageModel {
@@ -30,7 +47,15 @@ impl FakeLanguageModel {
             delay: Duration::ZERO,
             fail_with: None,
             requests: Mutex::default(),
+            tool_calls: Vec::new(),
+            tool_outputs: Mutex::default(),
         }
+    }
+
+    /// Calls these tools (when offered) before answering.
+    pub fn calling(mut self, calls: Vec<ToolCall>) -> Self {
+        self.tool_calls = calls;
+        self
     }
 }
 
@@ -71,6 +96,34 @@ impl LanguageModel for FakeLanguageModel {
                 .lock()
                 .unwrap()
                 .push((model_id.to_string(), request.clone()));
+            // Like a provider that calls every offered tool first.
+            if let Some(tools) = &request.tools {
+                let mut round = ToolRound {
+                    text: String::new(),
+                    calls: Vec::new(),
+                    outputs: Vec::new(),
+                };
+                for call in &self.tool_calls {
+                    if cancel.is_cancelled() {
+                        return Ok(Finish::Cancelled);
+                    }
+                    let output = tools.executor.execute(call).await;
+                    self.tool_outputs.lock().unwrap().push(output.clone());
+                    round.calls.push(call.clone());
+                    round.outputs.push(output);
+                }
+                if cancel.is_cancelled() {
+                    return Ok(Finish::Cancelled);
+                }
+                if !round.calls.is_empty() {
+                    let mut with_round = request.clone();
+                    with_round.rounds.push(round);
+                    self.requests
+                        .lock()
+                        .unwrap()
+                        .push((model_id.to_string(), with_round));
+                }
+            }
             for chunk in &self.chunks {
                 tokio::select! {
                     _ = cancel.cancelled() => return Ok(Finish::Cancelled),

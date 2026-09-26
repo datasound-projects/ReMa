@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { PlusIcon } from '../components/icons';
 import { PageContainer } from '../components/layout/PageContainer';
 import { GoogleSection } from '../components/settings/GoogleSection';
+import { McpSection } from '../components/settings/McpSection';
 import { CloudProviderRow } from '../components/settings/CloudProviderRow';
 import { CustomEndpointRow } from '../components/settings/ProviderRows';
 import { BrandLogo } from '../components/ui/BrandLogo';
@@ -16,7 +17,7 @@ import { setDefaultModel, type ModelRef } from '../services/providerService';
 
 const modelKey = (m: ModelRef) => `${m.providerId}/${m.modelId}`;
 
-export function SettingsPage() {
+export function SettingsPage({ focus }: { focus?: 'mcp' }) {
   const settings = useProviderSettings();
   const catalog = dataOr(useModelCatalog().state, null);
   const status = useAppStatus().state;
@@ -132,6 +133,8 @@ export function SettingsPage() {
         </div>
         {error && <p className="form-error">{error}</p>}
       </section>
+
+      <McpSection focus={focus === 'mcp'} />
 
       <GoogleSection />
 

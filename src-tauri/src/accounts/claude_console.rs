@@ -37,7 +37,7 @@ use crate::{
 };
 
 const OVERRIDE_VAR: &str = "REMA_ANT_PATH";
-const INSTALL_HINT: &str = "Claude Console sign-in uses Anthropic’s command-line tool. Install it with “brew install anthropics/tap/ant” (or from github.com/anthropics/anthropic-cli), then try again.";
+const INSTALL_HINT: &str = "Claude Console sign-in uses Anthropic’s command-line tool. ReMa ships it; if it is missing, reinstall ReMa or install it with “brew install anthropics/tap/ant”, then try again.";
 /// How long ReMa reuses an access token. `ant` refreshes tokens that expire
 /// within two minutes, so a reused token is always still valid.
 const TOKEN_REUSE: Duration = Duration::from_secs(60);
@@ -64,7 +64,9 @@ impl ClaudeConsole {
     }
 
     async fn locate(&self) -> Option<locate::Located> {
-        locate::find("ant", OVERRIDE_VAR).await
+        locate::find("ant", OVERRIDE_VAR)
+            .await
+            .map(|(located, _)| located)
     }
 
     fn command(&self, located: &locate::Located, args: &[&str]) -> Command {

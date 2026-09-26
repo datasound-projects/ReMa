@@ -5,8 +5,9 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 use crate::{
     error::{AppError, AppResult},
     models::profile::{
-        CustomField, CustomFieldKind, DocumentFormat, DocumentKind, Education, Experience,
-        Language, Profile, ProfileDocument, ProfileLink,
+        CredentialInput, CredentialKind, CustomField, CustomFieldKind, DocumentFormat,
+        DocumentKind, Education, Experience, Language, Profile, ProfileCredential, ProfileDocument,
+        ProfileLink,
     },
 };
 
@@ -218,7 +219,7 @@ pub fn save(conn: &Connection, profile: &Profile, now: i64) -> AppResult<()> {
 // ── Documents ───────────────────────────────────────────────────────
 
 const DOCUMENT_COLUMNS: &str = "id, name, kind, format, original_name, size, text IS NOT NULL,
-    created_at, updated_at";
+    created_at, updated_at, is_primary";
 
 fn document_from_row(row: &Row) -> rusqlite::Result<ProfileDocument> {
     let kind: String = row.get(2)?;
@@ -233,6 +234,7 @@ fn document_from_row(row: &Row) -> rusqlite::Result<ProfileDocument> {
         has_text: row.get(6)?,
         created_at: row.get(7)?,
         updated_at: row.get(8)?,
+        is_primary: row.get(9)?,
     })
 }
 
@@ -288,6 +290,7 @@ pub struct NewDocument<'a> {
     pub now: i64,
 }
 
+/// Stores a new document. The first CV becomes the primary one.
 pub fn insert_document(conn: &Connection, doc: NewDocument) -> AppResult<ProfileDocument> {
     conn.execute(
         "INSERT INTO profile_documents
@@ -305,7 +308,32 @@ pub fn insert_document(conn: &Connection, doc: NewDocument) -> AppResult<Profile
             doc.now,
         ],
     )?;
-    get_document(conn, conn.last_insert_rowid())
+    let id = conn.last_insert_rowid();
+    ensure_primary(conn)?;
+    get_document(conn, id)
+}
+
+/// Replaces a document's file (a new version of the same CV), keeping its
+/// name, kind and primary mark. Returns the old stored file name.
+pub fn replace_document_file(conn: &Connection, id: i64, doc: NewDocument) -> AppResult<String> {
+    let old = document_file_name(conn, id)?;
+    conn.execute(
+        "UPDATE profile_documents
+         SET format = ?2, original_name = ?3, file_name = ?4, size = ?5, sha256 = ?6, text = ?7,
+             updated_at = ?8
+         WHERE id = ?1",
+        params![
+            id,
+            doc.format.as_str(),
+            doc.original_name,
+            doc.file_name,
+            doc.size,
+            doc.sha256,
+            doc.text,
+            doc.now,
+        ],
+    )?;
+    Ok(old)
 }
 
 pub fn update_document(
@@ -316,21 +344,196 @@ pub fn update_document(
     now: i64,
 ) -> AppResult<()> {
     let updated = conn.execute(
-        "UPDATE profile_documents SET name = ?2, kind = ?3, updated_at = ?4 WHERE id = ?1",
+        "UPDATE profile_documents SET name = ?2, kind = ?3, updated_at = ?4,
+             is_primary = CASE WHEN ?3 = 'cv' THEN is_primary ELSE 0 END
+         WHERE id = ?1",
         params![id, name, kind.as_str(), now],
     )?;
     if updated == 0 {
         return Err(AppError::not_found("Document not found"));
     }
+    ensure_primary(conn)
+}
+
+/// Makes a CV the primary one (and no other).
+pub fn set_primary_document(conn: &Connection, id: i64) -> AppResult<()> {
+    let kind: String = conn
+        .query_row(
+            "SELECT kind FROM profile_documents WHERE id = ?1",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| AppError::not_found("Document not found"))?;
+    if kind != DocumentKind::Cv.as_str() {
+        return Err(AppError::validation(
+            "Only a CV can be the primary document.",
+        ));
+    }
+    conn.execute(
+        "UPDATE profile_documents SET is_primary = 0 WHERE is_primary = 1 AND id <> ?1",
+        [id],
+    )?;
+    conn.execute(
+        "UPDATE profile_documents SET is_primary = 1 WHERE id = ?1",
+        [id],
+    )?;
     Ok(())
 }
 
-/// Deletes the row and returns its file name. Custom fields pointing at it
-/// keep their label and lose the file.
+/// If there are CVs but none is primary, the newest becomes primary.
+fn ensure_primary(conn: &Connection) -> AppResult<()> {
+    conn.execute(
+        "UPDATE profile_documents SET is_primary = 1
+         WHERE id = (SELECT id FROM profile_documents WHERE kind = 'cv'
+                     ORDER BY created_at DESC, id DESC LIMIT 1)
+           AND NOT EXISTS (SELECT 1 FROM profile_documents WHERE is_primary = 1)",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Deletes the row and returns its file name. Custom fields and credentials
+/// pointing at it keep their other details and lose the file.
 pub fn delete_document(conn: &Connection, id: i64) -> AppResult<String> {
     let file_name = document_file_name(conn, id)?;
     conn.execute("DELETE FROM profile_documents WHERE id = ?1", [id])?;
+    ensure_primary(conn)?;
     Ok(file_name)
+}
+
+// ── Credentials ─────────────────────────────────────────────────────
+
+const CREDENTIAL_COLUMNS: &str = "id, kind, title, issuer, issue_date, expiration_date,
+    credential_id, credential_url, note, document_id, created_at, updated_at";
+
+/// Newest first, each with its file.
+pub fn list_credentials(conn: &Connection) -> AppResult<Vec<ProfileCredential>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {CREDENTIAL_COLUMNS} FROM credentials ORDER BY created_at DESC, id DESC"
+    ))?;
+    let rows: Vec<(ProfileCredential, Option<i64>)> = stmt
+        .query_map([], credential_from_row)?
+        .collect::<Result<_, _>>()?;
+    rows.into_iter()
+        .map(|(mut credential, document_id)| {
+            credential.document = document_id.map(|id| get_document(conn, id)).transpose()?;
+            Ok(credential)
+        })
+        .collect()
+}
+
+pub fn get_credential(conn: &Connection, id: i64) -> AppResult<ProfileCredential> {
+    let (mut credential, document_id) = conn
+        .query_row(
+            &format!("SELECT {CREDENTIAL_COLUMNS} FROM credentials WHERE id = ?1"),
+            [id],
+            credential_from_row,
+        )
+        .optional()?
+        .ok_or_else(|| AppError::not_found("Credential not found"))?;
+    credential.document = document_id.map(|id| get_document(conn, id)).transpose()?;
+    Ok(credential)
+}
+
+fn credential_from_row(row: &Row) -> rusqlite::Result<(ProfileCredential, Option<i64>)> {
+    let kind: String = row.get(1)?;
+    Ok((
+        ProfileCredential {
+            id: row.get(0)?,
+            kind: CredentialKind::parse(&kind).unwrap_or(CredentialKind::Other),
+            title: row.get(2)?,
+            issuer: row.get(3)?,
+            issue_date: row.get(4)?,
+            expiration_date: row.get(5)?,
+            credential_id: row.get(6)?,
+            credential_url: row.get(7)?,
+            note: row.get(8)?,
+            document: None,
+            created_at: row.get(10)?,
+            updated_at: row.get(11)?,
+        },
+        row.get(9)?,
+    ))
+}
+
+/// Inserts or updates (`id`) a credential; `input` is already validated.
+pub fn save_credential(
+    conn: &Connection,
+    id: Option<i64>,
+    input: &CredentialInput,
+    document_id: Option<i64>,
+    now: i64,
+) -> AppResult<i64> {
+    let kind = input.kind.unwrap_or(CredentialKind::Other).as_str();
+    match id {
+        None => {
+            conn.execute(
+                "INSERT INTO credentials (kind, title, issuer, issue_date, expiration_date,
+                     credential_id, credential_url, note, document_id, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
+                params![
+                    kind,
+                    input.title,
+                    input.issuer,
+                    input.issue_date,
+                    input.expiration_date,
+                    input.credential_id,
+                    input.credential_url,
+                    input.note,
+                    document_id,
+                    now,
+                ],
+            )?;
+            Ok(conn.last_insert_rowid())
+        }
+        Some(id) => {
+            let updated = conn.execute(
+                "UPDATE credentials SET kind = ?2, title = ?3, issuer = ?4, issue_date = ?5,
+                     expiration_date = ?6, credential_id = ?7, credential_url = ?8, note = ?9,
+                     document_id = ?10, updated_at = ?11
+                 WHERE id = ?1",
+                params![
+                    id,
+                    kind,
+                    input.title,
+                    input.issuer,
+                    input.issue_date,
+                    input.expiration_date,
+                    input.credential_id,
+                    input.credential_url,
+                    input.note,
+                    document_id,
+                    now,
+                ],
+            )?;
+            if updated == 0 {
+                return Err(AppError::not_found("Credential not found"));
+            }
+            Ok(id)
+        }
+    }
+}
+
+/// Deletes the credential and returns the id of its file, if any.
+pub fn delete_credential(conn: &Connection, id: i64) -> AppResult<Option<i64>> {
+    let document_id: Option<i64> = conn
+        .query_row(
+            "SELECT document_id FROM credentials WHERE id = ?1",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| AppError::not_found("Credential not found"))?;
+    conn.execute("DELETE FROM credentials WHERE id = ?1", [id])?;
+    Ok(document_id)
+}
+
+/// Whether a document is some credential's file.
+pub fn document_used_by_credential(conn: &Connection, document_id: i64) -> AppResult<bool> {
+    Ok(conn
+        .prepare("SELECT 1 FROM credentials WHERE document_id = ?1")?
+        .exists([document_id])?)
 }
 
 pub fn document_exists(conn: &Connection, id: i64) -> AppResult<bool> {

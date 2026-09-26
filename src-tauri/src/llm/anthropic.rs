@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use super::{
     http::{error_message, join_url, send_json},
     sse::SseEvent,
-    ChatRequest, Endpoint, FetchedModel, Finish, StreamPiece,
+    ChatRequest, Endpoint, FetchedModel, Finish, StreamPiece, ToolDelta,
 };
 use crate::{
     error::{AppError, AppResult},
@@ -100,7 +100,7 @@ pub fn request_body(model_id: &str, request: &ChatRequest) -> Value {
     let max_tokens = request
         .max_output_tokens
         .map_or(FALLBACK_MAX_TOKENS, |limit| limit.min(STREAMING_MAX_TOKENS));
-    let messages: Vec<Value> = request
+    let mut messages: Vec<Value> = request
         .normalized_turns()
         .into_iter()
         .map(|turn| {
@@ -111,6 +111,37 @@ pub fn request_body(model_id: &str, request: &ChatRequest) -> Value {
             json!({ "role": role, "content": turn.content })
         })
         .collect();
+    // Tool use so far: the assistant's text and calls, then the results.
+    for round in &request.rounds {
+        let mut content = Vec::new();
+        if !round.text.trim().is_empty() {
+            content.push(json!({ "type": "text", "text": round.text }));
+        }
+        for call in &round.calls {
+            let input = match &call.arguments {
+                Value::Object(_) => call.arguments.clone(),
+                _ => json!({}),
+            };
+            content.push(
+                json!({ "type": "tool_use", "id": call.id, "name": call.name, "input": input }),
+            );
+        }
+        messages.push(json!({ "role": "assistant", "content": content }));
+        let results: Vec<Value> = round
+            .calls
+            .iter()
+            .zip(&round.outputs)
+            .map(|(call, output)| {
+                json!({
+                    "type": "tool_result",
+                    "tool_use_id": call.id,
+                    "content": output.content,
+                    "is_error": output.is_error,
+                })
+            })
+            .collect();
+        messages.push(json!({ "role": "user", "content": results }));
+    }
     let mut body = json!({
         "model": model_id,
         "max_tokens": max_tokens,
@@ -119,6 +150,20 @@ pub fn request_body(model_id: &str, request: &ChatRequest) -> Value {
     });
     if let Some(system) = &request.system {
         body["system"] = json!(system);
+    }
+    let tools: Vec<Value> = request
+        .tool_specs()
+        .iter()
+        .map(|tool| {
+            json!({
+                "name": tool.name,
+                "description": tool.description,
+                "input_schema": tool.input_schema,
+            })
+        })
+        .collect();
+    if !tools.is_empty() {
+        body["tools"] = json!(tools);
     }
     body
 }
@@ -144,7 +189,27 @@ pub fn parse_event(event: &SseEvent) -> AppResult<StreamPiece> {
         .and_then(Value::as_str)
         .or(event.event.as_deref())
         .unwrap_or_default();
+    let index = data
+        .get("index")
+        .and_then(Value::as_u64)
+        .map(|i| i as usize);
     Ok(match kind {
+        "content_block_start"
+            if data.pointer("/content_block/type").and_then(Value::as_str) == Some("tool_use") =>
+        {
+            StreamPiece::tool(ToolDelta {
+                index,
+                id: data
+                    .pointer("/content_block/id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                name: data
+                    .pointer("/content_block/name")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                ..ToolDelta::default()
+            })
+        }
         "content_block_delta" => match data.pointer("/delta/type").and_then(Value::as_str) {
             // Thinking deltas are not shown; only the answer text streams.
             Some("text_delta") => StreamPiece::text(
@@ -152,6 +217,15 @@ pub fn parse_event(event: &SseEvent) -> AppResult<StreamPiece> {
                     .and_then(Value::as_str)
                     .unwrap_or_default(),
             ),
+            Some("input_json_delta") => StreamPiece::tool(ToolDelta {
+                index,
+                arguments: data
+                    .pointer("/delta/partial_json")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                ..ToolDelta::default()
+            }),
             _ => StreamPiece::default(),
         },
         "message_delta" => StreamPiece {
@@ -193,6 +267,7 @@ mod tests {
                 content: "Hi".into(),
             }],
             max_output_tokens: Some(128_000),
+            ..ChatRequest::default()
         };
         assert_eq!(
             request_body("claude-opus-5", &request),
@@ -262,5 +337,50 @@ mod tests {
         ))
         .unwrap_err();
         assert!(error.to_string().contains("Overloaded"));
+    }
+
+    #[test]
+    fn streams_and_sends_tool_use() {
+        use crate::llm::{ToolCall, ToolOutput, ToolRound};
+        let start = parse_event(&event(
+            "content_block_start",
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"mcp_jobs_search","input":{}}}"#,
+        ))
+        .unwrap();
+        assert_eq!(start.tools[0].index, Some(1));
+        assert_eq!(start.tools[0].name.as_deref(), Some("mcp_jobs_search"));
+        let part = parse_event(&event(
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"q\": \"rust\"}"}}"#,
+        ))
+        .unwrap();
+        assert_eq!(part.tools[0].arguments, r#"{"q": "rust"}"#);
+
+        let request = ChatRequest {
+            turns: vec![Turn {
+                role: MessageRole::User,
+                content: "Find jobs".into(),
+            }],
+            rounds: vec![ToolRound {
+                text: "Searching.".into(),
+                calls: vec![ToolCall {
+                    id: "toolu_1".into(),
+                    name: "mcp_jobs_search".into(),
+                    arguments: json!({ "q": "rust" }),
+                    provider_data: None,
+                }],
+                outputs: vec![ToolOutput {
+                    content: "failed".into(),
+                    is_error: true,
+                }],
+            }],
+            ..ChatRequest::default()
+        };
+        let body = request_body("claude-opus-5", &request);
+        assert_eq!(body["messages"][1]["content"][0]["text"], "Searching.");
+        assert_eq!(body["messages"][1]["content"][1]["type"], "tool_use");
+        assert_eq!(body["messages"][2]["content"][0]["tool_use_id"], "toolu_1");
+        assert_eq!(body["messages"][2]["content"][0]["is_error"], true);
+        assert!(body.get("tools").is_none(), "no tools unless offered");
     }
 }

@@ -160,8 +160,25 @@ fn experience_years(profile: &Profile, today: Date) -> Option<f64> {
 
 impl Evidence {
     pub fn from_profile(profile: &Profile, documents: &[ProfileDocument], today: Date) -> Self {
+        let certificates: Vec<(String, String)> = documents
+            .iter()
+            .filter(|d| d.kind == DocumentKind::Certificate)
+            .map(|d| {
+                (
+                    format!("Certificate: {}", d.name),
+                    d.name.replace(['_', '-'], " "),
+                )
+            })
+            .collect();
+        Self::from_sources(profile, &certificates, today)
+    }
+
+    /// Evidence from the Custom Profile plus other Profile sources as
+    /// (label, text): uploaded CV text and credentials. Any of them is
+    /// enough (a CV alone works).
+    pub fn from_sources(profile: &Profile, sources: &[(String, String)], today: Date) -> Self {
         let mut e = Evidence {
-            available: !profile.is_empty(),
+            available: !profile.is_empty() || sources.iter().any(|(_, t)| !t.trim().is_empty()),
             ..Evidence::default()
         };
         if !e.available {
@@ -212,15 +229,12 @@ impl Evidence {
         for f in &profile.custom_fields {
             texts.push((f.label.clone(), format!("{} {}", f.label, f.value)));
         }
-        for d in documents
-            .iter()
-            .filter(|d| d.kind == DocumentKind::Certificate)
-        {
-            texts.push((
-                format!("Certificate: {}", d.name),
-                d.name.replace(['_', '-'], " "),
-            ));
-        }
+        texts.extend(
+            sources
+                .iter()
+                .filter(|(_, t)| !t.trim().is_empty())
+                .cloned(),
+        );
         for (source, text) in &texts {
             for found in skills::scan(text) {
                 note(&mut e, found.def(), source);
@@ -526,6 +540,24 @@ mod tests {
             e.state(&req(RequirementKind::Skill, "Python")).0,
             MatchState::Unknown
         );
+    }
+
+    #[test]
+    fn an_uploaded_cv_alone_is_evidence() {
+        let cv = (
+            "CV: resume.pdf".to_string(),
+            "Data engineer. Built pipelines with Python, Apache Kafka and Kubernetes.".to_string(),
+        );
+        let e = Evidence::from_sources(&Profile::default(), &[cv], Date::new(2025, 1, 1).unwrap());
+        assert!(e.available);
+        let state = |name: &str| e.state(&req(RequirementKind::Skill, name));
+        assert_eq!(state("Python").0, MatchState::Matched);
+        assert_eq!(state("Apache Kafka").1.as_deref(), Some("CV: resume.pdf"));
+        assert_eq!(state("Terraform").0, MatchState::Missing);
+        // Blank sources are not evidence.
+        let blank = ("CV: empty.pdf".to_string(), "  ".to_string());
+        let e = Evidence::from_sources(&Profile::default(), &[blank], Date::new(2025, 1, 1).unwrap());
+        assert!(!e.available);
     }
 
     #[test]

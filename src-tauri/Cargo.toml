@@ -49,6 +49,19 @@ zip = { version = "8", default-features = false, features = ["deflate"] }
 quick-xml = "0.38"
 # Job analytics: deterministic text patterns (salaries, dates, requirements)
 regex = "1"
+# MCP (Model Context Protocol) client: the official Rust SDK. Local servers
+# over stdio, remote servers over Streamable HTTP, and MCP OAuth.
+rmcp = { version = "3.4", default-features = false, features = [
+    "client",
+    "transport-child-process",
+    "transport-streamable-http-client-reqwest",
+    "auth",
+] }
+# Local MCP servers run in their own process group (job object on Windows),
+# so stopping one also stops the programs it started (npx → node).
+process-wrap = { version = "10", features = ["tokio1"] }
+# Implementing rmcp's OAuth credential store (keychain-backed).
+async-trait = "0.1"
 
 # Linux: the browser workspace is layered over the app with a GTK overlay.
 [target.'cfg(target_os = "linux")'.dependencies]

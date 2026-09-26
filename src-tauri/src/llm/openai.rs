@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use super::{
     http::{error_message, join_url, send_json},
     sse::SseEvent,
-    ChatRequest, Endpoint, FetchedModel, Finish, StreamPiece,
+    ChatRequest, Endpoint, FetchedModel, Finish, StreamPiece, ToolDelta,
 };
 use crate::{
     error::{AppError, AppResult},
@@ -121,7 +121,60 @@ pub fn request_body(model_id: &str, request: &ChatRequest) -> Value {
         };
         messages.push(json!({ "role": role, "content": turn.content }));
     }
-    json!({ "model": model_id, "messages": messages, "stream": true })
+    // Tool use so far: the assistant's calls, then one message per result.
+    for round in &request.rounds {
+        let calls: Vec<Value> = round
+            .calls
+            .iter()
+            .map(|call| {
+                json!({
+                    "id": call.id,
+                    "type": "function",
+                    "function": { "name": call.name, "arguments": arguments_text(&call.arguments) },
+                })
+            })
+            .collect();
+        let content = if round.text.trim().is_empty() {
+            Value::Null
+        } else {
+            json!(round.text)
+        };
+        messages.push(json!({ "role": "assistant", "content": content, "tool_calls": calls }));
+        for (call, output) in round.calls.iter().zip(&round.outputs) {
+            messages.push(json!({
+                "role": "tool",
+                "tool_call_id": call.id,
+                "content": output.content,
+            }));
+        }
+    }
+    let mut body = json!({ "model": model_id, "messages": messages, "stream": true });
+    let tools: Vec<Value> = request
+        .tool_specs()
+        .iter()
+        .map(|tool| {
+            json!({
+                "type": "function",
+                "function": {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.input_schema,
+                },
+            })
+        })
+        .collect();
+    if !tools.is_empty() {
+        body["tools"] = json!(tools);
+    }
+    body
+}
+
+/// Arguments as the JSON text the API expects.
+fn arguments_text(arguments: &Value) -> String {
+    match arguments {
+        Value::String(raw) => raw.clone(),
+        other => other.to_string(),
+    }
 }
 
 pub fn chat_request(
@@ -161,10 +214,31 @@ pub fn parse_event(event: &SseEvent) -> AppResult<StreamPiece> {
         Some(_) => Some(Finish::Complete),
         None => None,
     };
+    let tools = choice
+        .and_then(|c| c.pointer("/delta/tool_calls"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|call| ToolDelta {
+            index: Some(call.get("index").and_then(Value::as_u64).unwrap_or(0) as usize),
+            id: call.get("id").and_then(Value::as_str).map(str::to_string),
+            name: call
+                .pointer("/function/name")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            arguments: call
+                .pointer("/function/arguments")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            provider_data: None,
+        })
+        .collect();
     Ok(StreamPiece {
         text,
         finish,
         done: false,
+        tools,
     })
 }
 
@@ -218,7 +292,7 @@ mod tests {
                 role: MessageRole::User,
                 content: "Hi".into(),
             }],
-            max_output_tokens: None,
+            ..ChatRequest::default()
         };
         assert_eq!(
             request_body("gpt-5", &request),
@@ -250,5 +324,65 @@ mod tests {
 
         assert!(parse_event(&event("[DONE]")).unwrap().done);
         assert!(parse_event(&event(r#"{"error":{"message":"model not loaded"}}"#)).is_err());
+    }
+
+    #[test]
+    fn sends_tools_and_tool_results() {
+        use crate::llm::{ToolCall, ToolOutput, ToolRound, ToolSpec};
+        let request = ChatRequest {
+            turns: vec![Turn {
+                role: MessageRole::User,
+                content: "Find jobs".into(),
+            }],
+            rounds: vec![ToolRound {
+                text: String::new(),
+                calls: vec![ToolCall {
+                    id: "call_1".into(),
+                    name: "mcp_jobs_search".into(),
+                    arguments: json!({ "q": "rust" }),
+                    provider_data: None,
+                }],
+                outputs: vec![ToolOutput {
+                    content: "3 jobs".into(),
+                    is_error: false,
+                }],
+            }],
+            ..ChatRequest::default()
+        };
+        let mut request = request;
+        request.tools = Some(crate::llm::ToolBox {
+            specs: vec![ToolSpec {
+                name: "mcp_jobs_search".into(),
+                description: "Search jobs".into(),
+                input_schema: json!({ "type": "object" }),
+            }],
+            executor: std::sync::Arc::new(crate::llm::fake::NoTools),
+        });
+        let body = request_body("gpt-5", &request);
+        assert_eq!(body["tools"][0]["function"]["name"], "mcp_jobs_search");
+        assert_eq!(
+            body["messages"][1]["tool_calls"][0]["function"]["arguments"],
+            r#"{"q":"rust"}"#
+        );
+        assert_eq!(body["messages"][1]["content"], Value::Null);
+        assert_eq!(
+            body["messages"][2],
+            json!({ "role": "tool", "tool_call_id": "call_1", "content": "3 jobs" })
+        );
+    }
+
+    #[test]
+    fn parses_streamed_tool_calls() {
+        let first = parse_event(&event(
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"mcp_jobs_search","arguments":""}}]}}]}"#,
+        ))
+        .unwrap();
+        assert_eq!(first.tools[0].id.as_deref(), Some("call_1"));
+        let more = parse_event(&event(
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"q\":"}}]}}]}"#,
+        ))
+        .unwrap();
+        assert_eq!(more.tools[0].arguments, r#"{"q":"#);
+        assert_eq!(more.tools[0].index, Some(0));
     }
 }

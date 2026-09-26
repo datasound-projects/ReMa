@@ -1,5 +1,5 @@
 import { SECTION_IDS } from '../../lib/profileSections';
-import type { Profile, ProfileDocument } from '../../services/profileService';
+import type { Profile } from '../../services/profileService';
 import { ProfileIcon } from '../icons';
 
 interface SectionSummary {
@@ -13,9 +13,9 @@ interface SectionSummary {
 const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 const filledText = (values: string[]) => values.filter((v) => v.trim()).length;
 
-function summarize(profile: Profile, documents: ProfileDocument[]): SectionSummary[] {
+function summarize(profile: Profile): SectionSummary[] {
   const personal = filledText([profile.firstName, profile.lastName, profile.email, profile.phone, profile.location]);
-  const professional = filledText([profile.title, profile.summary]) + (profile.skills.length > 0 ? 1 : 0);
+  const professional = filledText([profile.title, profile.summary]);
   const links =
     filledText([profile.website, profile.resumeWebsite, profile.github, profile.linkedin]) +
     profile.otherLinks.filter((l) => l.url.trim()).length;
@@ -31,18 +31,13 @@ function summarize(profile: Profile, documents: ProfileDocument[]): SectionSumma
       id: SECTION_IDS.professional,
       label: 'Professional',
       filled: professional > 0,
-      detail:
-        profile.skills.length > 0
-          ? count(profile.skills.length, 'skill', 'skills')
-          : professional > 0
-            ? 'Added'
-            : 'Not added',
+      detail: professional > 0 ? `${professional} of 2` : 'Not added',
     },
     entry(SECTION_IDS.experience, 'Experience', profile.experience.length, 'role', 'roles'),
     entry(SECTION_IDS.education, 'Education', profile.education.length, 'entry', 'entries'),
+    entry(SECTION_IDS.skills, 'Skills', profile.skills.length, 'skill', 'skills'),
     entry(SECTION_IDS.languages, 'Languages', profile.languages.filter((l) => l.name.trim()).length, 'language', 'languages'),
     entry(SECTION_IDS.links, 'Links', links, 'link', 'links'),
-    entry(SECTION_IDS.documents, 'Documents', documents.length, 'file', 'files'),
     entry(SECTION_IDS.custom, 'Custom fields', profile.customFields.length, 'field', 'fields'),
   ];
 }
@@ -51,8 +46,8 @@ function summarize(profile: Profile, documents: ProfileDocument[]): SectionSumma
  * The top of the Profile: who it describes, how complete it is, and every
  * section at a glance (filled or not). A section chip jumps to it.
  */
-export function ProfileOverview({ profile, documents }: { profile: Profile; documents: ProfileDocument[] }) {
-  const sections = summarize(profile, documents);
+export function ProfileOverview({ profile }: { profile: Profile }) {
+  const sections = summarize(profile);
   const filled = sections.filter((s) => s.filled).length;
   const name = [profile.firstName, profile.lastName].filter((s) => s.trim()).join(' ');
   const initials = [profile.firstName, profile.lastName]
@@ -73,7 +68,7 @@ export function ProfileOverview({ profile, documents }: { profile: Profile; docu
         </div>
         <div className="profile-overview__progress">
           <span className="profile-overview__count">
-            <strong>{filled}</strong> of {sections.length} sections filled
+            <strong>{filled}</strong> of {sections.length} sections filled · all optional
           </span>
           <span
             className="progress"

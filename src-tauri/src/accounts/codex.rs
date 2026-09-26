@@ -36,7 +36,9 @@ use tokio_util::sync::CancellationToken;
 use super::{locate, AccountRuntime, RuntimeStatus, SignInAttempt, SignInOutcome};
 use crate::{
     error::{AppError, AppResult},
-    llm::{BoxFuture, ChatRequest, DeltaSink, FetchedModel, Finish},
+    llm::{
+        BoxFuture, ChatRequest, DeltaSink, FetchedModel, Finish, ToolCall, ToolExecutor, ToolOutput,
+    },
     models::chat::MessageRole,
 };
 
@@ -44,7 +46,7 @@ use crate::{
 /// runtime of the official Python SDK). Tested with 0.157.
 const MIN_VERSION: [u64; 3] = [0, 151, 0];
 const OVERRIDE_VAR: &str = "REMA_CODEX_PATH";
-const INSTALL_HINT: &str = "ChatGPT sign-in uses OpenAI’s Codex app. Install it with “brew install --cask codex” or “npm install -g @openai/codex”, then try again.";
+const INSTALL_HINT: &str = "ChatGPT sign-in uses OpenAI’s Codex app. ReMa ships it; if it is missing, reinstall ReMa or install it with “brew install --cask codex” or “npm install -g @openai/codex”, then try again.";
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -108,6 +110,9 @@ const DISABLED_FEATURES: &[&str] = &[
 pub struct Notification {
     pub method: String,
     pub params: Value,
+    /// Set for requests from the runtime that the subscriber answers
+    /// (dynamic tool calls).
+    pub request_id: Option<Value>,
 }
 
 enum Launch {
@@ -199,6 +204,8 @@ impl CodexRuntime {
                     "title": "ReMa",
                     "version": self.client_version,
                 },
+                // Needed for dynamic tools (MCP tools the user selected).
+                "capabilities": { "experimentalApi": true },
             }),
         )
         .await
@@ -270,27 +277,48 @@ impl CodexRuntime {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .unwrap_or(DEFAULT_INSTRUCTIONS);
-        let started = conn
-            .request(
-                "thread/start",
+        let mut params = json!({
+            "ephemeral": true,
+            "baseInstructions": instructions,
+            "cwd": self.workdir,
+            "sandbox": "read-only",
+            "approvalPolicy": "never",
+            "model": model_id,
+        });
+        // MCP tools the user selected, offered as dynamic tools: Codex asks
+        // ReMa to run them (`item/tool/call`).
+        let tools: Vec<Value> = request
+            .tool_specs()
+            .iter()
+            .map(|tool| {
                 json!({
-                    "ephemeral": true,
-                    "baseInstructions": instructions,
-                    "cwd": self.workdir,
-                    "sandbox": "read-only",
-                    "approvalPolicy": "never",
-                    "model": model_id,
-                }),
-            )
-            .await?;
+                    "type": "function",
+                    "name": tool.name,
+                    "description": tool.description,
+                    "inputSchema": tool.input_schema,
+                })
+            })
+            .collect();
+        if !tools.is_empty() {
+            params["dynamicTools"] = json!(tools);
+        }
+        let started = conn.request("thread/start", params).await?;
         let thread_id = started
             .pointer("/thread/id")
             .and_then(Value::as_str)
             .ok_or_else(|| AppError::provider("Codex did not start a conversation"))?
             .to_string();
         let mut route = conn.subscribe(format!("thread:{thread_id}"));
+        let executor = request.tools.as_ref().map(|t| t.executor.clone());
         let result = run_turn(
-            &conn, &mut route, &thread_id, history, &prompt, &cancel, on_delta,
+            &conn,
+            &mut route,
+            &thread_id,
+            history,
+            &prompt,
+            &cancel,
+            on_delta,
+            executor.as_deref(),
         )
         .await;
         drop(route);
@@ -302,6 +330,7 @@ impl CodexRuntime {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_turn(
     conn: &Arc<Connection>,
     route: &mut Route,
@@ -310,6 +339,7 @@ async fn run_turn(
     prompt: &str,
     cancel: &CancellationToken,
     on_delta: DeltaSink<'_>,
+    tools: Option<&dyn ToolExecutor>,
 ) -> AppResult<Finish> {
     if !history.is_empty() {
         conn.request(
@@ -353,6 +383,44 @@ async fn run_turn(
         let params = &notification.params;
         let for_turn = params.get("turnId").and_then(Value::as_str) == Some(turn_id.as_str());
         match notification.method.as_str() {
+            "item/tool/call" => {
+                let Some(id) = notification.request_id.clone() else {
+                    continue;
+                };
+                let call = ToolCall {
+                    id: params
+                        .get("callId")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    name: params
+                        .get("tool")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    arguments: params.get("arguments").cloned().unwrap_or(Value::Null),
+                    provider_data: None,
+                };
+                let output = match tools {
+                    Some(tools) => {
+                        // Stopping the answer interrupts a long tool call too.
+                        tokio::select! {
+                            _ = cancel.cancelled() => ToolOutput::error("The request was stopped."),
+                            output = tools.execute(&call) => output,
+                        }
+                    }
+                    None => ToolOutput::error("No tools are available."),
+                };
+                let _ = conn
+                    .respond(
+                        id,
+                        json!({
+                            "contentItems": [{ "type": "inputText", "text": output.content }],
+                            "success": !output.is_error,
+                        }),
+                    )
+                    .await;
+            }
             "item/agentMessage/delta" if for_turn => {
                 let item = params.get("itemId").and_then(Value::as_str).unwrap_or("");
                 let delta = params.get("delta").and_then(Value::as_str).unwrap_or("");
@@ -705,10 +773,10 @@ async fn spawn_app_server(
     home: &PathBuf,
     workdir: &PathBuf,
 ) -> Result<Arc<Connection>, StartError> {
-    let located = locate::find("codex", OVERRIDE_VAR)
+    let (located, version) = locate::find("codex", OVERRIDE_VAR)
         .await
         .ok_or_else(|| StartError::Unavailable(INSTALL_HINT.into()))?;
-    check_version(&located).await?;
+    check_version(version)?;
     std::fs::create_dir_all(home).map_err(AppError::from)?;
     std::fs::create_dir_all(workdir).map_err(AppError::from)?;
 
@@ -748,35 +816,17 @@ async fn spawn_app_server(
     Ok(conn)
 }
 
-async fn check_version(located: &locate::Located) -> Result<(), StartError> {
-    let mut command = Command::new(&located.path);
-    command
-        .arg("--version")
-        .env("PATH", located.search_path())
-        .stdin(Stdio::null())
-        .kill_on_drop(true);
-    no_console_window(&mut command);
-    let output = tokio::time::timeout(Duration::from_secs(20), command.output())
-        .await
-        .map_err(|_| AppError::provider("Codex did not respond"))?
-        .map_err(|e| AppError::provider(format!("could not run Codex: {e}")))?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    match parse_version(&text) {
+/// Codex's version must be at least `MIN_VERSION`.
+fn check_version(version: Option<locate::Version>) -> Result<(), StartError> {
+    match version {
         // Development builds report 0.0.0.
         Some(v) if v == [0, 0, 0] || v >= MIN_VERSION => Ok(()),
         Some(v) => Err(StartError::Unavailable(format!(
-            "ReMa needs Codex {}.{}.{} or newer (found {}.{}.{}). Update it with “codex update”, “brew upgrade --cask codex” or “npm install -g @openai/codex@latest”.",
+            "ReMa needs Codex {}.{}.{} or newer (found {}.{}.{}). Reinstall ReMa, or update Codex with “codex update”, “brew upgrade --cask codex” or “npm install -g @openai/codex@latest”.",
             MIN_VERSION[0], MIN_VERSION[1], MIN_VERSION[2], v[0], v[1], v[2]
         ))),
         None => Err(StartError::Unavailable(INSTALL_HINT.into())),
     }
-}
-
-/// `codex-cli 0.157.0` → `[0, 157, 0]` (pre-release suffixes ignored).
-fn parse_version(text: &str) -> Option<[u64; 3]> {
-    let token = text.split_whitespace().last()?;
-    let mut parts = token.split(['.', '-', '+']).map(|p| p.parse::<u64>().ok());
-    Some([parts.next()??, parts.next()??, parts.next()??])
 }
 
 #[cfg(windows)]
@@ -897,10 +947,15 @@ impl Connection {
         let method = message.get("method").and_then(Value::as_str);
         let id = message.get("id").filter(|id| !id.is_null()).cloned();
         match (method, id) {
+            (Some("item/tool/call"), Some(id)) => {
+                let params = message.get("params").cloned().unwrap_or(Value::Null);
+                self.route_tool_call(id, params).await;
+            }
             (Some(method), Some(id)) => self.answer(method, id).await,
             (Some(method), None) => self.route(Notification {
                 method: method.to_string(),
                 params: message.get("params").cloned().unwrap_or(Value::Null),
+                request_id: None,
             }),
             (None, Some(id)) => {
                 let Some(waiter) = id
@@ -923,8 +978,42 @@ impl Connection {
         }
     }
 
+    /// A dynamic tool call goes to the turn that offered the tool; the turn
+    /// answers it with `respond`. Without one it fails at once.
+    async fn route_tool_call(&self, id: Value, params: Value) {
+        let key = params
+            .get("threadId")
+            .and_then(Value::as_str)
+            .map(|thread| format!("thread:{thread}"));
+        let sender = key.and_then(|key| self.routes.lock().unwrap().get(&key).cloned());
+        let delivered = sender.is_some_and(|tx| {
+            tx.send(Notification {
+                method: "item/tool/call".into(),
+                params,
+                request_id: Some(id.clone()),
+            })
+            .is_ok()
+        });
+        if !delivered {
+            let _ = self
+                .respond(
+                    id,
+                    json!({
+                        "contentItems": [{ "type": "inputText", "text": "This tool is no longer available." }],
+                        "success": false,
+                    }),
+                )
+                .await;
+        }
+    }
+
+    /// Answers a request from the runtime.
+    pub async fn respond(&self, id: Value, result: Value) -> AppResult<()> {
+        self.write(&json!({ "id": id, "result": result })).await
+    }
+
     /// Requests from the runtime: approvals are declined (ReMa's threads run
-    /// no tools), anything else is unsupported.
+    /// no built-in tools), anything else is unsupported.
     async fn answer(&self, method: &str, id: Value) {
         let reply = match method {
             "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
@@ -1273,6 +1362,7 @@ mod tests {
                 },
             ],
             max_output_tokens: None,
+            ..ChatRequest::default()
         }
     }
 
@@ -1311,6 +1401,95 @@ mod tests {
             }
             _ => basic(method, params),
         })
+    }
+
+    struct RecordingTools(Mutex<Vec<ToolCall>>);
+
+    impl ToolExecutor for RecordingTools {
+        fn execute<'a>(&'a self, call: &'a ToolCall) -> BoxFuture<'a, ToolOutput> {
+            self.0.lock().unwrap().push(call.clone());
+            Box::pin(async {
+                ToolOutput {
+                    content: "3 jobs".into(),
+                    is_error: false,
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn offers_selected_tools_and_answers_tool_calls() {
+        let (runtime, requests, push) = runtime(Arc::new(|method, params| match method {
+            "thread/start" => vec![json!({ "thread": { "id": "t1" } })],
+            "turn/start" => vec![
+                json!({ "turn": { "id": "turn-1", "status": "inProgress", "items": [] } }),
+                json!({ "id": 900, "method": "item/tool/call", "params": {
+                    "threadId": "t1", "turnId": "turn-1", "callId": "c1",
+                    "tool": "mcp_jobs_search", "arguments": { "q": "rust" } } }),
+            ],
+            _ => basic(method, params),
+        }));
+        // Once ReMa answers the tool call, Codex finishes the turn.
+        let log = requests.clone();
+        tokio::spawn(async move {
+            loop {
+                let answered = log
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|m| m["id"] == 900 && m.get("result").is_some());
+                if answered {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            for message in [
+                json!({ "method": "item/agentMessage/delta", "params": {
+                    "threadId": "t1", "turnId": "turn-1", "itemId": "m2", "delta": "Found 3 jobs." } }),
+                json!({ "method": "turn/completed", "params": {
+                    "threadId": "t1", "turn": { "id": "turn-1", "status": "completed" } } }),
+            ] {
+                push.send(message).unwrap();
+            }
+        });
+
+        let tools = Arc::new(RecordingTools(Mutex::default()));
+        let mut request = chat_request();
+        request.tools = Some(crate::llm::ToolBox {
+            specs: vec![crate::llm::ToolSpec {
+                name: "mcp_jobs_search".into(),
+                description: "[Jobs MCP server] Search jobs".into(),
+                input_schema: json!({ "type": "object" }),
+            }],
+            executor: tools.clone(),
+        });
+        let mut text = String::new();
+        let finish = runtime
+            .stream_chat("gpt-6-sol", &request, CancellationToken::new(), &mut |d| {
+                text.push_str(d)
+            })
+            .await
+            .unwrap();
+        assert_eq!(finish, Finish::Complete);
+        assert_eq!(text, "Found 3 jobs.");
+
+        let calls = tools.0.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "mcp_jobs_search");
+        assert_eq!(calls[0].arguments, json!({ "q": "rust" }));
+
+        let log = requests.lock().unwrap().clone();
+        let init = log.iter().find(|m| m["method"] == "initialize").unwrap();
+        assert_eq!(init["params"]["capabilities"]["experimentalApi"], true);
+        let thread = log.iter().find(|m| m["method"] == "thread/start").unwrap();
+        assert_eq!(
+            thread["params"]["dynamicTools"][0]["name"],
+            "mcp_jobs_search"
+        );
+        assert_eq!(thread["params"]["dynamicTools"][0]["type"], "function");
+        let reply = log.iter().find(|m| m["id"] == 900).unwrap();
+        assert_eq!(reply["result"]["contentItems"][0]["text"], "3 jobs");
+        assert_eq!(reply["result"]["success"], true);
     }
 
     #[tokio::test]
@@ -1447,14 +1626,15 @@ mod tests {
     }
 
     #[test]
-    fn parses_versions_and_labels() {
-        assert_eq!(parse_version("codex-cli 0.157.0\n"), Some([0, 157, 0]));
-        assert_eq!(
-            parse_version("codex-cli 0.159.0-alpha.3"),
-            Some([0, 159, 0])
-        );
-        assert_eq!(parse_version("nonsense"), None);
+    fn checks_versions_and_parses_labels() {
         assert!([0, 150, 9] < MIN_VERSION && [1, 0, 0] > MIN_VERSION);
+        assert!(check_version(Some([0, 157, 1])).is_ok());
+        assert!(check_version(Some([0, 0, 0])).is_ok());
+        assert!(matches!(
+            check_version(Some([0, 150, 0])),
+            Err(StartError::Unavailable(_))
+        ));
+        assert!(check_version(None).is_err());
 
         assert_eq!(
             account_label(&json!({ "email": "a@b.c", "planType": "pro" })).as_deref(),

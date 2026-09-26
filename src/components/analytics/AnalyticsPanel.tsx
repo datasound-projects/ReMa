@@ -97,7 +97,7 @@ function Dashboard({ prefs }: { prefs: AnalyticsPreferences }) {
       query: { ...p.query, scope: { kind: 'jobs', runIds: [], jobIds: ids } },
     }));
   };
-  const openProfile = () => navigate({ page: 'profile' });
+  const openProfile = () => navigate({ page: 'profile', section: 'documents' });
   const runList = runs.data ?? [];
   const facets = overview.data?.facets ?? null;
   const status = overview.data?.status;

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
+import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 
 import { toApiError } from '../../services/ipc';
 import type { ModelCatalog, ModelRef } from '../../services/providerService';
@@ -9,6 +9,10 @@ interface ComposerProps {
   catalog: ModelCatalog | null;
   model: ModelRef | null;
   onModelChange: (model: ModelRef) => void;
+  /** The + button (agents and MCP tools), before the model picker. */
+  plus?: ReactNode;
+  /** Selected agents and tools, shown above the text. */
+  chips?: ReactNode;
   /** Share the user's Profile with the model (explicit opt-in). */
   profileOn: boolean;
   onProfileChange: (on: boolean) => void;
@@ -32,6 +36,8 @@ export function Composer({
   catalog,
   model,
   onModelChange,
+  plus,
+  chips,
   profileOn,
   onProfileChange,
   streaming,
@@ -115,6 +121,7 @@ export function Composer({
           <span className="composer-aurora__blob composer-aurora__blob--indigo" />
         </div>
         <div className="composer">
+          {chips}
           <textarea
             ref={textareaRef}
             className="composer__input"
@@ -128,6 +135,7 @@ export function Composer({
           />
           <div className="composer__bar">
             <div className="composer__tools">
+              {plus}
               <ModelSelector catalog={catalog} value={model} onChange={onModelChange} />
               <button
                 type="button"
@@ -135,8 +143,8 @@ export function Composer({
                 aria-pressed={profileOn}
                 title={
                   profileOn
-                    ? 'Profile ON: ReMa gives the model your Profile (no email or phone). Click to turn off.'
-                    : 'Profile OFF: the model gets no Profile details. Click to share your Profile in this chat.'
+                    ? 'Profile ON: your messages in this chat include your Profile (CVs, credentials, Custom Profile and Portfolio CVs; no email or phone) for the selected model provider. Click to turn off.'
+                    : 'Profile OFF: the model gets no Profile details. Click to include your Profile in this chat’s requests.'
                 }
                 onClick={() => onProfileChange(!profileOn)}
               >

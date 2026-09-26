@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use super::{
     http::{error_message, join_url, send_json},
     sse::SseEvent,
-    ChatRequest, Endpoint, FetchedModel, Finish, StreamPiece,
+    ChatRequest, Endpoint, FetchedModel, Finish, StreamPiece, ToolDelta,
 };
 use crate::{
     error::{AppError, AppResult},
@@ -106,7 +106,7 @@ pub fn parse_models(entries: &[Value]) -> Vec<FetchedModel> {
 }
 
 pub fn request_body(request: &ChatRequest) -> Value {
-    let contents: Vec<Value> = request
+    let mut contents: Vec<Value> = request
         .normalized_turns()
         .into_iter()
         .map(|turn| {
@@ -117,9 +117,54 @@ pub fn request_body(request: &ChatRequest) -> Value {
             json!({ "role": role, "parts": [{ "text": turn.content }] })
         })
         .collect();
+    // Tool use so far: the model's text and function calls (with their
+    // thought signatures), then the function responses.
+    for round in &request.rounds {
+        let mut parts = Vec::new();
+        if !round.text.trim().is_empty() {
+            parts.push(json!({ "text": round.text }));
+        }
+        for call in &round.calls {
+            let args = match &call.arguments {
+                Value::Object(_) => call.arguments.clone(),
+                _ => json!({}),
+            };
+            let mut part = json!({ "functionCall": { "name": call.name, "args": args } });
+            if let Some(signature) = &call.provider_data {
+                part["thoughtSignature"] = signature.clone();
+            }
+            parts.push(part);
+        }
+        contents.push(json!({ "role": "model", "parts": parts }));
+        let responses: Vec<Value> = round
+            .calls
+            .iter()
+            .zip(&round.outputs)
+            .map(|(call, output)| {
+                let key = if output.is_error { "error" } else { "output" };
+                json!({ "functionResponse": { "name": call.name, "response": { key: output.content } } })
+            })
+            .collect();
+        contents.push(json!({ "role": "user", "parts": responses }));
+    }
     let mut body = json!({ "contents": contents });
     if let Some(system) = &request.system {
         body["systemInstruction"] = json!({ "parts": [{ "text": system }] });
+    }
+    let declarations: Vec<Value> = request
+        .tool_specs()
+        .iter()
+        .map(|tool| {
+            json!({
+                "name": tool.name,
+                "description": tool.description,
+                // Full JSON Schema, as MCP servers declare it.
+                "parametersJsonSchema": tool.input_schema,
+            })
+        })
+        .collect();
+    if !declarations.is_empty() {
+        body["tools"] = json!([{ "functionDeclarations": declarations }]);
     }
     body
 }
@@ -157,14 +202,30 @@ pub fn parse_event(event: &SseEvent) -> AppResult<StreamPiece> {
         });
     }
     let candidate = data.pointer("/candidates/0");
-    let text: String = candidate
+    let parts = candidate
         .and_then(|c| c.pointer("/content/parts"))
-        .and_then(Value::as_array)
+        .and_then(Value::as_array);
+    let text: String = parts
         .into_iter()
         .flatten()
         // Thought summaries are not part of the answer.
         .filter(|part| part.get("thought").and_then(Value::as_bool) != Some(true))
         .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .collect();
+    // Function calls arrive whole, one part each.
+    let tools = parts
+        .into_iter()
+        .flatten()
+        .filter_map(|part| {
+            let call = part.get("functionCall")?;
+            Some(ToolDelta {
+                index: None,
+                id: call.get("id").and_then(Value::as_str).map(str::to_string),
+                name: call.get("name").and_then(Value::as_str).map(str::to_string),
+                arguments: call.get("args").map(Value::to_string).unwrap_or_default(),
+                provider_data: part.get("thoughtSignature").cloned(),
+            })
+        })
         .collect();
     let finish = match candidate
         .and_then(|c| c.get("finishReason"))
@@ -181,6 +242,7 @@ pub fn parse_event(event: &SseEvent) -> AppResult<StreamPiece> {
         text: (!text.is_empty()).then_some(text),
         finish,
         done: false,
+        tools,
     })
 }
 
@@ -214,7 +276,7 @@ mod tests {
                     content: "Bye".into(),
                 },
             ],
-            max_output_tokens: None,
+            ..ChatRequest::default()
         };
         assert_eq!(
             request_body(&request),
@@ -271,5 +333,45 @@ mod tests {
             r#"{"error":{"code":400,"message":"API key not valid"}}"#
         ))
         .is_err());
+    }
+
+    #[test]
+    fn keeps_function_calls_and_their_signatures() {
+        use crate::llm::{ToolCall, ToolOutput, ToolRound};
+        let piece = parse_event(&event(
+            r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"mcp_jobs_search","args":{"q":"rust"}},"thoughtSignature":"sig=="}]},"finishReason":"STOP"}]}"#,
+        ))
+        .unwrap();
+        assert_eq!(piece.tools.len(), 1);
+        assert_eq!(piece.tools[0].index, None);
+        assert_eq!(piece.tools[0].arguments, r#"{"q":"rust"}"#);
+        assert_eq!(piece.tools[0].provider_data, Some(json!("sig==")));
+
+        let request = ChatRequest {
+            turns: vec![Turn {
+                role: MessageRole::User,
+                content: "Find jobs".into(),
+            }],
+            rounds: vec![ToolRound {
+                text: String::new(),
+                calls: vec![ToolCall {
+                    id: "call_0".into(),
+                    name: "mcp_jobs_search".into(),
+                    arguments: json!({ "q": "rust" }),
+                    provider_data: Some(json!("sig==")),
+                }],
+                outputs: vec![ToolOutput {
+                    content: "3 jobs".into(),
+                    is_error: false,
+                }],
+            }],
+            ..ChatRequest::default()
+        };
+        let body = request_body(&request);
+        assert_eq!(body["contents"][1]["parts"][0]["thoughtSignature"], "sig==");
+        assert_eq!(
+            body["contents"][2]["parts"][0]["functionResponse"]["response"]["output"],
+            "3 jobs"
+        );
     }
 }

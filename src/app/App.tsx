@@ -10,6 +10,7 @@ import { Sidebar } from '../components/layout/Sidebar';
 import { dataOr } from '../hooks/useAsyncData';
 import { useConversations } from '../hooks/useConversations';
 import { useSidebar } from '../hooks/useSidebar';
+import { AgentsPage } from '../pages/AgentsPage';
 import { ChatPage } from '../pages/ChatPage';
 import { ProfilePage } from '../pages/ProfilePage';
 import { ScheduledTasksPage } from '../pages/ScheduledTasksPage';
@@ -22,17 +23,25 @@ export function App() {
   const [view, setView] = useState<View>({ page: 'chat', conversationId: null });
   // "Chat" in the sidebar returns to the conversation that was open last.
   const [lastConversationId, setLastConversationId] = useState<number | null>(null);
+  // "Profile" returns to the part of the Profile that was open last
+  // (Documents & Credentials the first time).
+  const [lastProfile, setLastProfile] = useState<View & { page: 'profile' }>({
+    page: 'profile',
+    section: 'documents',
+  });
   const conversations = dataOr(useConversations().state, []);
   const sidebar = useSidebar();
 
   const navigate = useCallback((next: View) => {
     setView(next);
     if (next.page === 'chat') setLastConversationId(next.conversationId);
+    if (next.page === 'profile') setLastProfile(next);
   }, []);
   const navigation = useMemo(() => ({ view, navigate }), [view, navigate]);
 
   const selectPage = (page: PageId) => {
     if (page === 'chat') navigate({ page: 'chat', conversationId: lastConversationId });
+    else if (page === 'profile') navigate(lastProfile);
     else navigate({ page });
   };
 
@@ -81,10 +90,15 @@ export function App() {
           </Sidebar>
         }
       >
-        {view.page === 'chat' && <ChatPage conversationId={view.conversationId} />}
+        {view.page === 'chat' && (
+          <ChatPage conversationId={view.conversationId} initialAgentIds={view.agentIds} />
+        )}
+        {view.page === 'agents' && <AgentsPage />}
         {view.page === 'tasks' && <ScheduledTasksPage />}
-        {view.page === 'profile' && <ProfilePage />}
-        {view.page === 'settings' && <SettingsPage />}
+        {view.page === 'profile' && (
+          <ProfilePage section={view.section ?? 'documents'} portfolioId={view.portfolioId ?? null} />
+        )}
+        {view.page === 'settings' && <SettingsPage focus={view.focus} />}
       </AppShell>
       {/* Above the app, which loads underneath; plays once per launch. */}
       <LaunchIntro />

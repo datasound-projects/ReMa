@@ -1,6 +1,10 @@
 pub mod accounts;
+pub mod agents;
 pub mod chat;
+pub mod chat_tools;
 pub mod documents;
+pub mod mcp;
+pub mod portfolio;
 pub mod profile;
 pub mod profile_context;
 pub mod profile_import;

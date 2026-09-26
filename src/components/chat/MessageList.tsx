@@ -10,6 +10,7 @@ import { CheckIcon, CopyIcon, RetryIcon } from '../icons';
 import { AnalyzeButton } from '../analytics/AnalyzeButton';
 import { IconButton } from '../ui/IconButton';
 import { Markdown } from './Markdown';
+import { ToolActivityList } from './ToolActivityList';
 
 interface MessageListProps {
   messages: Message[];
@@ -60,10 +61,12 @@ function AssistantMessage({ message, catalog, canRetry, onRetry, run }: Assistan
   const streaming = message.status === 'streaming';
   return (
     <div className="message message--assistant" aria-busy={streaming}>
+      <ToolActivityList messageId={message.id} activity={message.activity} />
       {message.content ? (
         <Markdown source={message.content} />
       ) : (
-        streaming && (
+        streaming &&
+        !message.activity.some((a) => a.status === 'awaiting_approval') && (
           <div className="typing" aria-label="Generating">
             <span />
             <span />

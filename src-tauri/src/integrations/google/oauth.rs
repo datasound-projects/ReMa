@@ -11,10 +11,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use reqwest::Url;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpListener,
-};
+use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 use super::GoogleEndpoints;
@@ -117,13 +114,6 @@ pub fn parse_callback(target: &str, expected_state: &str) -> Option<AppResult<Ca
     }))
 }
 
-const SUCCESS_PAGE: &str = "<!doctype html><meta charset=utf-8><title>ReMa</title>\
-<body style=\"font-family:-apple-system,Segoe UI,sans-serif;text-align:center;padding:64px\">\
-<h2>ReMa is connected to Google</h2><p>You can close this tab and return to ReMa.</p>";
-const FAILURE_PAGE: &str = "<!doctype html><meta charset=utf-8><title>ReMa</title>\
-<body style=\"font-family:-apple-system,Segoe UI,sans-serif;text-align:center;padding:64px\">\
-<h2>Google sign-in was not completed</h2><p>You can close this tab and try again in ReMa.</p>";
-
 /// Waits for the browser to hit the loopback redirect and returns the code.
 pub async fn wait_for_callback(
     listener: TcpListener,
@@ -131,61 +121,31 @@ pub async fn wait_for_callback(
     cancel: &CancellationToken,
     timeout: Duration,
 ) -> AppResult<String> {
-    let deadline = tokio::time::sleep(timeout);
-    tokio::pin!(deadline);
-    loop {
-        let (mut socket, _) = tokio::select! {
-            _ = cancel.cancelled() => return Err(AppError::validation("Google sign-in was cancelled.")),
-            _ = &mut deadline => return Err(AppError::validation("Google sign-in timed out. Try again.")),
-            accepted = listener.accept() => accepted?,
-        };
-        let mut buf = vec![0u8; 8192];
-        let mut len = 0;
-        // Read until the end of the request headers (the query carries all we need).
-        while len < buf.len() {
-            let n = tokio::time::timeout(Duration::from_secs(5), socket.read(&mut buf[len..]))
-                .await
-                .unwrap_or(Ok(0))?;
-            if n == 0 {
-                break;
-            }
-            len += n;
-            if buf[..len].windows(4).any(|w| w == b"\r\n\r\n") {
-                break;
-            }
+    let target = crate::oauth_loopback::receive(
+        listener,
+        |target| parse_callback(target, expected_state).is_some(),
+        |target| {
+            matches!(
+                parse_callback(target, expected_state),
+                Some(Ok(Callback::Code(_)))
+            )
+        },
+        crate::oauth_loopback::Pages { service: "Google" },
+        cancel,
+        timeout,
+    )
+    .await?;
+    match parse_callback(&target, expected_state) {
+        Some(Ok(Callback::Code(code))) => Ok(code),
+        Some(Ok(Callback::Denied(error))) => {
+            Err(AppError::authentication(if error == "access_denied" {
+                "Google access was not granted.".to_string()
+            } else {
+                format!("Google sign-in failed ({error}).")
+            }))
         }
-        let request = String::from_utf8_lossy(&buf[..len]);
-        let target = request
-            .lines()
-            .next()
-            .and_then(|line| line.split_whitespace().nth(1))
-            .unwrap_or("/");
-
-        let outcome = parse_callback(target, expected_state);
-        let (status, body) = match &outcome {
-            Some(Ok(Callback::Code(_))) => ("200 OK", SUCCESS_PAGE),
-            Some(_) => ("200 OK", FAILURE_PAGE),
-            None => ("404 Not Found", ""),
-        };
-        let response = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        );
-        let _ = socket.write_all(response.as_bytes()).await;
-        let _ = socket.shutdown().await;
-
-        match outcome {
-            None => continue,
-            Some(Ok(Callback::Code(code))) => return Ok(code),
-            Some(Ok(Callback::Denied(error))) => {
-                return Err(AppError::authentication(if error == "access_denied" {
-                    "Google access was not granted.".to_string()
-                } else {
-                    format!("Google sign-in failed ({error}).")
-                }))
-            }
-            Some(Err(error)) => return Err(error),
-        }
+        Some(Err(error)) => Err(error),
+        None => Err(AppError::authentication("Google sign-in did not complete.")),
     }
 }
 

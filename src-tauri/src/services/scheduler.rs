@@ -331,6 +331,7 @@ async fn run_task(
                     content: task.prompt.clone(),
                 }],
                 max_output_tokens,
+                ..ChatRequest::default()
             };
             let mut text = String::new();
             let mut on_delta = |delta: &str| text.push_str(delta);

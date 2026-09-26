@@ -43,7 +43,7 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    db::analytics as repo,
+    db::{analytics as repo, profile as profile_repo},
     error::{AppError, AppResult},
     llm::{ChatRequest, Finish, Turn},
     models::{
@@ -54,6 +54,7 @@ use crate::{
             SortDirection, SortKey,
         },
         chat::MessageRole,
+        profile::{DocumentKind, ProfileDocument},
         provider::ModelRef,
     },
     services::{profile, providers},
@@ -197,6 +198,7 @@ pub async fn ask_default_model(
             content,
         }],
         max_output_tokens: Some(limit),
+        ..ChatRequest::default()
     };
     let mut answer = String::new();
     let mut sink = |delta: &str| answer.push_str(delta);
@@ -279,11 +281,37 @@ pub fn save_preferences(state: &AppState, prefs: AnalyticsPreferences) -> AppRes
 
 // ── Queries ───────────────────────────────────────────────────────────
 
+/// What the Profile shows: the Custom Profile, the text of uploaded CVs
+/// (primary first) and credentials.
 fn evidence(state: &AppState) -> AppResult<Evidence> {
     let view = profile::get(state)?;
-    Ok(Evidence::from_profile(
+    let mut cvs: Vec<&ProfileDocument> = view
+        .documents
+        .iter()
+        .filter(|d| d.kind == DocumentKind::Cv && d.has_text)
+        .collect();
+    cvs.sort_by_key(|d| !d.is_primary);
+    let mut sources: Vec<(String, String)> = Vec::new();
+    for cv in cvs {
+        if let Some(text) = state.db.call(|c| profile_repo::document_text(c, cv.id))? {
+            sources.push((format!("CV: {}", cv.name), text));
+        }
+    }
+    for credential in &view.credentials {
+        sources.push((
+            format!("Credential: {}", credential.title),
+            [
+                credential.title.as_str(),
+                credential.issuer.as_str(),
+                credential.kind.label(),
+                credential.note.as_str(),
+            ]
+            .join(" "),
+        ));
+    }
+    Ok(Evidence::from_sources(
         &view.profile,
-        &view.documents,
+        &sources,
         matching::today(),
     ))
 }

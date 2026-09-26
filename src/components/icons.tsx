@@ -388,3 +388,181 @@ export function MoonIcon(props: IconProps) {
     </Icon>
   );
 }
+
+/** Agents: a small bot face. */
+export function AgentIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <rect x="4" y="6.5" width="12" height="9" rx="2.5" />
+      <path d="M10 6.5V4M8 10.5v.5M12 10.5v.5M8.2 13.2h3.6" />
+      <circle cx="10" cy="3.5" r=".6" />
+    </Icon>
+  );
+}
+
+/** MCP servers: a plug. */
+export function PlugIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M7.5 3.5v3M12.5 3.5v3M5.5 6.5h9v2.5a4.5 4.5 0 0 1-9 0V6.5ZM10 13.5v3" />
+    </Icon>
+  );
+}
+
+export function QuestionIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <circle cx="10" cy="10" r="7" />
+      <path d="M8 8.2a2 2 0 1 1 2.8 1.8c-.5.3-.8.7-.8 1.3v.3M10 13.8v.01" />
+    </Icon>
+  );
+}
+
+export function EyeIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M2.5 10s2.7-5 7.5-5 7.5 5 7.5 5-2.7 5-7.5 5-7.5-5-7.5-5Z" />
+      <circle cx="10" cy="10" r="2.2" />
+    </Icon>
+  );
+}
+
+export function EyeOffIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M4.2 6.6C3 7.9 2.5 10 2.5 10s2.7 5 7.5 5c1.4 0 2.6-.4 3.6-1M8 5.3c.6-.2 1.3-.3 2-.3 4.8 0 7.5 5 7.5 5s-.5 1-1.5 2.2M3.5 3.5l13 13" />
+    </Icon>
+  );
+}
+
+export function StarIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="m10 3.5 2 4.2 4.5.6-3.3 3.1.8 4.5-4-2.2-4 2.2.8-4.5L3.5 8.3 8 7.7l2-4.2Z" />
+    </Icon>
+  );
+}
+
+export function DownloadIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M10 4v8.5M6.5 9 10 12.5 13.5 9M4.5 13.5v2h11v-2" />
+    </Icon>
+  );
+}
+
+export function PencilIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M12.5 4.5 15.5 7.5 7.5 15.5H4.5v-3l8-8ZM11 6l3 3" />
+    </Icon>
+  );
+}
+
+/** Credentials: a rosette. */
+export function AwardIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <circle cx="10" cy="8" r="4.5" />
+      <path d="m7.3 11.6-1.3 5 4-1.8 4 1.8-1.3-5" />
+    </Icon>
+  );
+}
+
+/** A tool call: a wrench. */
+export function ToolIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M12.8 3.6a3.8 3.8 0 0 0-4.5 4.9l-4.6 4.6a1.4 1.4 0 0 0 2 2l4.6-4.6a3.8 3.8 0 0 0 4.9-4.5l-2.3 2.3-2-.4-.4-2 2.3-2.3Z" />
+    </Icon>
+  );
+}
+
+export function LayoutIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <rect x="3.5" y="3.5" width="13" height="13" rx="1.5" />
+      <path d="M3.5 7.5h13M8 7.5v9" />
+    </Icon>
+  );
+}
+
+export function TargetIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <circle cx="10" cy="10" r="6.5" />
+      <circle cx="10" cy="10" r="3.5" />
+      <circle cx="10" cy="10" r=".6" />
+    </Icon>
+  );
+}
+
+export function CompassIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <circle cx="10" cy="10" r="7" />
+      <path d="m12.8 7.2-1.6 4-4 1.6 1.6-4 4-1.6Z" />
+    </Icon>
+  );
+}
+
+export function BookIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M4 4.5h4.5A1.5 1.5 0 0 1 10 6v10a1.5 1.5 0 0 0-1.5-1.5H4v-10ZM16 4.5h-4.5A1.5 1.5 0 0 0 10 6v10a1.5 1.5 0 0 1 1.5-1.5H16v-10Z" />
+    </Icon>
+  );
+}
+
+export function CodeIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M7 6.5 3.5 10 7 13.5M13 6.5l3.5 3.5-3.5 3.5M11 4.5l-2 11" />
+    </Icon>
+  );
+}
+
+/** Two overlapping circles: comparing a job with the Profile. */
+export function MatchIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <circle cx="7.8" cy="10" r="4.3" />
+      <circle cx="12.2" cy="10" r="4.3" />
+    </Icon>
+  );
+}
+
+export function MicIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <rect x="7.5" y="3" width="5" height="9" rx="2.5" />
+      <path d="M5 9.5a5 5 0 0 0 10 0M10 14.5V17" />
+    </Icon>
+  );
+}
+
+export function FlagIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M5 17V3.5M5 4h9l-2 3 2 3H5" />
+    </Icon>
+  );
+}
+
+export function ZoomInIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <circle cx="9" cy="9" r="5" />
+      <path d="m12.8 12.8 3.7 3.7M7 9h4M9 7v4" />
+    </Icon>
+  );
+}
+
+export function ZoomOutIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <circle cx="9" cy="9" r="5" />
+      <path d="m12.8 12.8 3.7 3.7M7 9h4" />
+    </Icon>
+  );
+}

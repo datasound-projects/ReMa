@@ -52,6 +52,7 @@ pub fn triage_request(candidates: &[MessageMeta], instructions: &str) -> ChatReq
             ),
         }],
         max_output_tokens: Some(2_000),
+        ..ChatRequest::default()
     }
 }
 
@@ -153,6 +154,7 @@ pub fn extraction_request(
             ),
         }],
         max_output_tokens: Some(2_000),
+        ..ChatRequest::default()
     }
 }
 

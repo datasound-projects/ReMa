@@ -680,6 +680,8 @@ async fn chat_answers_with_job_tables_are_ingested_automatically() {
                 model_id: "model-a".into(),
             },
             use_profile: false,
+            agent_ids: Vec::new(),
+            mcp_server_ids: Vec::new(),
         },
     )
     .await

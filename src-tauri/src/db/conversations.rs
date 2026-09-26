@@ -2,10 +2,11 @@
 
 use rusqlite::{params, Connection, OptionalExtension, Row};
 
+use super::{agents, mcp};
 use crate::{
     error::{AppError, AppResult},
     models::{
-        chat::{Conversation, Message, MessageRole, MessageStatus},
+        chat::{Conversation, Message, MessageRole, MessageStatus, ToolActivity},
         provider::ModelRef,
     },
 };
@@ -13,7 +14,7 @@ use crate::{
 const CONVERSATION_COLUMNS: &str =
     "id, title, provider_id, model_id, created_at, updated_at, profile_context";
 const MESSAGE_COLUMNS: &str =
-    "id, conversation_id, role, content, status, error, provider_id, model_id, created_at";
+    "id, conversation_id, role, content, status, error, provider_id, model_id, created_at, activity";
 
 fn conversation_from_row(row: &Row) -> rusqlite::Result<Conversation> {
     Ok(Conversation {
@@ -26,7 +27,16 @@ fn conversation_from_row(row: &Row) -> rusqlite::Result<Conversation> {
         created_at: row.get(4)?,
         updated_at: row.get(5)?,
         profile_context: row.get(6)?,
+        agent_ids: Vec::new(),
+        mcp_server_ids: Vec::new(),
     })
+}
+
+/// Adds the conversation's selected agents and MCP servers.
+fn with_selections(conn: &Connection, mut conversation: Conversation) -> AppResult<Conversation> {
+    conversation.agent_ids = agents::conversation_agents(conn, conversation.id)?;
+    conversation.mcp_server_ids = mcp::conversation_servers(conn, conversation.id)?;
+    Ok(conversation)
 }
 
 fn message_from_row(row: &Row) -> rusqlite::Result<Message> {
@@ -34,6 +44,7 @@ fn message_from_row(row: &Row) -> rusqlite::Result<Message> {
     let status: String = row.get(4)?;
     let provider_id: Option<String> = row.get(6)?;
     let model_id: Option<String> = row.get(7)?;
+    let activity: Option<String> = row.get(9)?;
     Ok(Message {
         id: row.get(0)?,
         conversation_id: row.get(1)?,
@@ -47,6 +58,9 @@ fn message_from_row(row: &Row) -> rusqlite::Result<Message> {
                 provider_id,
                 model_id,
             }),
+        activity: activity
+            .and_then(|a| serde_json::from_str::<Vec<ToolActivity>>(&a).ok())
+            .unwrap_or_default(),
         created_at: row.get(8)?,
     })
 }
@@ -75,13 +89,15 @@ pub fn set_profile_context(conn: &Connection, id: i64, enabled: bool) -> AppResu
 }
 
 pub fn get(conn: &Connection, id: i64) -> AppResult<Conversation> {
-    conn.query_row(
-        &format!("SELECT {CONVERSATION_COLUMNS} FROM conversations WHERE id = ?1"),
-        [id],
-        conversation_from_row,
-    )
-    .optional()?
-    .ok_or_else(|| AppError::not_found("Conversation not found"))
+    let conversation = conn
+        .query_row(
+            &format!("SELECT {CONVERSATION_COLUMNS} FROM conversations WHERE id = ?1"),
+            [id],
+            conversation_from_row,
+        )
+        .optional()?
+        .ok_or_else(|| AppError::not_found("Conversation not found"))?;
+    with_selections(conn, conversation)
 }
 
 /// Most recently active first.
@@ -89,8 +105,10 @@ pub fn list(conn: &Connection, limit: u32) -> AppResult<Vec<Conversation>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {CONVERSATION_COLUMNS} FROM conversations ORDER BY updated_at DESC, id DESC LIMIT ?1"
     ))?;
-    let rows = stmt.query_map([limit], conversation_from_row)?;
-    Ok(rows.collect::<Result<_, _>>()?)
+    let rows: Vec<Conversation> = stmt
+        .query_map([limit], conversation_from_row)?
+        .collect::<Result<_, _>>()?;
+    rows.into_iter().map(|c| with_selections(conn, c)).collect()
 }
 
 /// Records activity and the model used most recently.
@@ -175,10 +193,16 @@ pub fn finish_message(
     content: &str,
     status: MessageStatus,
     error: Option<&str>,
+    activity: &[ToolActivity],
 ) -> AppResult<Message> {
+    let activity = if activity.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(activity).map_err(|e| AppError::internal(e.to_string()))?)
+    };
     conn.execute(
-        "UPDATE messages SET content = ?2, status = ?3, error = ?4 WHERE id = ?1",
-        params![id, content, status.as_str(), error],
+        "UPDATE messages SET content = ?2, status = ?3, error = ?4, activity = ?5 WHERE id = ?1",
+        params![id, content, status.as_str(), error, activity],
     )?;
     get_message(conn, id)
 }
@@ -186,7 +210,7 @@ pub fn finish_message(
 /// Clears an assistant message so it can be generated again.
 pub fn restart_message(conn: &Connection, id: i64, model: &ModelRef) -> AppResult<Message> {
     conn.execute(
-        "UPDATE messages SET content = '', status = 'streaming', error = NULL,
+        "UPDATE messages SET content = '', status = 'streaming', error = NULL, activity = NULL,
              provider_id = ?2, model_id = ?3
          WHERE id = ?1",
         params![id, model.provider_id, model.model_id],
@@ -242,7 +266,7 @@ mod tests {
                     created_at: 1_001,
                 },
             )?;
-            finish_message(c, reply.id, "Hello!", MessageStatus::Complete, None)?;
+            finish_message(c, reply.id, "Hello!", MessageStatus::Complete, None, &[])?;
 
             let messages = list_messages(c, conversation.id)?;
             assert_eq!(messages.len(), 2);

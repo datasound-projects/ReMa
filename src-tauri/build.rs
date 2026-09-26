@@ -22,6 +22,12 @@ fn main() {
         std::fs::write(PERMISSION_SET_PATH, set).expect("write the permission set");
     }
     println!("cargo:rerun-if-changed=src/ipc_commands.rs");
+    // Development builds look for runtimes fetched into `runtimes/` (see
+    // `accounts::locate`), which are named after the target.
+    println!(
+        "cargo:rustc-env=REMA_TARGET_TRIPLE={}",
+        std::env::var("TARGET").expect("cargo sets TARGET")
+    );
 
     tauri_build::try_build(
         tauri_build::Attributes::new().app_manifest(

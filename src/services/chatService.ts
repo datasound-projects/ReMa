@@ -1,5 +1,6 @@
 import {
   commands,
+  type ApprovalDecision,
   type Conversation,
   type ConversationDetail,
   type Message,
@@ -10,11 +11,14 @@ import {
 import { callBackend } from './ipc';
 
 export type {
+  ApprovalDecision,
   ChatEvent,
   Conversation,
   ConversationDetail,
   Message,
   MessageStatus,
+  ToolActivity,
+  ToolStatus,
 } from '../generated/bindings';
 
 export function listConversations(): Promise<Conversation[]> {
@@ -39,4 +43,18 @@ export function stopGeneration(messageId: number): Promise<null> {
 
 export function deleteConversation(id: number): Promise<null> {
   return callBackend(() => commands.deleteConversation(id));
+}
+
+/** Stores the agents and MCP servers selected in a conversation. */
+export function setConversationSelections(
+  id: number,
+  agentIds: string[],
+  mcpServerIds: number[],
+): Promise<Conversation> {
+  return callBackend(() => commands.setConversationSelections(id, agentIds, mcpServerIds));
+}
+
+/** Answers a tool call that waits for the user's approval. */
+export function respondToolApproval(messageId: number, callId: string, decision: ApprovalDecision): Promise<null> {
+  return callBackend(() => commands.respondToolApproval(messageId, callId, decision));
 }

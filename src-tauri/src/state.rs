@@ -10,8 +10,9 @@ use crate::{
     events::EventSink,
     integrations::google::GoogleContext,
     llm::LanguageModel,
+    mcp::McpContext,
     secrets::SecretVault,
-    services::{chat::Generations, scheduler::SchedulerHandle},
+    services::{chat::Generations, chat_tools::Approvals, scheduler::SchedulerHandle},
 };
 
 #[derive(Debug, Clone)]
@@ -51,6 +52,10 @@ pub struct AppState {
     pub google: GoogleContext,
     pub browser: BrowserContext,
     pub analytics: AnalyticsContext,
+    /// MCP server connections.
+    pub mcp: McpContext,
+    /// Tool calls waiting for the user's approval.
+    pub approvals: Approvals,
 }
 
 #[cfg(test)]
@@ -94,6 +99,8 @@ pub mod testing {
             google: GoogleContext::new(GoogleEndpoints::default()),
             browser: Default::default(),
             analytics: Default::default(),
+            mcp: Default::default(),
+            approvals: Default::default(),
         };
         (state, events)
     }

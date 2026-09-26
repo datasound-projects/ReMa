@@ -1,20 +1,28 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { useNavigation } from '../app/navigation';
+import { ChatToolsMenu, SelectionChips } from '../components/chat/ChatToolsMenu';
 import { Composer } from '../components/chat/Composer';
 import { BriefcaseIcon, ChartIcon, SearchIcon, SparkleIcon } from '../components/icons';
 import { MessageList } from '../components/chat/MessageList';
 import { TaskDialog } from '../components/tasks/TaskDialog';
 import { dataOr } from '../hooks/useAsyncData';
+import { useAgents } from '../hooks/useAgents';
 import { useChat } from '../hooks/useChat';
+import { useMcpServers } from '../hooks/useMcpServers';
 import { useModelCatalog } from '../hooks/useModelCatalog';
 import { useSystemTimezone } from '../hooks/useTasks';
+import { pickableServers, reconcile, sameSelection, type ChatSelection } from '../lib/chatSelection';
 import { formatDateTime } from '../lib/format';
+import { setConversationSelections } from '../services/chatService';
+import { toApiError } from '../services/ipc';
 import { sameModel, type ModelRef } from '../services/providerService';
 import type { ScheduledTask } from '../services/taskService';
 
 interface ChatPageProps {
   conversationId: number | null;
+  /** Agents to preselect in a new chat (e.g. "Use in chat" on the Agents page). */
+  initialAgentIds?: string[];
 }
 
 /** Sticks to the bottom while the user is near it. */
@@ -28,7 +36,7 @@ const SUGGESTIONS = [
   { icon: BriefcaseIcon, text: 'Help me prepare for a technical interview' },
 ];
 
-export function ChatPage({ conversationId }: ChatPageProps) {
+export function ChatPage({ conversationId, initialAgentIds }: ChatPageProps) {
   const { navigate } = useNavigation();
   const onCreated = useCallback(
     (id: number) => navigate({ page: 'chat', conversationId: id }),
@@ -60,6 +68,67 @@ export function ChatPage({ conversationId }: ChatPageProps) {
   const profileOn =
     profileChoice?.conversationId === conversationId ? profileChoice.on : chat.profileContext;
 
+  // Agents and MCP servers (the + menu): the user's choice in this chat,
+  // else what the conversation stored. Independent of Profile.
+  const agentsState = useAgents().state;
+  const serversState = useMcpServers().state;
+  const agents = agentsState.status === 'success' ? agentsState.data : null;
+  const servers = serversState.status === 'success' ? serversState.data : null;
+  const [selectionChoice, setSelectionChoice] = useState<{
+    conversationId: number | null;
+    selection: ChatSelection;
+    /** A short note about the selection (e.g. a server turned off). */
+    notice: string | null;
+  } | null>(() =>
+    initialAgentIds?.length
+      ? { conversationId, selection: { agentIds: initialAgentIds, mcpServerIds: [] }, notice: null }
+      : null,
+  );
+  const ownChoice = selectionChoice?.conversationId === conversationId ? selectionChoice : null;
+  const rawSelection = ownChoice ? ownChoice.selection : chat.selection;
+  const reconciled = reconcile(rawSelection, agents, servers);
+  const selection = reconciled.selection;
+  const selectionNotice = ownChoice?.notice ?? null;
+
+  const changeSelection = (next: ChatSelection, notice: string | null = null) => {
+    setSelectionChoice({ conversationId, selection: next, notice });
+    if (conversationId !== null) {
+      const id = conversationId;
+      setConversationSelections(id, next.agentIds, next.mcpServerIds).catch((err: unknown) =>
+        setSelectionChoice((c) => (c && c.conversationId === id ? { ...c, notice: toApiError(err).message } : c)),
+      );
+    }
+  };
+
+  // A server turned off in Settings leaves this chat (with a short note)
+  // and is not added back if it is turned on again.
+  const cleanup = useRef({ raw: rawSelection, change: changeSelection });
+  useEffect(() => {
+    cleanup.current = { raw: rawSelection, change: changeSelection };
+  });
+  const removedKey = reconciled.changed ? JSON.stringify(reconciled.selection) : null;
+  const removedNames = reconciled.removedServers.join(', ');
+  useEffect(() => {
+    if (removedKey === null) return;
+    const next = JSON.parse(removedKey) as ChatSelection;
+    if (sameSelection(next, cleanup.current.raw)) return;
+    cleanup.current.change(
+      next,
+      removedNames
+        ? `${removedNames} ${removedNames.includes(',') ? 'were' : 'was'} turned off in Settings and removed from this chat.`
+        : null,
+    );
+  }, [removedKey, removedNames]);
+
+  useEffect(() => {
+    if (!selectionNotice) return;
+    const timer = window.setTimeout(
+      () => setSelectionChoice((c) => (c && c.notice === selectionNotice ? { ...c, notice: null } : c)),
+      8000,
+    );
+    return () => window.clearTimeout(timer);
+  }, [selectionNotice]);
+
   const [schedulePrompt, setSchedulePrompt] = useState<string | null>(null);
   const [scheduled, setScheduled] = useState<ScheduledTask | null>(null);
   const [clearSignal, setClearSignal] = useState(0);
@@ -83,6 +152,11 @@ export function ChatPage({ conversationId }: ChatPageProps) {
   }, [scheduled]);
 
   const empty = conversationId === null && chat.messages.length === 0;
+  const notice = selectionNotice && (
+    <p className="chat__selection-notice" role="status">
+      {selectionNotice}
+    </p>
+  );
 
   const composer = (
     <Composer
@@ -91,8 +165,19 @@ export function ChatPage({ conversationId }: ChatPageProps) {
       onModelChange={(m) => setPicked({ conversationId, model: m })}
       profileOn={profileOn}
       onProfileChange={(on) => setProfileChoice({ conversationId, on })}
+      plus={
+        <ChatToolsMenu
+          agents={agents ?? []}
+          servers={pickableServers(servers ?? [])}
+          selection={selection}
+          onChange={(next) => changeSelection(next)}
+        />
+      }
+      chips={
+        <SelectionChips agents={agents ?? []} servers={servers ?? []} selection={selection} onChange={(next) => changeSelection(next)} />
+      }
       streaming={!!chat.streamingMessage}
-      onSend={(text) => (model ? chat.send(text, model, profileOn) : Promise.resolve())}
+      onSend={(text) => (model ? chat.send(text, model, profileOn, selection) : Promise.resolve())}
       onStop={() => {
         if (chat.streamingMessage) void chat.stop(chat.streamingMessage.id);
       }}
@@ -111,6 +196,7 @@ export function ChatPage({ conversationId }: ChatPageProps) {
             <h1 className="chat__greeting">What can ReMa help with?</h1>
             <p className="chat__tagline">Search roles, compare them with your Profile, and plan your next step.</p>
           </div>
+          {notice}
           {composer}
           {model && (
             <div className="suggestions" aria-label="Suggestions">
@@ -150,7 +236,10 @@ export function ChatPage({ conversationId }: ChatPageProps) {
               />
             )}
           </div>
-          <div className="chat__footer">{composer}</div>
+          <div className="chat__footer">
+            {notice}
+            {composer}
+          </div>
         </>
       )}
 

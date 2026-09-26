@@ -8,10 +8,12 @@ interface DialogProps {
   children: ReactNode;
   /** Footer buttons. */
   actions: ReactNode;
+  /** `wide` for forms with two columns or long content. */
+  size?: 'default' | 'wide';
 }
 
 /** A small modal dialog built on the native `<dialog>` element. */
-export function Dialog({ title, onClose, children, actions }: DialogProps) {
+export function Dialog({ title, onClose, children, actions, size = 'default' }: DialogProps) {
   const ref = useRef<HTMLDialogElement>(null);
   // Web pages are drawn natively above ReMa; hide the page meanwhile.
   useCoverBrowser();
@@ -24,7 +26,7 @@ export function Dialog({ title, onClose, children, actions }: DialogProps) {
   return (
     <dialog
       ref={ref}
-      className="dialog"
+      className={size === 'wide' ? 'dialog dialog--wide' : 'dialog'}
       aria-label={title}
       onCancel={(event) => {
         event.preventDefault();

@@ -1,11 +1,11 @@
-/** Anchor ids of the Profile page sections (the overview chips jump to them). */
+/** Anchor ids of the Custom Profile sections (the overview chips jump to them). */
 export const SECTION_IDS = {
   personal: 'profile-personal',
   professional: 'profile-professional',
   experience: 'profile-experience',
   education: 'profile-education',
+  skills: 'profile-skills',
   languages: 'profile-languages',
   links: 'profile-links',
-  documents: 'profile-documents',
   custom: 'profile-custom',
 } as const;

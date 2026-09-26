@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     error::{AppError, AppResult},
-    models::profile::DocumentFormat,
+    models::profile::{DocumentBlock, DocumentFormat},
 };
 
 /// Largest file accepted.
@@ -38,7 +38,7 @@ pub fn detect_format(file_name: &str, bytes: &[u8]) -> AppResult<DocumentFormat>
         .map(str::to_lowercase)
         .unwrap_or_default();
     let unsupported =
-        || AppError::validation("Use a PDF, Word (.docx), text, Markdown, PNG or JPEG file.");
+        || AppError::validation("Use a PDF, Word (.docx), text, Markdown, PNG, JPEG or WEBP file.");
     let format = match extension.as_str() {
         "pdf" => DocumentFormat::Pdf,
         "docx" => DocumentFormat::Docx,
@@ -46,6 +46,7 @@ pub fn detect_format(file_name: &str, bytes: &[u8]) -> AppResult<DocumentFormat>
         "md" | "markdown" => DocumentFormat::Markdown,
         "png" => DocumentFormat::Png,
         "jpg" | "jpeg" => DocumentFormat::Jpeg,
+        "webp" => DocumentFormat::Webp,
         "doc" => {
             return Err(AppError::validation(
                 "Old Word documents (.doc) are not supported. Save the file as .docx or PDF.",
@@ -59,6 +60,9 @@ pub fn detect_format(file_name: &str, bytes: &[u8]) -> AppResult<DocumentFormat>
         DocumentFormat::Docx => bytes.starts_with(b"PK\x03\x04"),
         DocumentFormat::Png => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
         DocumentFormat::Jpeg => bytes.starts_with(&[0xFF, 0xD8, 0xFF]),
+        DocumentFormat::Webp => {
+            bytes.len() > 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP"
+        }
         DocumentFormat::Text | DocumentFormat::Markdown => {
             !bytes[..bytes.len().min(8192)].contains(&0)
         }
@@ -80,7 +84,7 @@ pub fn extract_text(format: DocumentFormat, bytes: &[u8]) -> AppResult<Option<St
             let text = String::from_utf8_lossy(bytes);
             text.trim_start_matches('\u{feff}').to_string()
         }
-        DocumentFormat::Png | DocumentFormat::Jpeg => return Ok(None),
+        DocumentFormat::Png | DocumentFormat::Jpeg | DocumentFormat::Webp => return Ok(None),
     };
     let text = tidy(&text);
     Ok((!text.is_empty()).then_some(text))
@@ -115,18 +119,44 @@ fn pdf_text(bytes: &[u8]) -> AppResult<String> {
         .map_err(|_| unreadable())
 }
 
-fn docx_text(bytes: &[u8]) -> AppResult<String> {
-    use quick_xml::events::Event;
+fn docx_unreadable() -> AppError {
+    AppError::validation("ReMa could not read this Word document.")
+}
 
-    let unreadable = || AppError::validation("ReMa could not read this Word document.");
-    let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|_| unreadable())?;
+/// `word/document.xml` from a DOCX (a zip archive), size-limited.
+fn docx_xml(bytes: &[u8]) -> AppResult<Vec<u8>> {
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|_| docx_unreadable())?;
     let mut xml = Vec::new();
     archive
         .by_name("word/document.xml")
-        .map_err(|_| unreadable())?
+        .map_err(|_| docx_unreadable())?
         .take(MAX_DOCX_XML_BYTES)
         .read_to_end(&mut xml)
-        .map_err(|_| unreadable())?;
+        .map_err(|_| docx_unreadable())?;
+    Ok(xml)
+}
+
+/// Resolves `&amp;`, `&lt;`, … and numeric character references.
+fn resolve_reference(name: &str) -> Option<char> {
+    match name {
+        "amp" => Some('&'),
+        "lt" => Some('<'),
+        "gt" => Some('>'),
+        "quot" => Some('"'),
+        "apos" => Some('\''),
+        other => other
+            .strip_prefix("#x")
+            .and_then(|h| u32::from_str_radix(h, 16).ok())
+            .or_else(|| other.strip_prefix('#').and_then(|d| d.parse().ok()))
+            .and_then(char::from_u32),
+    }
+}
+
+fn docx_text(bytes: &[u8]) -> AppResult<String> {
+    use quick_xml::events::Event;
+
+    let unreadable = docx_unreadable;
+    let xml = docx_xml(bytes)?;
 
     let mut reader = quick_xml::Reader::from_reader(xml.as_slice());
     let mut text = String::new();
@@ -154,21 +184,8 @@ fn docx_text(bytes: &[u8]) -> AppResult<String> {
                 text.push_str(&t.decode().map_err(|_| unreadable())?);
             }
             Ok(Event::GeneralRef(r)) if in_text => {
-                // &amp; &lt; &gt; &quot; &apos; and numeric references.
                 let name = r.decode().map_err(|_| unreadable())?;
-                let resolved = match name.as_ref() {
-                    "amp" => Some('&'),
-                    "lt" => Some('<'),
-                    "gt" => Some('>'),
-                    "quot" => Some('"'),
-                    "apos" => Some('\''),
-                    other => other
-                        .strip_prefix("#x")
-                        .and_then(|h| u32::from_str_radix(h, 16).ok())
-                        .or_else(|| other.strip_prefix('#').and_then(|d| d.parse().ok()))
-                        .and_then(char::from_u32),
-                };
-                text.extend(resolved);
+                text.extend(resolve_reference(&name));
             }
             Ok(Event::Eof) => break,
             Err(_) => return Err(unreadable()),
@@ -177,6 +194,157 @@ fn docx_text(bytes: &[u8]) -> AppResult<String> {
         buf.clear();
     }
     Ok(text)
+}
+
+/// Most blocks shown for one document, and characters per block.
+const MAX_BLOCKS: usize = 5_000;
+const MAX_BLOCK_CHARS: usize = 20_000;
+
+/// The document as plain blocks for the in-app viewer: headings (from the
+/// `Title` and `Heading1`–`Heading6` styles), list items, tables and
+/// paragraphs. Formatting, images, fields and embedded content are dropped,
+/// so nothing active from the file ever reaches the interface.
+pub fn docx_blocks(bytes: &[u8]) -> AppResult<Vec<DocumentBlock>> {
+    use quick_xml::events::{BytesStart, Event};
+
+    let xml = docx_xml(bytes)?;
+    let mut reader = quick_xml::Reader::from_reader(xml.as_slice());
+    let mut blocks = Vec::new();
+    let mut buf = Vec::new();
+
+    // The paragraph being read.
+    let mut text = String::new();
+    let mut in_text = false;
+    let mut heading: Option<u8> = None;
+    let mut list_level: Option<u8> = None;
+    // Tables: rows of cells; nested tables are read into their cell as text.
+    let mut table_depth = 0usize;
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut cell = String::new();
+
+    let val = |e: &BytesStart| -> Option<String> {
+        e.attributes().flatten().find_map(|a| {
+            (a.key.local_name().as_ref() == b"val")
+                .then(|| String::from_utf8_lossy(&a.value).into_owned())
+        })
+    };
+
+    loop {
+        let event = reader
+            .read_event_into(&mut buf)
+            .map_err(|_| docx_unreadable())?;
+        match event {
+            Event::Start(ref e) | Event::Empty(ref e) => {
+                let empty = matches!(event, Event::Empty(_));
+                match e.local_name().as_ref() {
+                    b"tbl" if !empty => {
+                        table_depth += 1;
+                        if table_depth == 1 {
+                            rows.clear();
+                        }
+                    }
+                    b"tr" if !empty && table_depth == 1 => rows.push(Vec::new()),
+                    b"tc" if !empty && table_depth == 1 => cell.clear(),
+                    b"p" if !empty => {
+                        text.clear();
+                        heading = None;
+                        list_level = None;
+                    }
+                    b"pStyle" => {
+                        let style = val(e).unwrap_or_default().to_lowercase();
+                        heading = if style == "title" {
+                            Some(1)
+                        } else {
+                            style
+                                .strip_prefix("heading")
+                                .and_then(|n| n.parse::<u8>().ok())
+                                .map(|n| n.clamp(1, 6))
+                        };
+                    }
+                    b"ilvl" => {
+                        list_level = Some(val(e).and_then(|v| v.parse().ok()).unwrap_or(0).min(8));
+                    }
+                    b"numPr" if list_level.is_none() => list_level = Some(0),
+                    b"t" if !empty => in_text = true,
+                    b"tab" => text.push('\t'),
+                    b"br" | b"cr" => text.push('\n'),
+                    _ => {}
+                }
+            }
+            Event::End(e) => match e.local_name().as_ref() {
+                b"t" => in_text = false,
+                b"p" => {
+                    let paragraph = text
+                        .trim()
+                        .chars()
+                        .take(MAX_BLOCK_CHARS)
+                        .collect::<String>();
+                    if table_depth > 0 {
+                        if !paragraph.is_empty() {
+                            if !cell.is_empty() {
+                                cell.push('\n');
+                            }
+                            cell.push_str(&paragraph);
+                        }
+                    } else if !paragraph.is_empty() && blocks.len() < MAX_BLOCKS {
+                        blocks.push(match (heading, list_level) {
+                            (Some(level), _) => DocumentBlock::Heading {
+                                level,
+                                text: paragraph,
+                            },
+                            (None, Some(level)) => DocumentBlock::ListItem {
+                                level,
+                                text: paragraph,
+                            },
+                            (None, None) => DocumentBlock::Paragraph { text: paragraph },
+                        });
+                    }
+                    text.clear();
+                }
+                b"tc" if table_depth == 1 => {
+                    if let Some(row) = rows.last_mut() {
+                        row.push(std::mem::take(&mut cell));
+                    }
+                }
+                b"tbl" => {
+                    table_depth = table_depth.saturating_sub(1);
+                    if table_depth == 0 {
+                        let table: Vec<Vec<String>> = std::mem::take(&mut rows)
+                            .into_iter()
+                            .filter(|r| r.iter().any(|c| !c.trim().is_empty()))
+                            .collect();
+                        if !table.is_empty() && blocks.len() < MAX_BLOCKS {
+                            blocks.push(DocumentBlock::Table { rows: table });
+                        }
+                    }
+                }
+                _ => {}
+            },
+            Event::Text(t) if in_text => {
+                text.push_str(&t.decode().map_err(|_| docx_unreadable())?);
+            }
+            Event::GeneralRef(r) if in_text => {
+                let name = r.decode().map_err(|_| docx_unreadable())?;
+                text.extend(resolve_reference(&name));
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok(blocks)
+}
+
+/// Plain text (and Markdown source) as paragraphs for the viewer.
+pub fn text_blocks(text: &str) -> Vec<DocumentBlock> {
+    text.split("\n\n")
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .take(MAX_BLOCKS)
+        .map(|p| DocumentBlock::Paragraph {
+            text: p.chars().take(MAX_BLOCK_CHARS).collect(),
+        })
+        .collect()
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
@@ -255,6 +423,13 @@ pub mod samples {
 
     use std::io::Write;
 
+    /// The smallest valid-looking WEBP header.
+    pub fn webp() -> Vec<u8> {
+        let mut bytes = b"RIFF\x1a\x00\x00\x00WEBPVP8L".to_vec();
+        bytes.extend([0u8; 14]);
+        bytes
+    }
+
     /// A one-page PDF showing each line with Helvetica.
     pub fn pdf(lines: &[&str]) -> Vec<u8> {
         let mut content = String::from("BT /F1 12 Tf 72 720 Td 14 TL\n");
@@ -313,6 +488,11 @@ pub mod samples {
                 format!("<w:p><w:r><w:t xml:space=\"preserve\">{escaped}</w:t></w:r></w:p>")
             })
             .collect();
+        docx_from_body(&body)
+    }
+
+    /// A DOCX whose body is the given WordprocessingML.
+    pub fn docx_from_body(body: &str) -> Vec<u8> {
         let xml = format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
              <w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\
@@ -358,6 +538,55 @@ mod tests {
         assert!(detect_format("cv.txt", b"bin\0ary").is_err());
         assert!(detect_format("cv.exe", b"MZ").is_err());
         assert!(detect_format("cv.doc", b"x").is_err());
+        assert_eq!(
+            detect_format("badge.webp", &samples::webp()).unwrap(),
+            DocumentFormat::Webp
+        );
+        assert!(detect_format("badge.webp", b"RIFF\x00\x00\x00\x00AVI LIST").is_err());
+        assert!(detect_format("cv.html", b"<html>").is_err());
+        assert!(detect_format("cv.svg", b"<svg/>").is_err());
+    }
+
+    #[test]
+    fn reads_word_documents_as_plain_blocks() {
+        let docx = samples::docx_from_body(
+            "<w:p><w:pPr><w:pStyle w:val=\"Title\"/></w:pPr><w:r><w:t>Ana Tester</w:t></w:r></w:p>\
+             <w:p><w:pPr><w:pStyle w:val=\"Heading2\"/></w:pPr><w:r><w:t>Experience</w:t></w:r></w:p>\
+             <w:p><w:r><w:t>Data engineer at Globex &amp; Co.</w:t></w:r></w:p>\
+             <w:p><w:pPr><w:numPr><w:ilvl w:val=\"1\"/></w:numPr></w:pPr><w:r><w:t>Built pipelines</w:t></w:r></w:p>\
+             <w:tbl><w:tr><w:tc><w:p><w:r><w:t>Rust</w:t></w:r></w:p></w:tc>\
+             <w:tc><w:p><w:r><w:t>5 years</w:t></w:r></w:p></w:tc></w:tr></w:tbl>\
+             <w:p><w:r><w:t>&lt;script&gt;alert(1)&lt;/script&gt;</w:t></w:r></w:p>",
+        );
+        assert_eq!(
+            docx_blocks(&docx).unwrap(),
+            vec![
+                DocumentBlock::Heading {
+                    level: 1,
+                    text: "Ana Tester".into()
+                },
+                DocumentBlock::Heading {
+                    level: 2,
+                    text: "Experience".into()
+                },
+                DocumentBlock::Paragraph {
+                    text: "Data engineer at Globex & Co.".into()
+                },
+                DocumentBlock::ListItem {
+                    level: 1,
+                    text: "Built pipelines".into()
+                },
+                DocumentBlock::Table {
+                    rows: vec![vec!["Rust".into(), "5 years".into()]]
+                },
+                // Markup in the text stays text.
+                DocumentBlock::Paragraph {
+                    text: "<script>alert(1)</script>".into()
+                },
+            ]
+        );
+        assert!(docx_blocks(b"PK\x03\x04 garbage").is_err());
+        assert_eq!(text_blocks("One\n\n\nTwo\nlines").len(), 2);
     }
 
     #[test]

@@ -8,5 +8,7 @@
 @import './settings.css';
 @import './browser.css';
 @import './profile.css';
+@import './studio.css';
+@import './agents.css';
 @import './analytics.css';
 @import './intro.css';

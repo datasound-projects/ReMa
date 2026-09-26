@@ -269,6 +269,7 @@ async fn read_with_model(state: &AppState, model: &ModelRef, text: &str) -> AppR
             ),
         }],
         max_output_tokens: Some(8_000),
+        ..ChatRequest::default()
     };
     let mut answer = String::new();
     let mut sink = |delta: &str| answer.push_str(delta);

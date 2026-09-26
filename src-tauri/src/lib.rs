@@ -31,7 +31,10 @@ pub mod ipc;
 pub mod ipc_commands;
 pub mod jobs;
 pub mod llm;
+pub mod mcp;
 pub mod models;
+pub mod oauth_loopback;
+pub mod protocol;
 pub mod secrets;
 pub mod services;
 pub mod state;
@@ -69,6 +72,27 @@ pub fn run() {
         // Used from Rust only; no dialog permission is granted to any webview.
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(ipc.invoke_handler())
+        // Document files for the in-app viewer (main webview only).
+        .register_asynchronous_uri_scheme_protocol(protocol::SCHEME, |ctx, request, responder| {
+            let app = ctx.app_handle().clone();
+            let webview = ctx.webview_label().to_string();
+            let path = request.uri().path().to_string();
+            let origin = request
+                .headers()
+                .get(tauri::http::header::ORIGIN)
+                .and_then(|o| o.to_str().ok())
+                .map(str::to_string);
+            // Reading a file can take a moment; keep it off the main thread.
+            tauri::async_runtime::spawn_blocking(move || {
+                let state = app.try_state::<AppState>();
+                responder.respond(protocol::respond(
+                    state.as_deref(),
+                    &webview,
+                    &path,
+                    origin.as_deref(),
+                ));
+            });
+        })
         .setup(move |app| {
             ipc.mount_events(app);
             let state = init_state(app)?;
@@ -91,6 +115,7 @@ pub fn run() {
                 state.analytics.stop();
                 state.generations.cancel_all();
                 state.accounts.shutdown();
+                state.mcp.shutdown();
             }
         }
     });
@@ -134,5 +159,7 @@ fn init_state(app: &App) -> Result<AppState, Box<dyn std::error::Error>> {
         google: GoogleContext::new(GoogleEndpoints::from_env()),
         browser: Default::default(),
         analytics: Default::default(),
+        mcp: Default::default(),
+        approvals: Default::default(),
     })
 }

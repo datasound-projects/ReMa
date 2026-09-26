@@ -185,6 +185,28 @@ impl SecretVault {
     }
 }
 
+impl SecretVault {
+    /// Other secrets (MCP environment values, tokens, OAuth credentials),
+    /// stored as text under their own account names. Not cached.
+    pub async fn get_text(&self, account: &str) -> AppResult<Option<String>> {
+        let store = self.store.clone();
+        let account = account.to_string();
+        blocking(move || store.get(&account)).await
+    }
+
+    pub async fn set_text(&self, account: &str, value: &str) -> AppResult<()> {
+        let store = self.store.clone();
+        let (account, value) = (account.to_string(), value.to_string());
+        blocking(move || store.set(&account, &value)).await
+    }
+
+    pub async fn delete_text(&self, account: &str) -> AppResult<()> {
+        let store = self.store.clone();
+        let account = account.to_string();
+        blocking(move || store.delete(&account)).await
+    }
+}
+
 /// Credential stores may block (D-Bus, Keychain); keep them off async workers.
 async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> AppResult<T> + Send + 'static,

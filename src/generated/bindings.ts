@@ -63,6 +63,8 @@ export const commands = {
 	size: number,
 	/**  Readable text was extracted (it can be imported into the profile). */
 	hasText: boolean,
+	/**  The main CV: preferred when Profile context has to be shortened. */
+	isPrimary: boolean,
 	createdAt: number,
 	updatedAt: number,
 } | null>("add_profile_document", { kind }),
@@ -72,6 +74,80 @@ export const commands = {
 	deleteProfileDocument: (id: number) => __TAURI_INVOKE<null>("delete_profile_document", { id }),
 	/**  Opens the stored file in the system's default app. */
 	openProfileDocument: (id: number) => __TAURI_INVOKE<null>("open_profile_document", { id }),
+	/**
+	 *  Lets the user pick one or more files and stores each. The user stays
+	 *  where they are: nothing is extracted into the Custom Profile.
+	 */
+	addProfileDocuments: (kind: "cv" | "certificate" | "portfolio" | "other" | null) => __TAURI_INVOKE<AddDocumentsResult>("add_profile_documents", { kind }),
+	/**
+	 *  Replaces a document with a new file picked by the user. `None` if the
+	 *  user cancelled.
+	 */
+	replaceProfileDocument: (id: number) => __TAURI_INVOKE<{
+	id: number,
+	name: string,
+	kind: DocumentKind,
+	format: DocumentFormat,
+	/**  File name as uploaded. */
+	originalName: string,
+	/**  Bytes. */
+	size: number,
+	/**  Readable text was extracted (it can be imported into the profile). */
+	hasText: boolean,
+	/**  The main CV: preferred when Profile context has to be shortened. */
+	isPrimary: boolean,
+	createdAt: number,
+	updatedAt: number,
+} | null>("replace_profile_document", { id }),
+	/**  Marks a CV as the primary one. */
+	setPrimaryDocument: (id: number) => __TAURI_INVOKE<ProfileDocument>("set_primary_document", { id }),
+	/**  A Word or text document as plain blocks for the in-app viewer. */
+	profileDocumentBlocks: (id: number) => __TAURI_INVOKE<DocumentBlock[]>("profile_document_blocks", { id }),
+	/**
+	 *  Creates (`id` = null) or updates a credential; `documentId` is its file
+	 *  (added with `add_profile_document`).
+	 */
+	saveCredential: (id: number | null, input: CredentialInput, documentId: number | null) => __TAURI_INVOKE<ProfileCredential>("save_credential", { id, input, documentId }),
+	/**  Deletes a credential and its file. */
+	deleteCredential: (id: number) => __TAURI_INVOKE<null>("delete_credential", { id }),
+	listPortfolios: () => __TAURI_INVOKE<PortfolioDocument[]>("list_portfolios"),
+	/**  A new document, blank or with a one-time copy of the Custom Profile. */
+	createPortfolio: (name: string, templateId: string, pageSize: PageSize, start: PortfolioStart) => __TAURI_INVOKE<PortfolioDocument>("create_portfolio", { name, templateId, pageSize, start }),
+	savePortfolio: (id: number, input: PortfolioInput) => __TAURI_INVOKE<PortfolioDocument>("save_portfolio", { id, input }),
+	duplicatePortfolio: (id: number) => __TAURI_INVOKE<PortfolioDocument>("duplicate_portfolio", { id }),
+	deletePortfolio: (id: number) => __TAURI_INVOKE<null>("delete_portfolio", { id }),
+	/**
+	 *  Saves the PDF rendered by the interface where the user chooses (system
+	 *  save dialog in Rust; the interface never handles paths). Returns the
+	 *  file name, or `None` if the user cancelled.
+	 */
+	exportPortfolioPdf: (id: number, pdfBase64: string) => __TAURI_INVOKE<string | null>("export_portfolio_pdf", { id, pdfBase64 }),
+	/**  Built-in agents first, then the user's own. */
+	listAgents: () => __TAURI_INVOKE<Agent[]>("list_agents"),
+	/**  Creates (`id` = null) or updates a custom agent. */
+	saveAgent: (id: number | null, input: AgentInput) => __TAURI_INVOKE<Agent>("save_agent", { id, input }),
+	/**  Copies any agent (built-in or custom) into a new custom agent. */
+	duplicateAgent: (agentId: string) => __TAURI_INVOKE<Agent>("duplicate_agent", { agentId }),
+	deleteAgent: (id: number) => __TAURI_INVOKE<null>("delete_agent", { id }),
+	/**  Configured servers. Secret values never leave Rust (`hasSecret` only). */
+	listMcpServers: () => __TAURI_INVOKE<McpServer[]>("list_mcp_servers"),
+	/**
+	 *  Adds (`id` = null, always disabled) or edits a server. Secrets left
+	 *  empty keep their stored value.
+	 */
+	saveMcpServer: (id: number | null, input: McpServerInput) => __TAURI_INVOKE<McpServer>("save_mcp_server", { id, input }),
+	/**  Removes a server, its secrets and its selection in every chat. */
+	deleteMcpServer: (id: number) => __TAURI_INVOKE<null>("delete_mcp_server", { id }),
+	setMcpServerEnabled: (id: number, enabled: boolean) => __TAURI_INVOKE<McpServer>("set_mcp_server_enabled", { id, enabled }),
+	/**  Connects (or reconnects) an enabled server. */
+	connectMcpServer: (id: number) => __TAURI_INVOKE<McpServer>("connect_mcp_server", { id }),
+	disconnectMcpServer: (id: number) => __TAURI_INVOKE<McpServer>("disconnect_mcp_server", { id }),
+	/**  Tries the form's configuration without saving it. */
+	testMcpServer: (id: number | null, input: McpServerInput) => __TAURI_INVOKE<McpTestResult>("test_mcp_server", { id, input }),
+	/**  OAuth sign-in in the system browser; resolves when it completes. */
+	signInMcpServer: (id: number) => __TAURI_INVOKE<McpServer>("sign_in_mcp_server", { id }),
+	cancelMcpSignIn: (id: number) => __TAURI_INVOKE<McpServer>("cancel_mcp_sign_in", { id }),
+	signOutMcpServer: (id: number) => __TAURI_INVOKE<McpServer>("sign_out_mcp_server", { id }),
 	getBrowserStatus: () => __TAURI_INVOKE<BrowserStatus>("get_browser_status"),
 	/**  Opens a web page in the browser workspace at `bounds`. */
 	openInBrowser: (url: string, bounds: BrowserBounds) => __TAURI_INVOKE<BrowserStatus>("open_in_browser", { url, bounds }),
@@ -96,6 +172,10 @@ export const commands = {
 	retryMessage: (messageId: number, model: ModelRef) => __TAURI_INVOKE<Message>("retry_message", { messageId, model }),
 	stopGeneration: (messageId: number) => __TAURI_INVOKE<null>("stop_generation", { messageId }),
 	deleteConversation: (id: number) => __TAURI_INVOKE<null>("delete_conversation", { id }),
+	/**  Stores the agents and MCP servers selected in a conversation. */
+	setConversationSelections: (id: number, agentIds: string[], mcpServerIds: number[]) => __TAURI_INVOKE<Conversation>("set_conversation_selections", { id, agentIds, mcpServerIds }),
+	/**  The user's answer to a tool call waiting for approval. */
+	respondToolApproval: (messageId: number, callId: string, decision: ApprovalDecision) => __TAURI_INVOKE<null>("respond_tool_approval", { messageId, callId, decision }),
 	listTasks: () => __TAURI_INVOKE<ScheduledTask[]>("list_tasks"),
 	createTask: (input: TaskInput) => __TAURI_INVOKE<ScheduledTask>("create_task", { input }),
 	updateTask: (id: number, input: TaskInput) => __TAURI_INVOKE<ScheduledTask>("update_task", { id, input }),
@@ -128,17 +208,53 @@ export const commands = {
 
 /** Events */
 export const events = {
+	agentsChanged: makeEvent<AgentsChanged>("agents-changed"),
 	analyticsChanged: makeEvent<AnalyticsChanged>("analytics-changed"),
 	browserChanged: makeEvent<BrowserChanged>("browser-changed"),
 	chatEvent: makeEvent<ChatEvent>("chat-event"),
 	conversationsChanged: makeEvent<ConversationsChanged>("conversations-changed"),
 	googleChanged: makeEvent<GoogleChanged>("google-changed"),
+	mcpChanged: makeEvent<McpChanged>("mcp-changed"),
+	portfolioChanged: makeEvent<PortfolioChanged>("portfolio-changed"),
 	profileChanged: makeEvent<ProfileChanged>("profile-changed"),
 	providersChanged: makeEvent<ProvidersChanged>("providers-changed"),
 	tasksChanged: makeEvent<TasksChanged>("tasks-changed"),
 };
 
 /* Types */
+/**  The outcome of adding several files at once. */
+export type AddDocumentsResult = {
+	added: ProfileDocument[],
+	failed: RejectedFile[],
+};
+
+/**  An agent, built into ReMa or created by the user. */
+export type Agent = {
+	/**  `builtin:<slug>` or `custom:<number>`. */
+	id: string,
+	name: string,
+	description: string,
+	/**  The fixed instructions added to requests when the agent is selected. */
+	instructions: string,
+	/**  One of `AGENT_ICONS`. */
+	icon: string,
+	/**  Built-in agents cannot be edited or deleted; duplicate them instead. */
+	builtin: boolean,
+	/**  Custom agents: when last saved. */
+	updatedAt: number | null,
+};
+
+/**  What the user enters for a custom agent. */
+export type AgentInput = {
+	name: string,
+	description: string,
+	instructions: string,
+	icon: string,
+};
+
+/**  Agents were created, changed or deleted. */
+export type AgentsChanged = null;
+
 /**  Job data or research changed (ingestion, background details, research). */
 export type AnalyticsChanged = null;
 
@@ -211,6 +327,10 @@ export type ApplicationStatus =
 "needs_action" | 
 /**  A confirmed interview is coming up. */
 "upcoming_interview" | "rejected";
+
+export type ApprovalDecision = "allow" | 
+/**  Allow this tool for the rest of the conversation (until ReMa quits). */
+"allow_for_chat" | "deny";
 
 /**  What ReMa Auto Fill did. Nothing is ever submitted. */
 export type AutofillResult = {
@@ -297,7 +417,9 @@ export type ChatEvent =
 /**  New text appended to a streaming message. */
 { type: "delta"; conversationId: number; messageId: number; text: string } | 
 /**  The message reached a final state (complete, stopped or error). */
-{ type: "finished"; message: Message };
+{ type: "finished"; message: Message } | 
+/**  A tool call started, needs approval, or finished. */
+{ type: "activity"; conversationId: number; messageId: number; activity: ToolActivity };
 
 export type ClassCount = {
 	class: FrequencyClass,
@@ -350,6 +472,10 @@ export type Conversation = {
 	model: ModelRef,
 	/**  The user shares their Profile with the model in this conversation. */
 	profileContext: boolean,
+	/**  Agents selected for this conversation, in selection order. */
+	agentIds: string[],
+	/**  MCP servers made available in this conversation, in selection order. */
+	mcpServerIds: number[],
 	createdAt: number,
 	updatedAt: number,
 };
@@ -369,6 +495,20 @@ export type CoverageCounts = {
 	missing: number,
 	unknown: number,
 };
+
+/**  What the user enters for a credential. */
+export type CredentialInput = {
+	kind: CredentialKind | null,
+	title: string,
+	issuer: string,
+	issueDate: string,
+	expirationDate: string,
+	credentialId: string,
+	credentialUrl: string,
+	note: string,
+};
+
+export type CredentialKind = "degree" | "professional_certificate" | "course_certificate" | "training" | "license" | "badge" | "other";
 
 /**  A field the user defines, e.g. "Research profile" → URL. */
 export type CustomField = {
@@ -427,8 +567,14 @@ export type DatasetSummary = {
 /**  Progress of the background job-details reader for one job. */
 export type DetailsStatus = "pending" | "done" | "failed" | "skipped";
 
+/**
+ *  A safe, structured rendering of a Word document for the in-app viewer:
+ *  plain text blocks, never the document's own markup.
+ */
+export type DocumentBlock = { type: "heading"; level: number; text: string } | { type: "paragraph"; text: string } | { type: "listItem"; level: number; text: string } | { type: "table"; rows: string[][] };
+
 /**  File formats ReMa accepts. Text is extracted from all but images. */
-export type DocumentFormat = "pdf" | "docx" | "text" | "markdown" | "png" | "jpeg";
+export type DocumentFormat = "pdf" | "docx" | "text" | "markdown" | "png" | "jpeg" | "webp";
 
 export type DocumentKind = "cv" | "certificate" | "portfolio" | "other";
 
@@ -763,6 +909,111 @@ export type MatrixRow = {
 	cells: CellState[],
 };
 
+/**  Authentication for remote servers. */
+export type McpAuth = "none" | 
+/**  `Authorization: Bearer <token>`. */
+"bearer" | 
+/**  A custom header with a secret value, e.g. `X-API-Key`. */
+"header" | 
+/**  OAuth sign-in in the browser (MCP authorization). */
+"oauth";
+
+/**  MCP servers or their connections changed. */
+export type McpChanged = null;
+
+/**
+ *  An environment variable in the editor. `value: None` keeps the stored
+ *  value of an existing variable.
+ */
+export type McpEnvVar = {
+	name: string,
+	value: string | null,
+};
+
+/**  A configured server, as the interface sees it (no secret values). */
+export type McpServer = {
+	id: number,
+	name: string,
+	transport: McpTransport,
+	command: string,
+	args: string[],
+	/**  Environment variable names; their values are secret. */
+	envNames: string[],
+	cwd: string,
+	url: string,
+	auth: McpAuth,
+	headerName: string,
+	/**  A token or header value is stored (never shown). */
+	hasSecret: boolean,
+	enabled: boolean,
+	status: McpStatus,
+	createdAt: number,
+	updatedAt: number,
+};
+
+/**
+ *  What the add/edit form sends. Only the fields of `transport` (and
+ *  `auth`) are used; the rest are ignored.
+ */
+export type McpServerInput = {
+	name: string,
+	transport: McpTransport,
+	command: string,
+	args: string[],
+	env: McpEnvVar[],
+	cwd: string,
+	url: string,
+	auth: McpAuth,
+	headerName: string,
+	/**  Bearer token or header value. `None` keeps the stored one. */
+	secret: string | null,
+};
+
+export type McpState = 
+/**  Turned off in Settings: not offered in Chat, no process runs. */
+"disabled" | 
+/**  Enabled; ReMa connects when it is needed. */
+"disconnected" | "connecting" | "connected" | 
+/**  OAuth: the user has to sign in first. */
+"needs_sign_in" | "error";
+
+export type McpStatus = {
+	state: McpState,
+	/**  What went wrong, or what to do. */
+	message: string | null,
+	tools: McpToolInfo[],
+	/**  The protocol revision in use, e.g. "2026-07-28". */
+	protocolVersion: string | null,
+	/**  The server's own name and version, if it reported them. */
+	serverInfo: string | null,
+};
+
+/**  The result of "Test connection". */
+export type McpTestResult = {
+	ok: boolean,
+	message: string,
+	tools: McpToolInfo[],
+};
+
+/**  A tool the server offers. */
+export type McpToolInfo = {
+	name: string,
+	title: string | null,
+	description: string,
+	/**  The server says the tool only reads (it still is only a hint). */
+	readOnly: boolean,
+};
+
+/**
+ *  How ReMa talks to the server (the MCP specification's standard
+ *  transports).
+ */
+export type McpTransport = 
+/**  A local program ReMa starts; messages over its standard streams. */
+"stdio" | 
+/**  A remote server at an HTTPS URL (Streamable HTTP). */
+"http";
+
 export type Message = {
 	id: number,
 	conversationId: number,
@@ -772,6 +1023,8 @@ export type Message = {
 	error: string | null,
 	/**  For assistant messages: the model that produced it. */
 	model: ModelRef | null,
+	/**  Tools used while answering. */
+	activity: ToolActivity[],
 	createdAt: number,
 };
 
@@ -803,6 +1056,8 @@ export type ModelRef = {
 	modelId: string,
 };
 
+export type PageSize = "a4" | "letter";
+
 export type PipelineStatus = {
 	jobs: number,
 	runs: number,
@@ -813,6 +1068,85 @@ export type PipelineStatus = {
 	/**  The model that reads descriptions, if one is set up. */
 	model: string | null,
 };
+
+/**  Portfolio documents were created, changed or deleted. */
+export type PortfolioChanged = null;
+
+export type PortfolioContent = {
+	header: PortfolioHeader,
+	/**  In display order. */
+	sections: PortfolioSection[],
+};
+
+export type PortfolioDocument = {
+	id: number,
+	name: string,
+	templateId: string,
+	pageSize: PageSize,
+	/**  `#rrggbb`, or empty for the template's own color. */
+	accent: string,
+	content: PortfolioContent,
+	createdAt: number,
+	updatedAt: number,
+};
+
+/**
+ *  One item of a section. Fields are used by kind, for example
+ *  experience: title = role, subtitle = company; skills: title = group,
+ *  tags = skills; languages: title = language, subtitle = level.
+ */
+export type PortfolioEntry = {
+	id: string,
+	title: string,
+	subtitle: string,
+	location: string,
+	start: string,
+	end: string,
+	url: string,
+	/**  Multi-line; lines starting with "- " are shown as bullets. */
+	description: string,
+	tags: string[],
+};
+
+/**  Name and contact details at the top of the document. */
+export type PortfolioHeader = {
+	fullName: string,
+	/**  E.g. "Senior Data Engineer". */
+	headline: string,
+	email: string,
+	phone: string,
+	location: string,
+	website: string,
+	linkedin: string,
+	github: string,
+};
+
+/**  What the editor saves. */
+export type PortfolioInput = {
+	name: string,
+	templateId: string,
+	pageSize: PageSize,
+	accent: string,
+	content: PortfolioContent,
+};
+
+export type PortfolioSection = {
+	id: string,
+	kind: SectionKind,
+	title: string,
+	/**  Hidden sections keep their content but are not shown or exported. */
+	visible: boolean,
+	/**  Free text (summary and custom sections). */
+	text: string,
+	entries: PortfolioEntry[],
+};
+
+/**  How a new document starts. */
+export type PortfolioStart = 
+/**  Empty standard sections. */
+"blank" | 
+/**  A one-time copy of the Custom Profile and credentials. */
+"custom_profile";
 
 export type PriorityLevel = "high" | "medium" | "low";
 
@@ -843,6 +1177,27 @@ export type Profile = {
 export type ProfileChanged = null;
 
 /**
+ *  A degree, certificate, license or other career evidence. Everything but
+ *  the title is optional.
+ */
+export type ProfileCredential = {
+	id: number,
+	kind: CredentialKind,
+	title: string,
+	issuer: string,
+	/**  `YYYY`, `YYYY-MM` or `YYYY-MM-DD`; empty if unknown. */
+	issueDate: string,
+	expirationDate: string,
+	credentialId: string,
+	credentialUrl: string,
+	note: string,
+	/**  The attached file, if any. */
+	document: ProfileDocument | null,
+	createdAt: number,
+	updatedAt: number,
+};
+
+/**
  *  A file stored in ReMa's application data folder. The file itself never
  *  leaves Rust except when the user attaches it to an application form.
  */
@@ -857,6 +1212,8 @@ export type ProfileDocument = {
 	size: number,
 	/**  Readable text was extracted (it can be imported into the profile). */
 	hasText: boolean,
+	/**  The main CV: preferred when Profile context has to be shortened. */
+	isPrimary: boolean,
 	createdAt: number,
 	updatedAt: number,
 };
@@ -881,9 +1238,12 @@ export type ProfileLink = {
 };
 
 export type ProfileView = {
+	/**  The optional Custom Profile (structured fields). */
 	profile: Profile,
+	/**  Every stored file: CVs, credential files and other documents. */
 	documents: ProfileDocument[],
-	/**  When the profile was last saved; `None` if never. */
+	credentials: ProfileCredential[],
+	/**  When the Custom Profile was last saved; `None` if never. */
 	updatedAt: number | null,
 };
 
@@ -952,6 +1312,12 @@ export type RankedJob = {
 	/**  Search runs that found this job. */
 	appearances: number,
 	details: DetailsStatus,
+};
+
+/**  A file that could not be added, and why. */
+export type RejectedFile = {
+	name: string,
+	reason: string,
 };
 
 export type RequirementCategory = "technical_skills" | "programming_languages" | "frameworks" | "cloud_infrastructure" | "ai_ml" | "data_engineering" | "databases" | "professional_experience" | "industry_experience" | "education" | "certifications" | "languages" | "soft_skills" | "other";
@@ -1071,6 +1437,8 @@ export type ScopeKind =
 /**  Every stored job search (the default). */
 "all" | "searches" | "jobs";
 
+export type SectionKind = "summary" | "experience" | "projects" | "education" | "skills" | "languages" | "certifications" | "links" | "custom";
+
 export type SendMessageInput = {
 	/**  `None` starts a new conversation. */
 	conversationId: number | null,
@@ -1078,6 +1446,10 @@ export type SendMessageInput = {
 	model: ModelRef,
 	/**  Include the user's Profile (the composer's "Profile" toggle). */
 	useProfile: boolean,
+	/**  Selected agents, in selection order. */
+	agentIds: string[],
+	/**  MCP servers to make available, in selection order. */
+	mcpServerIds: number[],
 };
 
 export type SendMessageResult = {
@@ -1230,6 +1602,33 @@ export type TaskStatus =
 
 /**  Tasks or their executions changed (created, edited, ran, finished). */
 export type TasksChanged = null;
+
+/**
+ *  A tool call (or an unavailable server) while answering, shown with the
+ *  message.
+ */
+export type ToolActivity = {
+	/**  The model's call id (unique within the message). */
+	id: string,
+	serverId: number | null,
+	server: string,
+	tool: string,
+	status: ToolStatus,
+	/**  The arguments as compact JSON (shortened), shown before approval. */
+	arguments: string,
+	/**  What happened: a short result, an error or why it was denied. */
+	detail: string | null,
+	/**  The server marks the tool read-only (it ran without approval). */
+	readOnly: boolean,
+};
+
+export type ToolStatus = 
+/**  Waiting for the user to allow or deny the call. */
+"awaiting_approval" | "running" | "completed" | "failed" | 
+/**  The user denied it, or the answer was stopped first. */
+"denied" | 
+/**  A selected server could not be used for this answer. */
+"unavailable";
 
 export type Weekday = "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun";
 

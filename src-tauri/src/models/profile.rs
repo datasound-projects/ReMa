@@ -136,6 +136,7 @@ pub enum DocumentFormat {
     Markdown,
     Png,
     Jpeg,
+    Webp,
 }
 
 text_enum!(DocumentFormat {
@@ -145,6 +146,7 @@ text_enum!(DocumentFormat {
     Markdown => "markdown",
     Png => "png",
     Jpeg => "jpeg",
+    Webp => "webp",
 });
 
 impl DocumentFormat {
@@ -156,7 +158,12 @@ impl DocumentFormat {
             Self::Markdown => "md",
             Self::Png => "png",
             Self::Jpeg => "jpg",
+            Self::Webp => "webp",
         }
+    }
+
+    pub fn is_image(self) -> bool {
+        matches!(self, Self::Png | Self::Jpeg | Self::Webp)
     }
 
     pub fn mime(self) -> &'static str {
@@ -167,6 +174,7 @@ impl DocumentFormat {
             Self::Markdown => "text/markdown",
             Self::Png => "image/png",
             Self::Jpeg => "image/jpeg",
+            Self::Webp => "image/webp",
         }
     }
 }
@@ -186,17 +194,120 @@ pub struct ProfileDocument {
     pub size: i64,
     /// Readable text was extracted (it can be imported into the profile).
     pub has_text: bool,
+    /// The main CV: preferred when Profile context has to be shortened.
+    pub is_primary: bool,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialKind {
+    Degree,
+    ProfessionalCertificate,
+    CourseCertificate,
+    Training,
+    License,
+    Badge,
+    Other,
+}
+
+text_enum!(CredentialKind {
+    Degree => "degree",
+    ProfessionalCertificate => "professional_certificate",
+    CourseCertificate => "course_certificate",
+    Training => "training",
+    License => "license",
+    Badge => "badge",
+    Other => "other",
+});
+
+impl CredentialKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Degree => "Degree",
+            Self::ProfessionalCertificate => "Professional certificate",
+            Self::CourseCertificate => "Course certificate",
+            Self::Training => "Training",
+            Self::License => "License",
+            Self::Badge => "Badge",
+            Self::Other => "Credential",
+        }
+    }
+}
+
+/// A degree, certificate, license or other career evidence. Everything but
+/// the title is optional.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileCredential {
+    pub id: i64,
+    pub kind: CredentialKind,
+    pub title: String,
+    pub issuer: String,
+    /// `YYYY`, `YYYY-MM` or `YYYY-MM-DD`; empty if unknown.
+    pub issue_date: String,
+    pub expiration_date: String,
+    pub credential_id: String,
+    pub credential_url: String,
+    pub note: String,
+    /// The attached file, if any.
+    pub document: Option<ProfileDocument>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// What the user enters for a credential.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialInput {
+    pub kind: Option<CredentialKind>,
+    pub title: String,
+    pub issuer: String,
+    pub issue_date: String,
+    pub expiration_date: String,
+    pub credential_id: String,
+    pub credential_url: String,
+    pub note: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ProfileView {
+    /// The optional Custom Profile (structured fields).
     pub profile: Profile,
+    /// Every stored file: CVs, credential files and other documents.
     pub documents: Vec<ProfileDocument>,
-    /// When the profile was last saved; `None` if never.
+    pub credentials: Vec<ProfileCredential>,
+    /// When the Custom Profile was last saved; `None` if never.
     pub updated_at: Option<i64>,
+}
+
+/// A file that could not be added, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RejectedFile {
+    pub name: String,
+    pub reason: String,
+}
+
+/// The outcome of adding several files at once.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct AddDocumentsResult {
+    pub added: Vec<ProfileDocument>,
+    pub failed: Vec<RejectedFile>,
+}
+
+/// A safe, structured rendering of a Word document for the in-app viewer:
+/// plain text blocks, never the document's own markup.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum DocumentBlock {
+    Heading { level: u8, text: String },
+    Paragraph { text: String },
+    ListItem { level: u8, text: String },
+    Table { rows: Vec<Vec<String>> },
 }
 
 /// Profile details read from a document, for the user to review. Nothing is

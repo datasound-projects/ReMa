@@ -23,9 +23,10 @@ pub mod http;
 pub mod openai;
 pub mod sse;
 
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{fmt, future::Future, pin::Pin, sync::Arc};
 
 use reqwest::RequestBuilder;
+use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -47,12 +48,93 @@ pub struct Turn {
     pub content: String,
 }
 
+/// A tool the model may call during this request.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolSpec {
+    /// Unique within the request; `^[a-zA-Z0-9_-]{1,64}$` (every provider
+    /// accepts it).
+    pub name: String,
+    pub description: String,
+    /// JSON Schema of the arguments.
+    pub input_schema: Value,
+}
+
+/// A tool call the model made.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    /// The arguments; a string holds arguments that were not valid JSON.
+    pub arguments: Value,
+    /// Opaque provider data that must accompany the call when it is sent
+    /// back (Gemini's thought signatures).
+    pub provider_data: Option<Value>,
+}
+
+/// What a tool call returned, given back to the model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolOutput {
+    pub content: String,
+    pub is_error: bool,
+}
+
+impl ToolOutput {
+    pub fn error(message: impl Into<String>) -> Self {
+        Self {
+            content: message.into(),
+            is_error: true,
+        }
+    }
+}
+
+/// One step of tool use within an answer: the model's text and calls, and
+/// what the tools returned.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolRound {
+    pub text: String,
+    pub calls: Vec<ToolCall>,
+    pub outputs: Vec<ToolOutput>,
+}
+
+/// Runs the model's tool calls (for chat: MCP tools, with approvals).
+pub trait ToolExecutor: Send + Sync {
+    fn execute<'a>(&'a self, call: &'a ToolCall) -> BoxFuture<'a, ToolOutput>;
+}
+
+/// The tools of a request and who runs them.
+#[derive(Clone)]
+pub struct ToolBox {
+    pub specs: Vec<ToolSpec>,
+    pub executor: Arc<dyn ToolExecutor>,
+}
+
+impl fmt::Debug for ToolBox {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ToolBox")
+            .field("specs", &self.specs)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Most model calls in one answer when tools are used.
+pub const MAX_TOOL_ROUNDS: usize = 8;
+
 #[derive(Debug, Clone, Default)]
 pub struct ChatRequest {
     pub system: Option<String>,
     pub turns: Vec<Turn>,
     /// Output cap reported by the provider for this model, if known.
     pub max_output_tokens: Option<u32>,
+    /// Tools the model may call (none unless the user selected MCP servers).
+    pub tools: Option<ToolBox>,
+    /// Tool use so far in this answer, after `turns`.
+    pub rounds: Vec<ToolRound>,
+}
+
+impl ChatRequest {
+    pub fn tool_specs(&self) -> &[ToolSpec] {
+        self.tools.as_ref().map_or(&[], |t| t.specs.as_slice())
+    }
 }
 
 impl ChatRequest {
@@ -155,19 +237,92 @@ pub struct FetchedModel {
     pub recommended: bool,
 }
 
+/// Part of a tool call in a stream.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct ToolDelta {
+    /// Pieces with the same index belong to one call; `None` is a complete
+    /// call on its own.
+    pub index: Option<usize>,
+    pub id: Option<String>,
+    pub name: Option<String>,
+    /// JSON text (a fragment when the call streams in pieces).
+    pub arguments: String,
+    pub provider_data: Option<Value>,
+}
+
 /// What one stream event contributed.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct StreamPiece {
     pub text: Option<String>,
     pub finish: Option<Finish>,
     /// The provider signalled the end of the stream.
     pub done: bool,
+    pub tools: Vec<ToolDelta>,
+}
+
+/// Collects streamed tool-call pieces into calls.
+#[derive(Default)]
+struct CallCollector {
+    calls: Vec<(Option<usize>, ToolDelta)>,
+}
+
+impl CallCollector {
+    fn push(&mut self, delta: ToolDelta) {
+        if let Some(index) = delta.index {
+            if let Some((_, call)) = self.calls.iter_mut().find(|(i, _)| *i == Some(index)) {
+                if call.id.is_none() {
+                    call.id = delta.id;
+                }
+                if call.name.is_none() {
+                    call.name = delta.name;
+                }
+                call.arguments.push_str(&delta.arguments);
+                if delta.provider_data.is_some() {
+                    call.provider_data = delta.provider_data;
+                }
+                return;
+            }
+        }
+        self.calls.push((delta.index, delta));
+    }
+
+    fn finish(self) -> Vec<ToolCall> {
+        self.calls
+            .into_iter()
+            .enumerate()
+            .filter_map(|(n, (_, delta))| {
+                let name = delta.name.filter(|n| !n.is_empty())?;
+                let raw = delta.arguments.trim();
+                let arguments = if raw.is_empty() {
+                    Value::Object(Default::default())
+                } else {
+                    serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string()))
+                };
+                Some(ToolCall {
+                    id: delta
+                        .id
+                        .filter(|id| !id.is_empty())
+                        .unwrap_or_else(|| format!("call_{n}")),
+                    name,
+                    arguments,
+                    provider_data: delta.provider_data,
+                })
+            })
+            .collect()
+    }
 }
 
 impl StreamPiece {
     fn text(text: impl Into<String>) -> Self {
         Self {
             text: Some(text.into()),
+            ..Self::default()
+        }
+    }
+
+    fn tool(delta: ToolDelta) -> Self {
+        Self {
+            tools: vec![delta],
             ..Self::default()
         }
     }
@@ -253,45 +408,110 @@ impl LanguageModel for ProviderLanguageModel {
     ) -> BoxFuture<'a, AppResult<Finish>> {
         Box::pin(async move {
             if endpoint.connection == ConnectionMethod::ChatgptAccount {
+                // The Codex runtime runs the tool loop itself (dynamic tools).
                 return self
                     .codex()?
                     .stream_chat(model_id, request, cancel, on_delta)
                     .await;
             }
-            let secrets = endpoint.secrets();
-            let (http_request, parse): (RequestBuilder, fn(&SseEvent) -> AppResult<StreamPiece>) =
-                match endpoint.kind {
-                    ProviderKind::Openai | ProviderKind::OpenaiCompatible => (
-                        openai::chat_request(&self.http, endpoint, model_id, request),
-                        openai::parse_event,
-                    ),
-                    ProviderKind::Anthropic => (
-                        anthropic::chat_request(&self.http, endpoint, model_id, request),
-                        anthropic::parse_event,
-                    ),
-                    ProviderKind::Gemini => (
-                        gemini::chat_request(&self.http, endpoint, model_id, request),
-                        gemini::parse_event,
-                    ),
-                };
-            let Some(response) =
-                http::send(http_request, &cancel, &endpoint.name, &secrets).await?
-            else {
-                return Ok(Finish::Cancelled);
+            let Some(tools) = request.tools.as_ref() else {
+                return self
+                    .stream_once(endpoint, model_id, request, &cancel, on_delta)
+                    .await
+                    .map(|(finish, _)| finish);
             };
-            drive_stream(response, &cancel, on_delta, parse).await
+            // Tools: call the model, run the tools it asks for, and call it
+            // again with the results, until it answers without tools.
+            let mut request = request.clone();
+            let mut separate = false;
+            for _ in 0..=MAX_TOOL_ROUNDS {
+                let mut round_text = String::new();
+                let (finish, calls) = {
+                    let mut forward = |text: &str| {
+                        // A blank line between the text of successive steps.
+                        if separate && round_text.is_empty() && !text.trim().is_empty() {
+                            on_delta("\n\n");
+                        }
+                        round_text.push_str(text);
+                        on_delta(text);
+                    };
+                    self.stream_once(endpoint, model_id, &request, &cancel, &mut forward)
+                        .await?
+                };
+                separate |= !round_text.trim().is_empty();
+                if calls.is_empty() || finish != Finish::Complete {
+                    return Ok(finish);
+                }
+                if request.rounds.len() == MAX_TOOL_ROUNDS {
+                    return Err(AppError::provider(
+                        "The model kept calling tools without answering. Try a narrower request.",
+                    ));
+                }
+                let mut outputs = Vec::with_capacity(calls.len());
+                for call in &calls {
+                    if cancel.is_cancelled() {
+                        return Ok(Finish::Cancelled);
+                    }
+                    outputs.push(tools.executor.execute(call).await);
+                }
+                if cancel.is_cancelled() {
+                    return Ok(Finish::Cancelled);
+                }
+                request.rounds.push(ToolRound {
+                    text: round_text,
+                    calls,
+                    outputs,
+                });
+            }
+            Err(AppError::provider("Too many tool calls in one answer."))
         })
     }
 }
 
-/// Reads a provider stream, forwarding text and tracking how it finished.
+impl ProviderLanguageModel {
+    /// One HTTPS call to the model: streams its text and returns how it
+    /// finished and the tools it called.
+    async fn stream_once(
+        &self,
+        endpoint: &Endpoint,
+        model_id: &str,
+        request: &ChatRequest,
+        cancel: &CancellationToken,
+        on_delta: DeltaSink<'_>,
+    ) -> AppResult<(Finish, Vec<ToolCall>)> {
+        let secrets = endpoint.secrets();
+        let (http_request, parse): (RequestBuilder, fn(&SseEvent) -> AppResult<StreamPiece>) =
+            match endpoint.kind {
+                ProviderKind::Openai | ProviderKind::OpenaiCompatible => (
+                    openai::chat_request(&self.http, endpoint, model_id, request),
+                    openai::parse_event,
+                ),
+                ProviderKind::Anthropic => (
+                    anthropic::chat_request(&self.http, endpoint, model_id, request),
+                    anthropic::parse_event,
+                ),
+                ProviderKind::Gemini => (
+                    gemini::chat_request(&self.http, endpoint, model_id, request),
+                    gemini::parse_event,
+                ),
+            };
+        let Some(response) = http::send(http_request, cancel, &endpoint.name, &secrets).await?
+        else {
+            return Ok((Finish::Cancelled, Vec::new()));
+        };
+        drive_stream(response, cancel, on_delta, parse).await
+    }
+}
+
+/// Reads a provider stream, forwarding text and collecting tool calls.
 async fn drive_stream(
     response: reqwest::Response,
     cancel: &CancellationToken,
     on_delta: DeltaSink<'_>,
     parse: fn(&SseEvent) -> AppResult<StreamPiece>,
-) -> AppResult<Finish> {
+) -> AppResult<(Finish, Vec<ToolCall>)> {
     let mut finish = Finish::Complete;
+    let mut calls = CallCollector::default();
     let end = read_sse(response, cancel, |event| {
         let piece = parse(&event)?;
         if let Some(text) = piece.text.as_deref().filter(|t| !t.is_empty()) {
@@ -299,6 +519,9 @@ async fn drive_stream(
         }
         if let Some(reason) = piece.finish {
             finish = reason;
+        }
+        for delta in piece.tools {
+            calls.push(delta);
         }
         Ok(if piece.done {
             Flow::Stop
@@ -308,8 +531,8 @@ async fn drive_stream(
     })
     .await?;
     Ok(match end {
-        StreamEnd::Cancelled => Finish::Cancelled,
-        StreamEnd::Completed => finish,
+        StreamEnd::Cancelled => (Finish::Cancelled, Vec::new()),
+        StreamEnd::Completed => (finish, calls.finish()),
     })
 }
 

@@ -1,4 +1,9 @@
-//! Finding the official command-line runtimes on this computer.
+//! Finding the official command-line runtimes.
+//!
+//! ReMa ships Codex and the Anthropic CLI inside its app bundle (next to its
+//! executable; development builds use `src-tauri/runtimes/`, filled by
+//! `pnpm runtimes`). A copy installed on the computer is used too, and the
+//! newest version wins, so updating either one is enough.
 //!
 //! Apps opened from the Finder, the Dock or the Start menu do not inherit
 //! the terminal's `PATH`, so besides `PATH` ReMa looks in the folders the
@@ -39,16 +44,129 @@ impl Located {
     }
 }
 
-/// Finds `name`: `override_var` (an explicit path) first, then `PATH`, the
-/// usual install folders and the login shell.
-pub async fn find(name: &str, override_var: &str) -> Option<Located> {
+/// A runtime version, e.g. `[0, 157, 1]`.
+pub type Version = [u64; 3];
+
+/// Finds `name`. An explicit path in `override_var` is used as is.
+/// Otherwise the copy shipped with ReMa and one installed on the computer
+/// (`PATH`, the usual install folders, the login shell) are compared, and
+/// the newest wins; ReMa's own copy wins a tie.
+pub async fn find(name: &str, override_var: &str) -> Option<(Located, Option<Version>)> {
     if let Some(path) = env::var_os(override_var).map(PathBuf::from) {
-        return is_executable(&path).then(|| Located::at(path));
+        if !is_executable(&path) {
+            return None;
+        }
+        let located = Located::at(path);
+        let version = version(&located).await;
+        return Some((located, version));
     }
+    let mut candidates: Vec<PathBuf> = bundled(name);
+    let installed = match search(name, path_dirs().into_iter().chain(install_dirs())) {
+        Some(path) => Some(path),
+        None => login_shell_lookup(name).await,
+    };
+    candidates.extend(installed);
+    candidates.dedup_by(|a, b| same_file(a, b));
+
+    let mut best: Option<(Located, Option<Version>)> = None;
+    for path in candidates {
+        let located = Located::at(path);
+        let version = version(&located).await;
+        let newer = match &best {
+            None => true,
+            Some((_, current)) => version > *current,
+        };
+        if newer {
+            best = Some((located, version));
+        }
+    }
+    best
+}
+
+/// Finds an installed program by name (`PATH`, the usual install folders,
+/// the login shell), e.g. the command of a local MCP server.
+pub async fn which(name: &str) -> Option<Located> {
     if let Some(path) = search(name, path_dirs().into_iter().chain(install_dirs())) {
         return Some(Located::at(path));
     }
     login_shell_lookup(name).await.map(Located::at)
+}
+
+/// The inherited `PATH` plus the usual install folders, for programs that
+/// start other programs (`npx` starts `node`).
+pub fn extended_path(first: &[PathBuf]) -> std::ffi::OsString {
+    let dirs: Vec<PathBuf> = first
+        .iter()
+        .cloned()
+        .chain(path_dirs())
+        .chain(install_dirs().into_iter().filter(|d| d.is_dir()))
+        .collect();
+    env::join_paths(dirs).unwrap_or_default()
+}
+
+/// Whether `path` is an executable file.
+pub fn is_executable_file(path: &Path) -> bool {
+    is_executable(path)
+}
+
+/// Copies shipped with ReMa: Tauri places bundled runtimes next to the app's
+/// executable; development builds use the ones `pnpm runtimes` fetched.
+fn bundled(name: &str) -> Vec<PathBuf> {
+    let exe = if cfg!(windows) { ".exe" } else { "" };
+    let mut paths = Vec::new();
+    if let Some(dir) = env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf))
+    {
+        paths.push(dir.join(format!("{name}{exe}")));
+    }
+    if cfg!(debug_assertions) {
+        paths.push(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("runtimes")
+                .join(format!("{name}-{}{exe}", env!("REMA_TARGET_TRIPLE"))),
+        );
+    }
+    paths.into_iter().filter(|p| is_executable(p)).collect()
+}
+
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+/// Asks the runtime for its version (`codex-cli 0.157.1`, `ant version
+/// 1.35.0`). `None` if it does not answer in time or prints no version.
+pub async fn version(located: &Located) -> Option<Version> {
+    let mut command = tokio::process::Command::new(&located.path);
+    command
+        .arg("--version")
+        .env("PATH", located.search_path())
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let output = tokio::time::timeout(Duration::from_secs(20), command.output())
+        .await
+        .ok()?
+        .ok()?;
+    parse_version(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// The last `x.y.z` in the output; a leading `v` and pre-release or build
+/// suffixes are ignored.
+pub fn parse_version(text: &str) -> Option<Version> {
+    text.split_whitespace().rev().find_map(|token| {
+        let token = token.trim_start_matches('v');
+        let mut parts = token.split(['.', '-', '+']).map(|p| p.parse::<u64>().ok());
+        Some([parts.next()??, parts.next()??, parts.next()??])
+    })
 }
 
 fn path_dirs() -> Vec<PathBuf> {
@@ -224,6 +342,36 @@ mod tests {
         assert_eq!(dirs.len(), 3);
         assert!(dirs[0].ends_with("v22.3.0/bin"));
         assert!(dirs[2].ends_with("v18.20.1/bin"));
+    }
+
+    #[test]
+    fn reads_versions_from_runtime_output() {
+        assert_eq!(parse_version("codex-cli 0.157.1\n"), Some([0, 157, 1]));
+        assert_eq!(parse_version("ant version 1.35.0"), Some([1, 35, 0]));
+        assert_eq!(parse_version("tool v2.0.3-beta.1"), Some([2, 0, 3]));
+        assert_eq!(parse_version("no version here"), None);
+        assert!(Some([0, 158, 0]) > Some([0, 157, 9]));
+        assert!(
+            Some([0, 1, 0]) > None,
+            "a known version beats an unknown one"
+        );
+    }
+
+    #[tokio::test]
+    async fn reads_the_version_of_each_copy() {
+        let (old, new) = (temp_dir(), temp_dir());
+        let script = |dir: &Path, version: &str| {
+            use std::os::unix::fs::PermissionsExt;
+            let path = dir.join("codex");
+            std::fs::write(&path, format!("#!/bin/sh\necho codex-cli {version}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        let older = script(&old, "0.150.0");
+        let newer = script(&new, "0.160.2");
+        let located = Located::at(newer.clone());
+        assert_eq!(version(&located).await, Some([0, 160, 2]));
+        assert_eq!(version(&Located::at(older)).await, Some([0, 150, 0]));
     }
 
     #[test]

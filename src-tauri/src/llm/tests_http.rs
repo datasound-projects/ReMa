@@ -83,6 +83,7 @@ fn request() -> ChatRequest {
             content: "Hi".into(),
         }],
         max_output_tokens: None,
+        ..ChatRequest::default()
     }
 }
 

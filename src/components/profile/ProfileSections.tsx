@@ -94,7 +94,7 @@ export function PersonalSection({ profile, update }: { profile: Profile; update:
 
 export function ProfessionalSection({ profile, update }: { profile: Profile; update: Update }) {
   return (
-    <Section id={SECTION_IDS.professional} title="Professional profile" hint="Your headline, summary and skills.">
+    <Section id={SECTION_IDS.professional} title="Professional profile" hint="Your headline and a short summary.">
       <Field
         label="Professional title"
         placeholder="e.g. Data Engineer"
@@ -110,15 +110,19 @@ export function ProfessionalSection({ profile, update }: { profile: Profile; upd
           onChange={(e) => update({ summary: e.target.value })}
         />
       </label>
-      <div className="field">
-        <span className="field__label">Skills</span>
-        <ChipInput
-          label="Add a skill"
-          placeholder="Type a skill and press Enter"
-          values={profile.skills}
-          onChange={(skills) => update({ skills })}
-        />
-      </div>
+    </Section>
+  );
+}
+
+export function SkillsSection({ profile, update }: { profile: Profile; update: Update }) {
+  return (
+    <Section id={SECTION_IDS.skills} title="Skills" hint="Tools, methods and strengths. Analytics compares them with job requirements.">
+      <ChipInput
+        label="Add a skill"
+        placeholder="Type a skill and press Enter"
+        values={profile.skills}
+        onChange={(skills) => update({ skills })}
+      />
     </Section>
   );
 }

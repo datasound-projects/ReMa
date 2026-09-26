@@ -1,12 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+import { EMPTY_SELECTION, type ChatSelection } from '../lib/chatSelection';
+import { withActivity } from '../lib/toolActivity';
 import {
   getConversation,
   retryMessage,
   sendMessage,
   stopGeneration,
   type ChatEvent,
+  type Conversation,
   type Message,
+  type ToolActivity,
 } from '../services/chatService';
 import { backendEvents } from '../services/events';
 import { toApiError, type ApiError } from '../services/ipc';
@@ -16,13 +20,19 @@ import { useBackendEvent } from './useBackendEvent';
 /** Stream updates that arrived before their message was known locally. */
 interface Pending {
   text: string;
+  activity: ToolActivity[];
   final?: Message;
 }
+
+
+const selectionOf = (c: Conversation): ChatSelection => ({ agentIds: c.agentIds, mcpServerIds: c.mcpServerIds });
 
 interface ChatState {
   conversationId: number | null;
   /** The conversation shares the user's Profile with the model. */
   profileContext: boolean;
+  /** Agents and MCP servers stored for the conversation. */
+  selection: ChatSelection;
   messages: Message[];
   loading: boolean;
   error: ApiError | null;
@@ -31,6 +41,7 @@ interface ChatState {
 const initial = (conversationId: number | null): ChatState => ({
   conversationId,
   profileContext: false,
+  selection: EMPTY_SELECTION,
   messages: [],
   loading: conversationId !== null,
   error: null,
@@ -68,6 +79,7 @@ export function useChat(conversationId: number | null, onCreated: (id: number) =
         setChat({
           conversationId,
           profileContext: detail.conversation.profileContext,
+          selection: selectionOf(detail.conversation),
           messages: detail.messages,
           loading: false,
           error: null,
@@ -90,15 +102,22 @@ export function useChat(conversationId: number | null, onCreated: (id: number) =
     const update = pending.current.get(message.id);
     if (!update) return message;
     pending.current.delete(message.id);
-    return update.final ?? { ...message, content: message.content + update.text };
+    return (
+      update.final ?? {
+        ...message,
+        content: message.content + update.text,
+        activity: update.activity.reduce(withActivity, message.activity),
+      }
+    );
   }, []);
 
   useBackendEvent(backendEvents.chatEvent, (event: ChatEvent) => {
-    const id = event.type === 'delta' ? event.messageId : event.message.id;
+    const id = event.type === 'finished' ? event.message.id : event.messageId;
     setChat((c) => {
       if (!c.messages.some((m) => m.id === id)) {
-        const entry = pending.current.get(id) ?? { text: '' };
+        const entry = pending.current.get(id) ?? { text: '', activity: [] };
         if (event.type === 'delta') entry.text += event.text;
+        else if (event.type === 'activity') entry.activity.push(event.activity);
         else entry.final = event.message;
         pending.current.set(id, entry);
         return c;
@@ -107,21 +126,36 @@ export function useChat(conversationId: number | null, onCreated: (id: number) =
         ...c,
         messages: c.messages.map((m) => {
           if (m.id !== id) return m;
-          return event.type === 'delta' ? { ...m, content: m.content + event.text } : event.message;
+          switch (event.type) {
+            case 'delta':
+              return { ...m, content: m.content + event.text };
+            case 'activity':
+              return { ...m, activity: withActivity(m.activity, event.activity) };
+            case 'finished':
+              return event.message;
+          }
         }),
       };
     });
   });
 
   const send = useCallback(
-    async (content: string, model: ModelRef, useProfile: boolean) => {
-      const result = await sendMessage({ conversationId, content, model, useProfile });
+    async (content: string, model: ModelRef, useProfile: boolean, selection: ChatSelection) => {
+      const result = await sendMessage({
+        conversationId,
+        content,
+        model,
+        useProfile,
+        agentIds: selection.agentIds,
+        mcpServerIds: selection.mcpServerIds,
+      });
       const added = [result.userMessage, applyPending(result.assistantMessage)];
       loadedId.current = result.conversation.id;
       if (conversationId === null) {
         setChat({
           conversationId: result.conversation.id,
           profileContext: result.conversation.profileContext,
+          selection: selectionOf(result.conversation),
           messages: added,
           loading: false,
           error: null,
@@ -131,6 +165,7 @@ export function useChat(conversationId: number | null, onCreated: (id: number) =
         setChat((c) => ({
           ...c,
           profileContext: result.conversation.profileContext,
+          selection: selectionOf(result.conversation),
           messages: [...c.messages, ...added],
         }));
       }
@@ -145,7 +180,7 @@ export function useChat(conversationId: number | null, onCreated: (id: number) =
     pending.current.delete(messageId);
     updateMessages((messages) =>
       messages.map((m) =>
-        m.id === messageId ? { ...m, content: '', status: 'streaming', error: null, model } : m,
+        m.id === messageId ? { ...m, content: '', status: 'streaming', error: null, model, activity: [] } : m,
       ),
     );
     try {
@@ -168,6 +203,7 @@ export function useChat(conversationId: number | null, onCreated: (id: number) =
     loading: chat.loading,
     loadError: chat.error,
     profileContext: chat.conversationId === conversationId && chat.profileContext,
+    selection: chat.conversationId === conversationId ? chat.selection : EMPTY_SELECTION,
     send,
     stop,
     retry,

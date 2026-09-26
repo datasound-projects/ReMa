@@ -9,10 +9,13 @@ use tauri::AppHandle;
 use tauri_specta::Event;
 
 use crate::models::{
+    agent::AgentsChanged,
     analytics::AnalyticsChanged,
     browser::{BrowserChanged, BrowserStatus},
     chat::{ChatEvent, ConversationsChanged},
     google::GoogleChanged,
+    mcp::McpChanged,
+    portfolio::PortfolioChanged,
     profile::ProfileChanged,
     provider::ProvidersChanged,
     task::TasksChanged,
@@ -27,6 +30,9 @@ pub trait EventSink: Send + Sync {
     fn profile_changed(&self);
     fn browser_changed(&self, status: BrowserStatus);
     fn analytics_changed(&self);
+    fn portfolio_changed(&self);
+    fn agents_changed(&self);
+    fn mcp_changed(&self);
 }
 
 pub struct TauriEvents(pub AppHandle);
@@ -64,6 +70,18 @@ impl EventSink for TauriEvents {
     fn analytics_changed(&self) {
         let _ = AnalyticsChanged.emit(&self.0);
     }
+
+    fn portfolio_changed(&self) {
+        let _ = PortfolioChanged.emit(&self.0);
+    }
+
+    fn agents_changed(&self) {
+        let _ = AgentsChanged.emit(&self.0);
+    }
+
+    fn mcp_changed(&self) {
+        let _ = McpChanged.emit(&self.0);
+    }
 }
 
 /// Collects events for assertions in tests.
@@ -77,6 +95,9 @@ pub struct RecordingEvents {
     pub profile: Mutex<usize>,
     pub browser: Mutex<Vec<BrowserStatus>>,
     pub analytics: Mutex<usize>,
+    pub portfolio: Mutex<usize>,
+    pub agents: Mutex<usize>,
+    pub mcp: Mutex<usize>,
 }
 
 impl EventSink for RecordingEvents {
@@ -110,5 +131,17 @@ impl EventSink for RecordingEvents {
 
     fn analytics_changed(&self) {
         *self.analytics.lock().unwrap() += 1;
+    }
+
+    fn portfolio_changed(&self) {
+        *self.portfolio.lock().unwrap() += 1;
+    }
+
+    fn agents_changed(&self) {
+        *self.agents.lock().unwrap() += 1;
+    }
+
+    fn mcp_changed(&self) {
+        *self.mcp.lock().unwrap() += 1;
     }
 }

@@ -1,11 +1,17 @@
 import { createContext, useContext } from 'react';
 
+/** The three independent parts of the Profile page. */
+export type ProfileSection = 'documents' | 'custom' | 'portfolio';
+
 /** What the main area shows. */
 export type View =
-  | { page: 'chat'; conversationId: number | null }
+  | { page: 'chat'; conversationId: number | null; agentIds?: string[] }
+  | { page: 'agents' }
   | { page: 'tasks' }
-  | { page: 'profile' }
-  | { page: 'settings' };
+  /** `portfolioId`: the Portfolio Studio document open in the editor. */
+  | { page: 'profile'; section?: ProfileSection; portfolioId?: number | null }
+  /** `focus` scrolls to a section (e.g. MCP from the chat's + menu). */
+  | { page: 'settings'; focus?: 'mcp' };
 
 export type PageId = View['page'];
 

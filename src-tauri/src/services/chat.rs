@@ -13,17 +13,21 @@ use std::{
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    db::conversations::{self as repo, NewMessage},
+    db::{
+        agents as agents_repo,
+        conversations::{self as repo, NewMessage},
+        mcp as mcp_repo,
+    },
     error::{AppError, AppResult},
     llm::{ChatRequest, Endpoint, Finish, Turn},
     models::{
         chat::{
-            ChatEvent, Conversation, ConversationDetail, Message, MessageRole, MessageStatus,
-            SendMessageInput, SendMessageResult,
+            ApprovalDecision, ChatEvent, Conversation, ConversationDetail, Message, MessageRole,
+            MessageStatus, SendMessageInput, SendMessageResult, ToolActivity,
         },
         provider::ModelRef,
     },
-    services::{profile_context, providers},
+    services::{agents, chat_tools::ChatTools, mcp, profile_context, providers},
     state::AppState,
     time::now_ms,
 };
@@ -39,6 +43,8 @@ struct Active {
     conversation_id: i64,
     cancel: CancellationToken,
     content: String,
+    /// Tool calls so far, by id (latest state).
+    activity: Vec<ToolActivity>,
 }
 
 impl Generations {
@@ -50,6 +56,7 @@ impl Generations {
                 conversation_id,
                 cancel: cancel.clone(),
                 content: String::new(),
+                activity: Vec::new(),
             },
         );
         cancel
@@ -61,22 +68,32 @@ impl Generations {
         }
     }
 
-    fn finish(&self, message_id: i64) -> String {
+    /// Records the latest state of a tool call.
+    pub fn record_activity(&self, message_id: i64, activity: ToolActivity) {
+        if let Some(active) = self.0.lock().unwrap().get_mut(&message_id) {
+            match active.activity.iter_mut().find(|a| a.id == activity.id) {
+                Some(existing) => *existing = activity,
+                None => active.activity.push(activity),
+            }
+        }
+    }
+
+    fn finish(&self, message_id: i64) -> (String, Vec<ToolActivity>) {
         self.0
             .lock()
             .unwrap()
             .remove(&message_id)
-            .map(|active| active.content)
+            .map(|active| (active.content, active.activity))
             .unwrap_or_default()
     }
 
-    /// Partial text of a streaming message.
-    fn snapshot(&self, message_id: i64) -> Option<String> {
+    /// Partial text and tool activity of a streaming message.
+    fn snapshot(&self, message_id: i64) -> Option<(String, Vec<ToolActivity>)> {
         self.0
             .lock()
             .unwrap()
             .get(&message_id)
-            .map(|active| active.content.clone())
+            .map(|active| (active.content.clone(), active.activity.clone()))
     }
 
     fn is_active(&self, message_id: i64) -> bool {
@@ -122,8 +139,9 @@ pub fn get_conversation(state: &AppState, id: i64) -> AppResult<ConversationDeta
         .iter_mut()
         .filter(|m| m.status == MessageStatus::Streaming)
     {
-        if let Some(partial) = state.generations.snapshot(message.id) {
+        if let Some((partial, activity)) = state.generations.snapshot(message.id) {
             message.content = partial;
+            message.activity = activity;
         }
     }
     Ok(ConversationDetail {
@@ -145,6 +163,16 @@ pub async fn send_message(
     }
     // Fail fast (before storing anything) if the model cannot be reached.
     let endpoint = providers::resolve_endpoint(state, &input.model.provider_id).await?;
+    // Selected agents must exist; MCP servers that are turned off are dropped
+    // (never exposed to the model).
+    let agent_ids: Vec<String> = agents::resolve(state, &input.agent_ids)?
+        .into_iter()
+        .map(|a| a.id)
+        .collect();
+    let mcp_server_ids: Vec<i64> = mcp::enabled_selection(state, &input.mcp_server_ids)?
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
 
     let now = now_ms();
     let model = input.model.clone();
@@ -165,6 +193,8 @@ pub async fn send_message(
             None => repo::create(&tx, &make_title(content), &model, now)?,
         };
         repo::set_profile_context(&tx, conversation.id, input.use_profile)?;
+        agents_repo::set_conversation_agents(&tx, conversation.id, &agent_ids)?;
+        mcp_repo::set_conversation_servers(&tx, conversation.id, &mcp_server_ids)?;
         let conversation = repo::get(&tx, conversation.id)?;
         let user_message = repo::insert_message(
             &tx,
@@ -199,6 +229,35 @@ pub async fn send_message(
         user_message,
         assistant_message,
     })
+}
+
+/// Stores the agents and MCP servers selected in a conversation's + menu,
+/// so they are still selected when the user comes back to it.
+pub fn set_selections(
+    state: &AppState,
+    conversation_id: i64,
+    agent_ids: &[String],
+    mcp_server_ids: &[i64],
+) -> AppResult<Conversation> {
+    let agent_ids: Vec<String> = agents::resolve(state, agent_ids)?
+        .into_iter()
+        .map(|a| a.id)
+        .collect();
+    let mcp_server_ids: Vec<i64> = mcp::enabled_selection(state, mcp_server_ids)?
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
+    let conversation = state.db.call(|conn| {
+        let tx = conn.transaction()?;
+        repo::get(&tx, conversation_id)?;
+        agents_repo::set_conversation_agents(&tx, conversation_id, &agent_ids)?;
+        mcp_repo::set_conversation_servers(&tx, conversation_id, &mcp_server_ids)?;
+        let conversation = repo::get(&tx, conversation_id)?;
+        tx.commit()?;
+        Ok(conversation)
+    })?;
+    state.events.conversations_changed();
+    Ok(conversation)
 }
 
 /// Generates the last assistant message of a conversation again.
@@ -237,6 +296,16 @@ pub fn stop(state: &AppState, message_id: i64) {
     state.generations.cancel(message_id);
 }
 
+/// The user's answer to a tool approval request.
+pub fn respond_to_tool(
+    state: &AppState,
+    message_id: i64,
+    call_id: &str,
+    decision: ApprovalDecision,
+) -> AppResult<()> {
+    state.approvals.respond(message_id, call_id, decision)
+}
+
 pub fn delete_conversation(state: &AppState, id: i64) -> AppResult<()> {
     state.generations.cancel_conversation(id);
     state.db.call(|c| repo::delete(c, id))?;
@@ -270,6 +339,19 @@ pub fn make_title(content: &str) -> String {
     title
 }
 
+/// The selected agents' instructions, after the base system prompt.
+pub fn with_agents(
+    state: &AppState,
+    mut system: String,
+    agent_ids: &[String],
+) -> AppResult<String> {
+    if let Some(instructions) = agents::compose(&agents::resolve(state, agent_ids)?) {
+        system.push_str("\n\n");
+        system.push_str(&instructions);
+    }
+    Ok(system)
+}
+
 /// Appends the Profile Context to a system prompt when the user turned it
 /// on. Every provider receives the same text.
 pub fn with_profile(state: &AppState, mut system: String, use_profile: bool) -> AppResult<String> {
@@ -277,11 +359,11 @@ pub fn with_profile(state: &AppState, mut system: String, use_profile: bool) -> 
         match profile_context::load(state)? {
             Some(context) => {
                 system.push_str("\n\n");
-                system.push_str(&context);
+                system.push_str(&context.prompt);
             }
             None => system.push_str(
                 "\n\nThe user turned on their ReMa Profile, but it is empty. If personal \
-                 details matter, suggest filling in the Profile page.",
+                 details matter, suggest adding a CV or details on the Profile page.",
             ),
         }
     }
@@ -330,12 +412,41 @@ async fn generate(
                 repo::list_messages(c, conversation_id)?,
             ))
         })?;
-        let request = ChatRequest {
-            system: Some(with_profile(
+        // Base prompt, then agents (selection order), then Profile context.
+        let system = with_agents(state, system_prompt(now_ms()), &conversation.agent_ids)?;
+        let mut system = with_profile(state, system, conversation.profile_context)?;
+        let (tools, notices) = if conversation.mcp_server_ids.is_empty() {
+            (None, Vec::new())
+        } else {
+            ChatTools::prepare(
                 state,
-                system_prompt(now_ms()),
-                conversation.profile_context,
-            )?),
+                conversation_id,
+                message_id,
+                &conversation.mcp_server_ids,
+                cancel.clone(),
+            )
+            .await?
+        };
+        for notice in notices {
+            state
+                .generations
+                .record_activity(message_id, notice.clone());
+            state.events.chat(ChatEvent::Activity {
+                conversation_id,
+                message_id,
+                activity: notice,
+            });
+        }
+        if tools.is_some() {
+            system.push_str(
+                "\n\nTools from the user's MCP servers are available. Use them when they help \
+                 answer; say which tool a fact came from. Calls that could change something \
+                 wait for the user's approval; if one is declined, continue without it.",
+            );
+        }
+        let request = ChatRequest {
+            system: Some(system),
+            tools,
             turns: history
                 .into_iter()
                 .filter(|m| m.id < message_id)
@@ -346,6 +457,7 @@ async fn generate(
                 })
                 .collect(),
             max_output_tokens: providers::max_output_tokens(state, &model)?,
+            rounds: Vec::new(),
         };
         let generations = state.generations.clone();
         let events = state.events.clone();
@@ -364,7 +476,7 @@ async fn generate(
     }
     .await;
 
-    let content = state.generations.finish(message_id);
+    let (content, activity) = state.generations.finish(message_id);
     let (status, error) = match outcome {
         Ok(Finish::Cancelled) => (MessageStatus::Stopped, None),
         Ok(Finish::Refused) if content.trim().is_empty() => (
@@ -380,7 +492,8 @@ async fn generate(
     };
 
     let saved = state.db.call(|c| {
-        let message = repo::finish_message(c, message_id, &content, status, error.as_deref())?;
+        let message =
+            repo::finish_message(c, message_id, &content, status, error.as_deref(), &activity)?;
         repo::touch(c, conversation_id, &model, now_ms())?;
         Ok(message)
     });
@@ -437,6 +550,8 @@ mod tests {
             content: content.into(),
             model: model(),
             use_profile: false,
+            agent_ids: Vec::new(),
+            mcp_server_ids: Vec::new(),
         }
     }
 
@@ -614,6 +729,8 @@ mod tests {
                 model_id: "x".into(),
             },
             use_profile: false,
+            agent_ids: Vec::new(),
+            mcp_server_ids: Vec::new(),
         };
         assert!(matches!(
             send_message(&state, unknown).await,
@@ -646,5 +763,280 @@ mod tests {
         let long = "word ".repeat(40);
         let title = make_title(&long);
         assert!(title.ends_with('…') && title.chars().count() <= TITLE_CHARS + 1);
+    }
+
+    // ── Agents, Profile sources and MCP tools ───────────────────────
+
+    #[tokio::test]
+    async fn agent_instructions_are_sent_once_in_selection_order_and_only_when_selected() {
+        let (state, _, llm) = setup(FakeLanguageModel::replying(&["ok"])).await;
+        let system_of = |i: usize| {
+            llm.requests.lock().unwrap()[i]
+                .1
+                .system
+                .clone()
+                .unwrap_or_default()
+        };
+
+        // No agent: no agent instructions.
+        let plain = send_message(&state, send(None, "Hi")).await.unwrap();
+        wait_until_done(&state, plain.assistant_message.id).await;
+        assert!(!system_of(0).contains("<agent "));
+
+        // Two agents (and a duplicate) in this order; Profile stays off.
+        let custom = crate::services::agents::save(
+            &state,
+            None,
+            crate::models::agent::AgentInput {
+                name: "Recruiter Voice".into(),
+                instructions: "Write like a friendly recruiter.".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut input = send(None, "Tailor my CV");
+        input.agent_ids = vec![
+            custom.id.clone(),
+            "builtin:cv-tailoring".into(),
+            custom.id.clone(),
+        ];
+        let sent = send_message(&state, input).await.unwrap();
+        assert_eq!(
+            sent.conversation.agent_ids,
+            [custom.id.clone(), "builtin:cv-tailoring".to_string()]
+        );
+        assert!(
+            !sent.conversation.profile_context,
+            "agents never turn Profile on"
+        );
+        wait_until_done(&state, sent.assistant_message.id).await;
+        let system = system_of(1);
+        assert_eq!(
+            system.matches("Write like a friendly recruiter.").count(),
+            1
+        );
+        assert_eq!(system.matches("<agent name=").count(), 2);
+        assert!(
+            system.find("Recruiter Voice").unwrap() < system.find("CV Tailoring Agent").unwrap()
+        );
+        assert!(!system.contains("<user_profile>"));
+
+        // The selection stays with the conversation (Retry uses it too).
+        let detail = get_conversation(&state, sent.conversation.id).unwrap();
+        assert_eq!(detail.conversation.agent_ids.len(), 2);
+
+        // Unknown agents are refused before anything is stored.
+        let mut bad = send(None, "x");
+        bad.agent_ids = vec!["custom:999".into()];
+        assert!(send_message(&state, bad).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn profile_on_includes_only_the_sources_that_exist() {
+        let (state, _, llm) = setup(FakeLanguageModel::replying(&["ok"])).await;
+        let source = state.data_dir.join("Ana CV.pdf");
+        std::fs::write(
+            &source,
+            crate::services::documents::samples::pdf(&["Ana Tester", "Kubernetes platform lead"]),
+        )
+        .unwrap();
+        crate::services::profile::add_document(&state, &source, None)
+            .await
+            .unwrap();
+
+        let mut input = send(None, "What am I good at?");
+        input.use_profile = true;
+        let sent = send_message(&state, input).await.unwrap();
+        wait_until_done(&state, sent.assistant_message.id).await;
+        let system = llm.requests.lock().unwrap()[0].1.system.clone().unwrap();
+        assert!(system.contains("<source type=\"cv\" name=\"Ana CV\" primary=\"true\">"));
+        assert!(system.contains("Kubernetes platform lead"));
+        assert!(
+            !system.contains("custom_profile"),
+            "no empty Custom Profile section"
+        );
+        assert!(!system.contains("type=\"credentials\""));
+
+        // Off again: nothing from the Profile.
+        let mut off = send(Some(sent.conversation.id), "And now?");
+        off.use_profile = false;
+        let sent = send_message(&state, off).await.unwrap();
+        wait_until_done(&state, sent.assistant_message.id).await;
+        let system = llm.requests.lock().unwrap()[1].1.system.clone().unwrap();
+        assert!(!system.contains("Kubernetes platform lead"));
+        assert!(!system.contains("<user_profile>"));
+    }
+
+    fn test_server() -> Option<crate::models::mcp::McpServerInput> {
+        let node = std::process::Command::new("node")
+            .arg("--version")
+            .output()
+            .ok()?;
+        if !node.status.success() {
+            return None;
+        }
+        Some(crate::models::mcp::McpServerInput {
+            name: "Tests".into(),
+            transport: crate::models::mcp::McpTransport::Stdio,
+            command: "node".into(),
+            args: vec![concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/mcp_test_server.mjs"
+            )
+            .into()],
+            env: vec![crate::models::mcp::McpEnvVar {
+                name: "FAKE_MCP_ERA".into(),
+                value: Some("modern".into()),
+            }],
+            cwd: String::new(),
+            url: String::new(),
+            auth: crate::models::mcp::McpAuth::None,
+            header_name: String::new(),
+            secret: None,
+        })
+    }
+
+    fn call(id: &str, name: &str, arguments: serde_json::Value) -> crate::llm::ToolCall {
+        crate::llm::ToolCall {
+            id: id.into(),
+            name: name.into(),
+            arguments,
+            provider_data: None,
+        }
+    }
+
+    async fn awaiting(events: &crate::events::RecordingEvents, message: i64, call_id: &str) {
+        for _ in 0..500 {
+            let waiting = events.chat.lock().unwrap().iter().any(|e| {
+                matches!(e, ChatEvent::Activity { activity, message_id, .. }
+                    if *message_id == message
+                        && activity.id == call_id
+                        && activity.status == crate::models::chat::ToolStatus::AwaitingApproval)
+            });
+            if waiting {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("no approval request for {call_id}");
+    }
+
+    #[tokio::test]
+    async fn selected_mcp_tools_run_with_approval_for_changes() {
+        use crate::models::chat::ToolStatus;
+        let Some(server_input) = test_server() else {
+            eprintln!("node is not installed; skipping the MCP chat test");
+            return;
+        };
+        let llm = FakeLanguageModel::replying(&["Done."]).calling(vec![
+            call("c1", "mcp_tests_echo", serde_json::json!({ "text": "hi" })),
+            call(
+                "c2",
+                "mcp_tests_add_note",
+                serde_json::json!({ "note": "call Globex" }),
+            ),
+        ]);
+        let (state, events, llm) = setup(llm).await;
+        let server = crate::services::mcp::save(&state, None, server_input)
+            .await
+            .unwrap();
+
+        // Configured but disabled: never exposed, even if selected.
+        let mut input = send(None, "Use my tools");
+        input.mcp_server_ids = vec![server.id];
+        let sent = send_message(&state, input).await.unwrap();
+        assert!(sent.conversation.mcp_server_ids.is_empty());
+        wait_until_done(&state, sent.assistant_message.id).await;
+        assert!(llm.requests.lock().unwrap()[0].1.tools.is_none());
+
+        // Enabled and selected: the tools are offered for this chat.
+        crate::services::mcp::set_enabled(&state, server.id, true).unwrap();
+        let mut input = send(None, "Use my tools");
+        input.mcp_server_ids = vec![server.id];
+        let sent = send_message(&state, input).await.unwrap();
+        assert_eq!(sent.conversation.mcp_server_ids, [server.id]);
+        // The read-only tool runs at once; the other waits for approval.
+        awaiting(&events, sent.assistant_message.id, "c2").await;
+        state
+            .approvals
+            .respond(sent.assistant_message.id, "c2", ApprovalDecision::Allow)
+            .unwrap();
+        let message = wait_until_done(&state, sent.assistant_message.id).await;
+        assert_eq!(message.status, MessageStatus::Complete);
+        assert_eq!(message.content, "Done.");
+        let outputs: Vec<String> = llm
+            .tool_outputs
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|o| o.content.clone())
+            .collect();
+        assert_eq!(outputs, ["echo: hi", "saved: call Globex"]);
+        let names: Vec<String> = llm.requests.lock().unwrap()[1]
+            .1
+            .tool_specs()
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+        assert_eq!(
+            names,
+            ["mcp_tests_echo", "mcp_tests_add_note", "mcp_tests_env"]
+        );
+        // The activity is stored with the answer.
+        assert_eq!(message.activity.len(), 2);
+        assert!(message.activity[0].read_only);
+        assert_eq!(message.activity[0].status, ToolStatus::Completed);
+        assert_eq!(message.activity[1].status, ToolStatus::Completed);
+        assert!(message.activity[1].arguments.contains("call Globex"));
+
+        // Denied: the tool does not run and the model is told.
+        let mut again = send(Some(sent.conversation.id), "Once more");
+        again.mcp_server_ids = vec![server.id];
+        let sent = send_message(&state, again).await.unwrap();
+        awaiting(&events, sent.assistant_message.id, "c2").await;
+        state
+            .approvals
+            .respond(sent.assistant_message.id, "c2", ApprovalDecision::Deny)
+            .unwrap();
+        let message = wait_until_done(&state, sent.assistant_message.id).await;
+        assert_eq!(message.activity[1].status, ToolStatus::Denied);
+        let last = llm.tool_outputs.lock().unwrap().last().cloned().unwrap();
+        assert!(last.is_error);
+        assert!(!last.content.contains("saved"));
+
+        // Allowed for the chat: no second question in this conversation.
+        let mut third = send(Some(sent.conversation.id), "And again");
+        third.mcp_server_ids = vec![server.id];
+        let sent3 = send_message(&state, third).await.unwrap();
+        awaiting(&events, sent3.assistant_message.id, "c2").await;
+        let pending_id = sent3.assistant_message.id;
+        state
+            .approvals
+            .respond(pending_id, "c2", ApprovalDecision::AllowForChat)
+            .unwrap();
+        wait_until_done(&state, pending_id).await;
+        let mut fourth = send(Some(sent.conversation.id), "Last one");
+        fourth.mcp_server_ids = vec![server.id];
+        let sent4 = send_message(&state, fourth).await.unwrap();
+        let message = wait_until_done(&state, sent4.assistant_message.id).await;
+        assert_eq!(message.activity[1].status, ToolStatus::Completed);
+
+        // Turned off in Settings: gone from the chat's tools.
+        crate::services::mcp::set_enabled(&state, server.id, false).unwrap();
+        let mut fifth = send(Some(sent.conversation.id), "Tools?");
+        fifth.mcp_server_ids = vec![server.id];
+        let sent5 = send_message(&state, fifth).await.unwrap();
+        assert!(sent5.conversation.mcp_server_ids.is_empty());
+        wait_until_done(&state, sent5.assistant_message.id).await;
+        assert!(llm
+            .requests
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .1
+            .tools
+            .is_none());
+        state.mcp.shutdown();
     }
 }

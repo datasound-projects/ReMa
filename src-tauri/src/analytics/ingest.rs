@@ -571,6 +571,7 @@ async fn listed_with_model(state: &AppState, text: &str) -> AppResult<Vec<RawJob
             content: format!("Text:\n\n{}", text.chars().take(20_000).collect::<String>()),
         }],
         max_output_tokens: Some(8_000),
+        ..ChatRequest::default()
     };
     let mut answer = String::new();
     let mut sink = |delta: &str| answer.push_str(delta);
