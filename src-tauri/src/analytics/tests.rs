@@ -675,7 +675,7 @@ async fn chat_answers_with_job_tables_are_ingested_automatically() {
         &state,
         SendMessageInput {
             conversation_id: None,
-            content: "Find AI jobs in Austria".into(),
+            content: "Compare these AI roles in Austria".into(),
             model: ModelRef {
                 provider_id: "anthropic".into(),
                 model_id: "model-a".into(),
@@ -696,7 +696,7 @@ async fn chat_answers_with_job_tables_are_ingested_automatically() {
     let runs = runs(&state).unwrap();
     assert_eq!(runs.len(), 1);
     assert_eq!((runs[0].source, runs[0].result_count), (RunSource::Chat, 2));
-    assert_eq!(runs[0].title, "Find AI jobs in Austria");
+    assert_eq!(runs[0].title, "Compare these AI roles in Austria");
     assert_eq!(runs[0].conversation_id, Some(sent.conversation.id));
     let linked = state
         .db
@@ -961,4 +961,51 @@ async fn analyze_explains_answers_without_job_postings() {
     assert!(error
         .to_string()
         .contains("doesn't list specific job postings"));
+}
+
+#[tokio::test]
+async fn scheduled_job_searches_search_first_and_fail_without_a_search() {
+    use crate::models::task::ExecutionStatus;
+    let input = |prompt: &str| TaskInput {
+        name: "Vienna AI jobs".into(),
+        kind: TaskKind::Prompt,
+        use_profile: false,
+        prompt: prompt.into(),
+        model: ModelRef {
+            provider_id: "anthropic".into(),
+            model_id: "model-a".into(),
+        },
+        timezone: "UTC".into(),
+        start_date: jiff::Zoned::now().date().tomorrow().unwrap().to_string(),
+        start_time: "08:00".into(),
+        schedule: Schedule::Interval {
+            every: 24,
+            unit: IntervalUnit::Hours,
+        },
+        end: EndCondition::Never,
+    };
+    // The model never searches: the run fails instead of listing jobs.
+    let state = connected(&[TABLE_ANSWER]).await;
+    let task = tasks::create(&state, input("Find new AI Engineer jobs in Vienna"))
+        .await
+        .unwrap();
+    let row = state.db.call(|c| task_repo::get(c, task.id)).unwrap();
+    let run = scheduler::execute(
+        &state,
+        &row,
+        ExecutionTrigger::Manual,
+        None,
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(run.status, ExecutionStatus::Failed);
+    assert!(run
+        .error
+        .unwrap()
+        .starts_with("ReMa couldn't search the web"));
+    assert!(
+        runs(&state).unwrap().is_empty(),
+        "no unverified jobs reach Analytics"
+    );
 }

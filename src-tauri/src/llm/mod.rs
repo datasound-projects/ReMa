@@ -128,6 +128,9 @@ pub enum WebEvent {
         sources: Vec<WebSource>,
         error: Option<String>,
     },
+    /// The answer cites a page (OpenAI URL citations, Anthropic web
+    /// citations).
+    Cited { url: String, title: String },
     /// Web search could not be used for this answer.
     Unavailable { reason: String },
 }
@@ -153,6 +156,11 @@ pub trait WebObserver: Send + Sync {
 #[derive(Clone, Default)]
 pub struct WebSearch {
     pub observer: Option<Arc<dyn WebObserver>>,
+    /// The request exists to search (ReMa's retrieval step): the provider
+    /// is told to search where it supports that (`tool_choice: required`),
+    /// and a provider that refuses web search fails the request instead of
+    /// answering without it.
+    pub required: bool,
 }
 
 impl WebSearch {
@@ -540,7 +548,7 @@ impl LanguageModel for ProviderLanguageModel {
                     // The provider refused its web tools for this model or
                     // account: answer without them rather than not at all.
                     Err(error)
-                        if request.web.is_some()
+                        if request.web.as_ref().is_some_and(|w| !w.required)
                             && request.rounds.is_empty()
                             && round_text.is_empty()
                             && rejects_web_tools(&error) =>

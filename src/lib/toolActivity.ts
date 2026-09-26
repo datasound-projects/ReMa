@@ -7,5 +7,6 @@ export function withActivity(list: readonly ToolActivity[], activity: ToolActivi
   return list.map((a, i) => (i === index ? activity : a));
 }
 
-/** Web searches and pages the model's provider ran (not MCP tools). */
-export const isWebActivity = (a: ToolActivity) => a.kind === 'web_search' || a.kind === 'web_page';
+/** Web searches, pages and ReMa's search step (not MCP tools). */
+export const isWebActivity = (a: ToolActivity) =>
+  a.kind === 'web_search' || a.kind === 'web_page' || a.kind === 'retrieval';

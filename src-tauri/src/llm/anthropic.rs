@@ -415,8 +415,8 @@ pub fn parse_event(event: &SseEvent, state: &mut StreamState) -> AppResult<Strea
                     }
                 }
                 Some("citations_delta") => {
-                    if let (Some(block), Some(citation)) = (block, data.pointer("/delta/citation"))
-                    {
+                    let citation = data.pointer("/delta/citation");
+                    if let (Some(block), Some(citation)) = (block, citation) {
                         if !block["citations"].is_array() {
                             block["citations"] = json!([]);
                         }
@@ -424,7 +424,22 @@ pub fn parse_event(event: &SseEvent, state: &mut StreamState) -> AppResult<Strea
                             list.push(citation.clone());
                         }
                     }
-                    StreamPiece::default()
+                    // Web citations name the page they quote.
+                    let url = citation.and_then(|c| c.get("url")).and_then(Value::as_str);
+                    StreamPiece {
+                        web: url
+                            .map(|url| WebEvent::Cited {
+                                url: url.to_string(),
+                                title: citation
+                                    .and_then(|c| c.get("title"))
+                                    .and_then(Value::as_str)
+                                    .unwrap_or(url)
+                                    .to_string(),
+                            })
+                            .into_iter()
+                            .collect(),
+                        ..StreamPiece::default()
+                    }
                 }
                 // Thinking is kept for the record but not shown.
                 Some("thinking_delta") => {

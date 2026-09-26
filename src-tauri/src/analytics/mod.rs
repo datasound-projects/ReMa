@@ -87,6 +87,11 @@ pub struct AnalyticsContext {
     client: Arc<OnceLock<reqwest::Client>>,
 }
 
+/// Tests serve job pages from 127.0.0.1.
+#[cfg(test)]
+pub static ALLOW_LOCAL_PAGES_IN_TESTS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 impl AnalyticsContext {
     /// Job data changed: the next query reloads it.
     pub fn changed(&self) {
@@ -149,11 +154,24 @@ impl AnalyticsContext {
     /// Local job pages are only read in development builds, when explicitly
     /// allowed (for end-to-end tests against a local test site).
     fn allow_private() -> bool {
+        #[cfg(test)]
+        if ALLOW_LOCAL_PAGES_IN_TESTS.load(std::sync::atomic::Ordering::Relaxed) {
+            return true;
+        }
         cfg!(debug_assertions) && std::env::var_os("REMA_DEV_ALLOW_LOCAL_PAGES").is_some()
     }
 
     pub async fn fetch_page(&self, state: &AppState, url: &str) -> AppResult<String> {
         page::fetch(self.client(state), url, Self::allow_private()).await
+    }
+
+    /// A page and its final address, with the reason when it cannot be read.
+    pub async fn read_page(
+        &self,
+        state: &AppState,
+        url: &str,
+    ) -> Result<(String, String), page::FetchFailure> {
+        page::fetch_page(self.client(state), url, Self::allow_private()).await
     }
 
     /// Requirements the default model finds in a description, validated.

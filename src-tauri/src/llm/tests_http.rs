@@ -322,6 +322,7 @@ async fn collect_with_web(
     let mut request = request();
     request.web = Some(WebSearch {
         observer: Some(web),
+        required: false,
     });
     let mut text = String::new();
     let mut sink = |delta: &str| text.push_str(delta);
@@ -480,4 +481,61 @@ async fn openai_uses_the_responses_api_with_web_search() {
     assert_eq!(body["tools"][0]["type"], "web_search");
     assert_eq!(body["store"], false);
     assert_eq!(web.0.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn a_required_search_fails_rather_than_answering_without_it() {
+    let (base_url, _) = serve_sequence(vec![(
+        400,
+        vec!["{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"tools.0: web search is not enabled for this organization\"}}"],
+    )])
+    .await;
+    let endpoint = endpoint(ProviderKind::Anthropic, base_url, "sk-ant-test");
+    let llm = ProviderLanguageModel::new(None);
+    let mut request = request();
+    request.web = Some(WebSearch {
+        observer: None,
+        required: true,
+    });
+    let mut sink = |_: &str| {};
+    let error = llm
+        .stream_chat(
+            &endpoint,
+            "claude-opus-5",
+            &request,
+            CancellationToken::new(),
+            &mut sink,
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("web search is not enabled"));
+}
+
+#[tokio::test]
+async fn reports_search_errors_that_arrive_with_a_200() {
+    let (base_url, _) = serve_sequence(vec![(
+        200,
+        vec![
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"server_tool_use\",\"id\":\"srvtoolu_1\",\"name\":\"web_search\",\"input\":{}}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"query\\\": \\\"AI jobs\\\"}\"}}\n\n",
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"web_search_tool_result\",\"tool_use_id\":\"srvtoolu_1\",\"content\":{\"type\":\"web_search_tool_result_error\",\"error_code\":\"too_many_requests\"}}}\n\n",
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"text_delta\",\"text\":\"{\\\"postings\\\":[]}\"}}\n\n",
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        ],
+    )])
+    .await;
+    let endpoint = endpoint(ProviderKind::Anthropic, base_url, "sk-ant-test");
+    let web = Arc::new(RecordingWeb::default());
+    let (result, _) = collect_with_web(&endpoint, "claude-opus-5", web.clone()).await;
+    assert_eq!(result.unwrap(), Finish::Complete);
+    let events = web.0.lock().unwrap().clone();
+    assert!(matches!(
+        &events[1],
+        WebEvent::Finished { error: Some(e), target, .. }
+            if e.contains("rate limiting") && target == "AI jobs"
+    ));
 }

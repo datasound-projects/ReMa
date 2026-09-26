@@ -71,8 +71,12 @@ pub enum ActivityKind {
     Mcp,
     /// A web search by the model's provider (`arguments` holds the query).
     WebSearch,
-    /// A web page the model's provider opened (`arguments` holds the URL).
+    /// A web page the model's provider opened, or ReMa checked (`tool` is
+    /// "check"); `arguments` holds the URL.
     WebPage,
+    /// ReMa's own search step before a job-search answer (`arguments`
+    /// holds its status line).
+    Retrieval,
 }
 
 /// A page a web search found or opened.

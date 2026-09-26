@@ -16,3 +16,4 @@ pub mod profile;
 pub mod providers;
 pub mod system;
 pub mod tasks;
+pub mod websearch;

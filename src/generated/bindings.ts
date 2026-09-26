@@ -129,6 +129,12 @@ export const commands = {
 	/**  Copies any agent (built-in or custom) into a new custom agent. */
 	duplicateAgent: (agentId: string) => __TAURI_INVOKE<Agent>("duplicate_agent", { agentId }),
 	deleteAgent: (id: number) => __TAURI_INVOKE<null>("delete_agent", { id }),
+	/**  The search service ReMa uses for models without their own web search. */
+	webSearchSettings: () => __TAURI_INVOKE<WebSearchSettings>("web_search_settings"),
+	/**  Saves the search service; the key goes to the OS credential store. */
+	saveWebSearchSettings: (input: WebSearchInput) => __TAURI_INVOKE<WebSearchSettings>("save_web_search_settings", { input }),
+	/**  Runs one real search with the saved service. */
+	testWebSearch: () => __TAURI_INVOKE<WebSearchTest>("test_web_search"),
 	/**  Configured servers. Secret values never leave Rust (`hasSecret` only). */
 	listMcpServers: () => __TAURI_INVOKE<McpServer[]>("list_mcp_servers"),
 	/**
@@ -228,8 +234,16 @@ export type ActivityKind =
 "mcp" | 
 /**  A web search by the model's provider (`arguments` holds the query). */
 "web_search" | 
-/**  A web page the model's provider opened (`arguments` holds the URL). */
-"web_page";
+/**
+ *  A web page the model's provider opened, or ReMa checked (`tool` is
+ *  "check"); `arguments` holds the URL.
+ */
+"web_page" | 
+/**
+ *  ReMa's own search step before a job-search answer (`arguments`
+ *  holds its status line).
+ */
+"retrieval";
 
 /**  A page a web search found or opened. */
 export type ActivitySource = {
@@ -1483,6 +1497,9 @@ export type SendMessageResult = {
 
 export type Seniority = "intern" | "entry" | "mid" | "senior" | "lead" | "executive";
 
+/**  A search service ReMa can call. */
+export type ServiceKind = "brave" | "tavily" | "searxng";
+
 /**  A browser sign-in that is running or just ended. */
 export type SignInStatus = "connecting" | "opening_browser" | "waiting_for_authorization" | "cancelled" | "failed";
 
@@ -1654,6 +1671,28 @@ export type ToolStatus =
 "denied" | 
 /**  A selected server could not be used for this answer. */
 "unavailable";
+
+/**  `service: None` turns the service off (and removes its key). */
+export type WebSearchInput = {
+	service: ServiceKind | null,
+	url: string | null,
+	/**  `None` keeps the stored key. */
+	key: string | null,
+};
+
+/**  The search service as Settings shows it. Never contains the key. */
+export type WebSearchSettings = {
+	service: ServiceKind | null,
+	/**  SearXNG address. */
+	url: string | null,
+	hasKey: boolean,
+};
+
+/**  What a test search found. */
+export type WebSearchTest = {
+	results: number,
+	titles: string[],
+};
 
 export type Weekday = "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun";
 

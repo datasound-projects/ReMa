@@ -35,6 +35,7 @@ pub mod mcp;
 pub mod models;
 pub mod oauth_loopback;
 pub mod protocol;
+pub mod retrieval;
 pub mod secrets;
 pub mod services;
 pub mod state;

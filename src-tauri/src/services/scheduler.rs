@@ -30,8 +30,11 @@ use crate::{
         jobs::JobRunReport,
         task::{ExecutionStatus, ExecutionTrigger, TaskExecution, TaskKind},
     },
+    retrieval::{self, render, Outcome},
     services::{
-        chat::{can_search_web, system_prompt, with_profile},
+        chat::{
+            assessment_prompt, assessment_request, can_search_web, system_prompt, with_profile,
+        },
         providers,
         schedule::{self, Limits},
     },
@@ -315,6 +318,91 @@ async fn run_task(
     let endpoint = providers::resolve_endpoint(state, &task.model.provider_id).await?;
     let max_output_tokens = providers::max_output_tokens(state, &task.model)?;
     match task.kind {
+        TaskKind::Prompt if retrieval::detect(&task.prompt).is_some() => {
+            // A job search: search and validate first, as in chat.
+            let query = retrieval::detect(&task.prompt).unwrap_or_default();
+            let found = match retrieval::run(
+                state,
+                &endpoint,
+                &task.model.model_id,
+                &query,
+                &retrieval::Silent,
+                &cancel,
+            )
+            .await
+            {
+                Outcome::Cancelled => {
+                    return Ok(Output {
+                        finish: Finish::Cancelled,
+                        text: String::new(),
+                        report: None,
+                    })
+                }
+                Outcome::Failed { reasons } => {
+                    return Err(AppError::provider(render::failed_text(&reasons)))
+                }
+                Outcome::Empty(found) => {
+                    return Ok(Output {
+                        finish: Finish::Complete,
+                        text: render::empty_text(&found),
+                        report: None,
+                    })
+                }
+                Outcome::Found(found) => found,
+            };
+            let mut text = render::listings_table(&found);
+            let system = with_profile(
+                state,
+                format!(
+                    "{} This request is a scheduled task running automatically.",
+                    assessment_prompt(started_at)
+                ),
+                task.use_profile,
+            )?;
+            let request = assessment_request(
+                system,
+                vec![Turn {
+                    role: MessageRole::User,
+                    content: task.prompt.clone(),
+                }],
+                &found,
+                max_output_tokens,
+            );
+            let mut assessment = String::new();
+            let mut on_delta = |delta: &str| assessment.push_str(delta);
+            let outcome = state
+                .llm
+                .stream_chat(
+                    &endpoint,
+                    &task.model.model_id,
+                    &request,
+                    cancel,
+                    &mut on_delta,
+                )
+                .await;
+            providers::note_outcome(state, &task.model.provider_id, &outcome);
+            match outcome {
+                Ok(Finish::Cancelled) => {
+                    return Ok(Output {
+                        finish: Finish::Cancelled,
+                        text: String::new(),
+                        report: None,
+                    })
+                }
+                Ok(_) => {
+                    text.push_str("\n\n");
+                    text.push_str(assessment.trim());
+                }
+                Err(error) => {
+                    text.push_str(&format!("\n\n_ReMa could not add an assessment: {error}_"))
+                }
+            }
+            Ok(Output {
+                finish: Finish::Complete,
+                text,
+                report: None,
+            })
+        }
         TaskKind::Prompt => {
             let request = ChatRequest {
                 system: Some(with_profile(

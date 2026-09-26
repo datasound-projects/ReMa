@@ -98,40 +98,82 @@ async fn check_host(url: &Url, allow_private: bool) -> AppResult<()> {
     Ok(())
 }
 
+/// Why a page could not be read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FetchFailure {
+    /// The page is gone (404, 410).
+    Gone(u16),
+    /// The site refuses automated reading (401, 403, 429, 451, 999, …).
+    Refused(u16),
+    /// Anything else: offline, timeout, not a web page, local address.
+    Failed(String),
+}
+
+impl FetchFailure {
+    pub fn message(&self) -> String {
+        match self {
+            Self::Gone(code) => format!("the page is no longer online ({code})"),
+            Self::Refused(code) => format!("the site does not allow automated reading ({code})"),
+            Self::Failed(reason) => reason.clone(),
+        }
+    }
+}
+
 /// Fetches a page's HTML. Every redirect target is checked again.
 pub async fn fetch(client: &Client, url: &str, allow_private: bool) -> AppResult<String> {
-    let mut current =
-        Url::parse(url).map_err(|_| AppError::validation("the link is not a web address"))?;
+    fetch_page(client, url, allow_private)
+        .await
+        .map(|(_, html)| html)
+        .map_err(|failure| AppError::network(failure.message()))
+}
+
+/// Fetches a page's HTML with the final address after redirects, telling
+/// pages that are gone apart from sites that refuse automated reading.
+pub async fn fetch_page(
+    client: &Client,
+    url: &str,
+    allow_private: bool,
+) -> Result<(String, String), FetchFailure> {
+    let failed = |e: AppError| FetchFailure::Failed(e.to_string());
+    let mut current = Url::parse(url)
+        .map_err(|_| FetchFailure::Failed("the link is not a web address".into()))?;
     for _ in 0..=MAX_REDIRECTS {
-        check_host(&current, allow_private).await?;
+        check_host(&current, allow_private).await.map_err(failed)?;
         let response = client
             .get(current.clone())
             .header(header::ACCEPT, "text/html,application/xhtml+xml")
             .send()
-            .await?;
+            .await
+            .map_err(|e| failed(e.into()))?;
         let status = response.status();
         if status.is_redirection() {
             let location = response
                 .headers()
                 .get(header::LOCATION)
                 .and_then(|v| v.to_str().ok())
-                .ok_or_else(|| AppError::network("the site redirected without a target"))?;
-            current = current
-                .join(location)
-                .map_err(|_| AppError::network("the site redirected to an invalid address"))?;
+                .ok_or_else(|| {
+                    FetchFailure::Failed("the site redirected without a target".into())
+                })?;
+            current = current.join(location).map_err(|_| {
+                FetchFailure::Failed("the site redirected to an invalid address".into())
+            })?;
             continue;
+        }
+        if matches!(status, StatusCode::NOT_FOUND | StatusCode::GONE) {
+            return Err(FetchFailure::Gone(status.as_u16()));
         }
         if matches!(
             status,
-            StatusCode::FORBIDDEN | StatusCode::UNAUTHORIZED | StatusCode::TOO_MANY_REQUESTS
-        ) {
-            return Err(AppError::network(format!(
-                "the site does not allow automated reading ({})",
-                status.as_u16()
-            )));
+            StatusCode::FORBIDDEN
+                | StatusCode::UNAUTHORIZED
+                | StatusCode::TOO_MANY_REQUESTS
+                | StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS
+        ) || status.as_u16() == 999
+        {
+            return Err(FetchFailure::Refused(status.as_u16()));
         }
         if !status.is_success() {
-            return Err(AppError::network(format!(
+            return Err(FetchFailure::Failed(format!(
                 "the site answered {}",
                 status.as_u16()
             )));
@@ -142,21 +184,34 @@ pub async fn fetch(client: &Client, url: &str, allow_private: bool) -> AppResult
             .and_then(|v| v.to_str().ok())
             .is_none_or(|t| t.contains("html") || t.contains("text/plain"));
         if !html_like {
-            return Err(AppError::network("the link is not a web page"));
+            return Err(FetchFailure::Failed("the link is not a web page".into()));
         }
         let mut body = Vec::new();
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
+            let chunk = chunk.map_err(|e| failed(e.into()))?;
             body.extend_from_slice(&chunk);
             if body.len() > MAX_PAGE_BYTES {
                 body.truncate(MAX_PAGE_BYTES);
                 break;
             }
         }
-        return Ok(String::from_utf8_lossy(&body).into_owned());
+        return Ok((
+            current.to_string(),
+            String::from_utf8_lossy(&body).into_owned(),
+        ));
     }
-    Err(AppError::network("the site redirected too often"))
+    Err(FetchFailure::Failed("the site redirected too often".into()))
+}
+
+/// The page's `<title>`, decoded and trimmed.
+pub fn page_title(html: &str) -> Option<String> {
+    let lower = html.to_ascii_lowercase();
+    let start = lower.find("<title")?;
+    let open_end = lower[start..].find('>')? + start + 1;
+    let close = lower[open_end..].find("</title")? + open_end;
+    let title = normalize::clip(&decode_entities(&html[open_end..close]), 200);
+    (!title.is_empty()).then_some(title)
 }
 
 // ── HTML → text ───────────────────────────────────────────────────────
@@ -302,9 +357,13 @@ pub fn html_to_text(html: &str) -> String {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PageFacts {
     pub structured: bool,
+    /// The posting's own title (JSON-LD).
+    pub title: Option<String>,
     pub company: Option<String>,
     pub description: Option<String>,
     pub date_posted: Option<String>,
+    /// Last day the posting accepts applications (JSON-LD `validThrough`).
+    pub valid_through: Option<String>,
     pub employment_type: Option<EmploymentType>,
     pub work_mode: Option<WorkMode>,
     pub location: Option<String>,
@@ -518,11 +577,15 @@ pub fn parse(html: &str, title: &str) -> PageFacts {
     .collect();
     PageFacts {
         structured: true,
+        title: text_of(posting.get("title"))
+            .map(|t| normalize::clip(&decode_entities(&t), 200))
+            .filter(|t| !t.is_empty()),
         company: text_of(posting.get("hiringOrganization")),
         description: text_of(posting.get("description"))
             .map(|d| html_to_text(&decode_entities(&d)))
             .filter(|d| !d.is_empty()),
         date_posted: text_of(posting.get("datePosted")).map(|d| d.chars().take(10).collect()),
+        valid_through: text_of(posting.get("validThrough")).map(|d| d.chars().take(10).collect()),
         employment_type: text_of(posting.get("employmentType"))
             .and_then(|t| normalize::employment_type(&t.replace('_', "-"))),
         work_mode: remote.then_some(WorkMode::Remote),

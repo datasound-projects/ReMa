@@ -305,9 +305,24 @@ impl CodexRuntime {
         if !tools.is_empty() {
             params["dynamicTools"] = json!(tools);
         }
-        if request.web.is_some() {
-            // Live results from OpenAI's web search, for this thread only.
-            params["config"] = json!({ "web_search": "live" });
+        if let Some(web) = &request.web {
+            // OpenAI's web search, for this thread only: live results unless
+            // the account's workspace allows only cached ones.
+            match web_search_mode(&conn).await {
+                Ok(mode) => params["config"] = json!({ "web_search": mode }),
+                Err(reason) => {
+                    if let Some(observer) = &web.observer {
+                        observer.observe(WebEvent::Unavailable {
+                            reason: reason.clone(),
+                        });
+                    }
+                    if web.required {
+                        return Err(AppError::provider(format!(
+                            "ChatGPT web search is not available: {reason}"
+                        )));
+                    }
+                }
+            }
         }
         let started = conn.request("thread/start", params).await?;
         let thread_id = started
@@ -483,6 +498,43 @@ async fn run_turn(
             }
             _ => {}
         }
+    }
+}
+
+/// The web search mode this account may use: live results unless a
+/// workspace requirement allows only OpenAI's cached index. Older runtimes
+/// without these methods are assumed to allow live search.
+async fn web_search_mode(conn: &Connection) -> Result<&'static str, String> {
+    if let Ok(capabilities) = conn
+        .request("modelProvider/capabilities/read", json!({}))
+        .await
+    {
+        if capabilities.get("webSearch").and_then(Value::as_bool) == Some(false) {
+            return Err("the signed-in account's model provider does not offer web search".into());
+        }
+    }
+    let allowed: Option<Vec<String>> = conn
+        .request("configRequirements/read", json!({}))
+        .await
+        .ok()
+        .and_then(|r| {
+            r.pointer("/requirements/allowedWebSearchModes")
+                .and_then(Value::as_array)
+                .map(|modes| {
+                    modes
+                        .iter()
+                        .filter_map(|m| m.as_str().map(str::to_string))
+                        .collect()
+                })
+        });
+    match allowed {
+        None => Ok("live"),
+        Some(modes) => ["live", "indexed", "cached"]
+            .into_iter()
+            .find(|mode| modes.iter().any(|m| m == mode))
+            .ok_or_else(|| {
+                "web search is turned off for this ChatGPT workspace by its administrator".into()
+            }),
     }
 }
 
@@ -1554,6 +1606,7 @@ mod tests {
         let mut request = chat_request();
         request.web = Some(WebSearch {
             observer: Some(web.clone()),
+            required: false,
         });
         let mut text = String::new();
         let finish = runtime
@@ -1597,6 +1650,78 @@ mod tests {
         let log = requests.lock().unwrap().clone();
         let thread = log.iter().find(|m| m["method"] == "thread/start").unwrap();
         assert!(thread["params"].get("config").is_none());
+    }
+
+    #[tokio::test]
+    async fn refuses_a_required_search_the_account_may_not_run() {
+        for (capabilities, requirements, reason) in [
+            (
+                json!({ "webSearch": false }),
+                json!({ "requirements": null }),
+                "does not offer web search",
+            ),
+            (
+                json!({ "webSearch": true }),
+                json!({ "requirements": { "allowedWebSearchModes": ["disabled"] } }),
+                "turned off for this ChatGPT workspace",
+            ),
+        ] {
+            let (runtime, requests, _) = runtime(Arc::new(move |method, params| match method {
+                "modelProvider/capabilities/read" => vec![capabilities.clone()],
+                "configRequirements/read" => vec![requirements.clone()],
+                _ => basic(method, params),
+            }));
+            let web = Arc::new(RecordingWeb::default());
+            let mut request = chat_request();
+            request.web = Some(WebSearch {
+                observer: Some(web.clone()),
+                required: true,
+            });
+            let error = runtime
+                .stream_chat(
+                    "gpt-6",
+                    &request,
+                    CancellationToken::new(),
+                    &mut |_: &str| {},
+                )
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains(reason), "{error}");
+            assert!(matches!(
+                &web.0.lock().unwrap()[0],
+                WebEvent::Unavailable { .. }
+            ));
+            assert!(
+                !methods(&requests).contains(&"thread/start".to_string()),
+                "no thread is started"
+            );
+        }
+
+        // A workspace that allows only cached results gets cached search.
+        let (runtime, requests, _) = runtime(Arc::new(|method, params| match method {
+            "configRequirements/read" => {
+                vec![json!({ "requirements": { "allowedWebSearchModes": ["cached", "disabled"] } })]
+            }
+            "thread/start" => vec![json!({ "thread": { "id": "t1" } })],
+            _ => turn_server(json!({ "id": "turn-1", "status": "completed" }))(method, params),
+        }));
+        let mut request = chat_request();
+        request.web = Some(WebSearch::default());
+        runtime
+            .stream_chat(
+                "gpt-6",
+                &request,
+                CancellationToken::new(),
+                &mut |_: &str| {},
+            )
+            .await
+            .unwrap();
+        let log = requests.lock().unwrap().clone();
+        let thread = log.iter().find(|m| m["method"] == "thread/start").unwrap();
+        assert_eq!(
+            thread["params"]["config"],
+            json!({ "web_search": "cached" })
+        );
     }
 
     fn runtime_with_turn() -> (

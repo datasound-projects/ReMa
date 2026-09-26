@@ -13,3 +13,4 @@ pub mod schedule;
 pub mod scheduler;
 pub mod system;
 pub mod tasks;
+pub mod websearch;

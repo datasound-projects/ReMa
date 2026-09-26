@@ -75,14 +75,33 @@ pub fn request_body(model_id: &str, request: &ChatRequest) -> Value {
             })
         })
         .collect();
-    if request.web.is_some() {
-        tools.push(json!({ "type": "web_search" }));
+    if let Some(web) = &request.web {
+        // Live results, not only OpenAI's cached index.
+        tools.push(json!({ "type": "web_search", "external_web_access": true }));
         body["include"] = json!(["web_search_call.action.sources"]);
+        if web.required && request.tool_specs().is_empty() {
+            // The retrieval step: the model must search before it answers.
+            body["tool_choice"] = json!("required");
+        }
     }
     if !tools.is_empty() {
         body["tools"] = json!(tools);
     }
     body
+}
+
+/// A `url_citation` annotation on the answer text.
+fn citation(annotation: &Value) -> Option<WebEvent> {
+    if annotation.get("type").and_then(Value::as_str) != Some("url_citation") {
+        return None;
+    }
+    let url = annotation.get("url").and_then(Value::as_str)?.to_string();
+    let title = annotation
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or(&url)
+        .to_string();
+    Some(WebEvent::Cited { url, title })
 }
 
 /// Arguments as the JSON text the API expects.
@@ -217,6 +236,14 @@ pub fn parse_event(event: &SseEvent, _state: &mut StreamState) -> AppResult<Stre
                 ..StreamPiece::default()
             }
         }
+        "response.output_text.annotation.added" => StreamPiece {
+            web: data
+                .get("annotation")
+                .and_then(citation)
+                .into_iter()
+                .collect(),
+            ..StreamPiece::default()
+        },
         "response.completed" => StreamPiece {
             finish: Some(Finish::Complete),
             done: true,
@@ -297,8 +324,36 @@ mod tests {
 
         request.web = Some(WebSearch::default());
         let body = request_body("gpt-6", &request);
-        assert_eq!(body["tools"], json!([{ "type": "web_search" }]));
+        assert_eq!(
+            body["tools"],
+            json!([{ "type": "web_search", "external_web_access": true }])
+        );
         assert_eq!(body["include"][0], "web_search_call.action.sources");
+        assert!(
+            body.get("tool_choice").is_none(),
+            "the model decides in chat"
+        );
+
+        // ReMa's retrieval step makes the search mandatory.
+        request.web = Some(WebSearch {
+            required: true,
+            ..WebSearch::default()
+        });
+        assert_eq!(request_body("gpt-6", &request)["tool_choice"], "required");
+    }
+
+    #[test]
+    fn reports_url_citations() {
+        let piece = parse(
+            r#"{"type":"response.output_text.annotation.added","annotation":{"type":"url_citation","url":"https://jobs.example.com/1","title":"AI Engineer","start_index":0,"end_index":5}}"#,
+        );
+        assert_eq!(
+            piece.web,
+            vec![WebEvent::Cited {
+                url: "https://jobs.example.com/1".into(),
+                title: "AI Engineer".into()
+            }]
+        );
     }
 
     #[test]

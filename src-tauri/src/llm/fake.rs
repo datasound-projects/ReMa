@@ -1,6 +1,6 @@
 //! Scripted `LanguageModel` for service tests.
 
-use std::{sync::Mutex, time::Duration};
+use std::{collections::VecDeque, sync::Mutex, time::Duration};
 
 use tokio_util::sync::CancellationToken;
 
@@ -38,6 +38,8 @@ pub struct FakeLanguageModel {
     /// Web activity reported (when the request allows web search) before
     /// the answer streams.
     pub web_events: Vec<WebEvent>,
+    /// Replies for the next requests, in order; `chunks` once used up.
+    pub scripted: Mutex<VecDeque<Vec<String>>>,
 }
 
 impl FakeLanguageModel {
@@ -56,7 +58,18 @@ impl FakeLanguageModel {
             tool_calls: Vec::new(),
             tool_outputs: Mutex::default(),
             web_events: Vec::new(),
+            scripted: Mutex::default(),
         }
+    }
+
+    /// Replies to the next request with this text (then the next script,
+    /// then `chunks`).
+    pub fn then_reply(self, text: &str) -> Self {
+        self.scripted
+            .lock()
+            .unwrap()
+            .push_back(vec![text.to_string()]);
+        self
     }
 
     /// Reports this web activity (when web search is allowed) first.
@@ -138,7 +151,13 @@ impl LanguageModel for FakeLanguageModel {
                     observer.observe(event.clone());
                 }
             }
-            for chunk in &self.chunks {
+            let chunks = self
+                .scripted
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| self.chunks.clone());
+            for chunk in &chunks {
                 tokio::select! {
                     _ = cancel.cancelled() => return Ok(Finish::Cancelled),
                     _ = tokio::time::sleep(self.delay) => on_delta(chunk),

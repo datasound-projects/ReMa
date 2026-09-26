@@ -81,8 +81,14 @@ impl MockServer {
                     };
                     let (status, body) = handler(&recorded).unwrap_or((404, "{}".into()));
                     log.lock().unwrap().push(recorded);
+                    // Pages are HTML; everything else is JSON.
+                    let kind = if body.trim_start().starts_with('<') {
+                        "text/html; charset=utf-8"
+                    } else {
+                        "application/json"
+                    };
                     let response = format!(
-                        "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        "HTTP/1.1 {status} X\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len()
                     );
                     let _ = socket.write_all(response.as_bytes()).await;

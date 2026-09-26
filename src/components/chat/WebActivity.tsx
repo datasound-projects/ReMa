@@ -34,6 +34,7 @@ function WebLink({ url, children }: { url: string; children: ReactNode }) {
 
 function Entry({ activity: a }: { activity: ToolActivity }) {
   const page = a.kind === 'web_page';
+  const check = page && a.tool === 'check';
   const running = a.status === 'running';
   const sources = a.sources ?? [];
   const Icon = page ? GlobeIcon : SearchIcon;
@@ -42,7 +43,12 @@ function Entry({ activity: a }: { activity: ToolActivity }) {
       <Icon className="web-activity__icon" aria-hidden="true" />
       <div className="web-activity__main">
         <span className="web-activity__what">
-          {page ? (
+          {check ? (
+            <>
+              {running ? 'Checking ' : a.status === 'failed' ? 'Could not check ' : 'Checked '}
+              <WebLink url={a.arguments}>{hostOf(a.arguments)}</WebLink>
+            </>
+          ) : page ? (
             <>
               {running ? 'Opening ' : 'Opened '}
               {a.arguments ? <WebLink url={a.arguments}>{hostOf(a.arguments)}</WebLink> : 'a page'}
@@ -80,7 +86,9 @@ function Entry({ activity: a }: { activity: ToolActivity }) {
 export function WebActivity({ activity }: { activity: ToolActivity[] }) {
   const [open, setOpen] = useState(false);
   const unavailable = activity.find((a) => a.status === 'unavailable');
-  const entries = activity.filter((a) => a.status !== 'unavailable');
+  // ReMa's own search step before a job-search answer, if there was one.
+  const step = activity.find((a) => a.kind === 'retrieval');
+  const entries = activity.filter((a) => a.status !== 'unavailable' && a.kind !== 'retrieval');
   const latest = entries.filter((a) => a.status === 'running').at(-1);
   const searches = entries.filter((a) => a.kind === 'web_search').length;
   const pages = entries.filter((a) => a.kind === 'web_page').length;
@@ -93,30 +101,47 @@ export function WebActivity({ activity }: { activity: ToolActivity[] }) {
           <span>Web search could not be used for this answer{unavailable.detail ? `: ${unavailable.detail}` : '.'}</span>
         </p>
       )}
-      {entries.length > 0 && (
+      {(entries.length > 0 || step) && (
         <>
           <button
             type="button"
             className="web-activity__summary"
             aria-expanded={open}
             onClick={() => setOpen(!open)}
+            disabled={entries.length === 0}
           >
             {open ? <ChevronDownIcon aria-hidden="true" /> : <ChevronRightIcon aria-hidden="true" />}
             <SearchIcon aria-hidden="true" />
-            <span>
-              {latest ? (
-                <span className="web-activity__live">
-                  {latest.kind === 'web_page' ? 'Reading a page…' : 'Searching the web…'}
-                </span>
-              ) : (
-                'Searched the web'
-              )}
-              <span className="web-activity__count">
-                {' '}
-                · {plural(searches, 'search', 'searches')}
-                {pages > 0 && ` · ${plural(pages, 'page', 'pages')}`}
+            {step ? (
+              <span>
+                {step.status === 'running' ? (
+                  <span className="web-activity__live">{step.arguments}</span>
+                ) : step.status === 'failed' ? (
+                  <span className="web-activity__error">Web search failed</span>
+                ) : step.status === 'denied' ? (
+                  'Search stopped'
+                ) : (
+                  <>
+                    Searched the web <span className="web-activity__count">· {step.arguments}</span>
+                  </>
+                )}
               </span>
-            </span>
+            ) : (
+              <span>
+                {latest ? (
+                  <span className="web-activity__live">
+                    {latest.kind === 'web_page' ? 'Reading a page…' : 'Searching the web…'}
+                  </span>
+                ) : (
+                  'Searched the web'
+                )}
+                <span className="web-activity__count">
+                  {' '}
+                  · {plural(searches, 'search', 'searches')}
+                  {pages > 0 && ` · ${plural(pages, 'page', 'pages')}`}
+                </span>
+              </span>
+            )}
           </button>
           {open && (
             <ul className="web-activity__list">

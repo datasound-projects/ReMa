@@ -4,6 +4,7 @@ import { PlusIcon } from '../components/icons';
 import { PageContainer } from '../components/layout/PageContainer';
 import { GoogleSection } from '../components/settings/GoogleSection';
 import { McpSection } from '../components/settings/McpSection';
+import { WebSearchSection } from '../components/settings/WebSearchSection';
 import { CloudProviderRow } from '../components/settings/CloudProviderRow';
 import { CustomEndpointRow } from '../components/settings/ProviderRows';
 import { BrandLogo } from '../components/ui/BrandLogo';
@@ -133,6 +134,8 @@ export function SettingsPage({ focus }: { focus?: 'mcp' }) {
         </div>
         {error && <p className="form-error">{error}</p>}
       </section>
+
+      <WebSearchSection />
 
       <McpSection focus={focus === 'mcp'} />
 

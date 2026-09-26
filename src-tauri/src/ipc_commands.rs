@@ -59,6 +59,10 @@ pub const APP_COMMANDS: &[&str] = &[
     "save_agent",
     "duplicate_agent",
     "delete_agent",
+    // Web search service
+    "web_search_settings",
+    "save_web_search_settings",
+    "test_web_search",
     // MCP servers
     "list_mcp_servers",
     "save_mcp_server",

@@ -91,6 +91,10 @@ pub fn builder() -> Builder<tauri::Wry> {
             commands::agents::save_agent,
             commands::agents::duplicate_agent,
             commands::agents::delete_agent,
+            // Web search service
+            commands::websearch::web_search_settings,
+            commands::websearch::save_web_search_settings,
+            commands::websearch::test_web_search,
             // MCP servers
             commands::mcp::list_mcp_servers,
             commands::mcp::save_mcp_server,
