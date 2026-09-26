@@ -1,17 +1,17 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
   <defs>
-    <!-- Subtle blue ambient glow against pure black background -->
+    <!-- Subtle blue ambient glow against dark slate-grey background -->
     <radialGradient id="ambient-blue-glow" cx="50%" cy="50%" r="50%">
-      <stop offset="0%" stop-color="#0a66c2" stop-opacity="0.22" />
-      <stop offset="45%" stop-color="#084d94" stop-opacity="0.10" />
-      <stop offset="75%" stop-color="#042a54" stop-opacity="0.03" />
-      <stop offset="100%" stop-color="#000000" stop-opacity="0" />
+      <stop offset="0%" stop-color="#0a66c2" stop-opacity="0.20" />
+      <stop offset="45%" stop-color="#084d94" stop-opacity="0.09" />
+      <stop offset="75%" stop-color="#042a54" stop-opacity="0.02" />
+      <stop offset="100%" stop-color="#1c1d21" stop-opacity="0" />
     </radialGradient>
 
-    <!-- Subtle squircle ground shadow onto black -->
+    <!-- Subtle squircle ground shadow onto dark slate-grey -->
     <filter id="tile-subtle-shadow" x="-10%" y="-10%" width="120%" height="125%">
-      <feDropShadow dx="0" dy="18" stdDeviation="24" flood-color="#000000" flood-opacity="0.9" />
-      <feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="#021226" flood-opacity="0.4" />
+      <feDropShadow dx="0" dy="20" stdDeviation="24" flood-color="#090a0d" flood-opacity="0.75" />
+      <feDropShadow dx="0" dy="5" stdDeviation="10" flood-color="#0e0f13" flood-opacity="0.4" />
     </filter>
 
     <!-- Controlled minimal depth for R and dot -->
@@ -67,10 +67,10 @@
     </linearGradient>
   </defs>
 
-  <!-- Deep Pure-Black Background -->
-  <rect width="1024" height="1024" fill="#000000" />
+  <!-- Dark Slate-Grey Canvas Background (matches screenshot) -->
+  <rect width="1024" height="1024" fill="#1c1d21" />
 
-  <!-- Subtle Blue Ambient Glow against Pure Black -->
+  <!-- Subtle Blue Ambient Glow against Slate-Grey -->
   <circle cx="512" cy="512" r="480" fill="url(#ambient-blue-glow)" />
 
   <!-- Main Squircle Icon Tile -->
