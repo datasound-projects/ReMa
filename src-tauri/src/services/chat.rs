@@ -19,13 +19,15 @@ use crate::{
         mcp as mcp_repo,
     },
     error::{AppError, AppResult},
-    llm::{ChatRequest, Endpoint, Finish, Turn},
+    events::EventSink,
+    llm::{ChatRequest, Endpoint, Finish, Turn, WebEvent, WebKind, WebObserver, WebSearch},
     models::{
         chat::{
-            ApprovalDecision, ChatEvent, Conversation, ConversationDetail, Message, MessageRole,
-            MessageStatus, SendMessageInput, SendMessageResult, ToolActivity,
+            ActivityKind, ActivitySource, ApprovalDecision, ChatEvent, Conversation,
+            ConversationDetail, Message, MessageRole, MessageStatus, SendMessageInput,
+            SendMessageResult, ToolActivity, ToolStatus,
         },
-        provider::ModelRef,
+        provider::{ModelRef, ProviderKind},
     },
     services::{agents, chat_tools::ChatTools, mcp, profile_context, providers},
     state::AppState,
@@ -370,21 +372,150 @@ pub fn with_profile(state: &AppState, mut system: String, use_profile: bool) -> 
     Ok(system)
 }
 
-/// The system prompt: identity plus the current local date and time.
-pub fn system_prompt(now: i64) -> String {
+/// Whether the endpoint's provider hosts a web search the model can use
+/// (every built-in provider; not local or other compatible servers).
+pub fn can_search_web(endpoint: &Endpoint) -> bool {
+    endpoint.kind != ProviderKind::OpenaiCompatible
+}
+
+/// The system prompt: identity, the current local date and time, whether
+/// the model can search the web, and how to list jobs so ReMa can analyze
+/// them.
+pub fn system_prompt(now: i64, web: bool) -> String {
     let zoned = jiff::Timestamp::from_millisecond(now)
         .unwrap_or_else(|_| jiff::Timestamp::now())
         .to_zoned(jiff::tz::TimeZone::system());
+    let web = if web {
+        "You can search the web and open pages. Use them whenever an answer depends on \
+         current information, and always when asked for job openings: search job boards \
+         and company career pages, open the postings you list to check they are real and \
+         still open, and list only postings you actually found. Link each job to the \
+         posting itself, not to a search results page. Prefer recent postings; if you \
+         cannot verify something, say so."
+    } else {
+        "You cannot search the web in this chat. When asked for current job openings, say \
+         that this model has no web access, never present invented or remembered postings \
+         as open, and suggest searches the user can run (as links) or choosing a model \
+         with web search in ReMa's Settings."
+    };
     format!(
-        "You are ReMa, a helpful assistant in the ReMa desktop app. \
-         Current date and time: {} ({}). \
+        "You are ReMa, a career assistant in the ReMa desktop app. \
+         Current date and time: {} ({}). {web} \
          When you list job openings, show them as a Markdown table with the columns \
          Company, Role, Location, Work mode, Salary, Posted, Key skills and Link (one row \
-         per job); write \"—\" for anything the posting does not state and never estimate \
-         salaries or dates.",
+         per job; Link is a Markdown link to the posting); write \"—\" for anything the \
+         posting does not state and never estimate salaries or dates.",
         zoned.strftime("%A, %e %B %Y %H:%M"),
         zoned.time_zone().iana_name().unwrap_or("local time"),
     )
+}
+
+/// Shows the model's web searches with the answer as it streams.
+struct ChatWeb {
+    generations: Generations,
+    events: Arc<dyn EventSink>,
+    conversation_id: i64,
+    message_id: i64,
+    /// Query or URL of each search, from its start (some providers only
+    /// report it then).
+    targets: Mutex<HashMap<String, String>>,
+}
+
+/// Most pages listed for one search.
+const MAX_SOURCES: usize = 10;
+
+impl WebObserver for ChatWeb {
+    fn observe(&self, event: WebEvent) {
+        let activity = match event {
+            WebEvent::Started { id, kind, target } => {
+                let target = {
+                    let mut targets = self.targets.lock().unwrap();
+                    if !target.is_empty() {
+                        targets.insert(id.clone(), target.clone());
+                    }
+                    targets.get(&id).cloned().unwrap_or_default()
+                };
+                web_activity(&id, kind, target, ToolStatus::Running, None, Vec::new())
+            }
+            WebEvent::Finished {
+                id,
+                kind,
+                target,
+                sources,
+                error,
+            } => {
+                let target = if target.is_empty() {
+                    self.targets
+                        .lock()
+                        .unwrap()
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or_default()
+                } else {
+                    target
+                };
+                let status = if error.is_some() {
+                    ToolStatus::Failed
+                } else {
+                    ToolStatus::Completed
+                };
+                let sources = sources
+                    .into_iter()
+                    .take(MAX_SOURCES)
+                    .map(|s| ActivitySource {
+                        title: s.title,
+                        url: s.url,
+                    })
+                    .collect();
+                web_activity(&id, kind, target, status, error, sources)
+            }
+            WebEvent::Unavailable { reason } => ToolActivity {
+                id: "web:unavailable".into(),
+                server_id: None,
+                server: "Web search".into(),
+                tool: String::new(),
+                status: ToolStatus::Unavailable,
+                arguments: String::new(),
+                detail: Some(reason),
+                read_only: true,
+                kind: ActivityKind::WebSearch,
+                sources: Vec::new(),
+            },
+        };
+        self.generations
+            .record_activity(self.message_id, activity.clone());
+        self.events.chat(ChatEvent::Activity {
+            conversation_id: self.conversation_id,
+            message_id: self.message_id,
+            activity,
+        });
+    }
+}
+
+fn web_activity(
+    id: &str,
+    kind: WebKind,
+    target: String,
+    status: ToolStatus,
+    detail: Option<String>,
+    sources: Vec<ActivitySource>,
+) -> ToolActivity {
+    let (kind, tool) = match kind {
+        WebKind::Search => (ActivityKind::WebSearch, "search"),
+        WebKind::Page => (ActivityKind::WebPage, "open page"),
+    };
+    ToolActivity {
+        id: format!("web:{id}"),
+        server_id: None,
+        server: "Web".into(),
+        tool: tool.into(),
+        status,
+        arguments: target,
+        detail,
+        read_only: true,
+        kind,
+        sources,
+    }
 }
 
 fn spawn_generation(state: &AppState, message: &Message, model: ModelRef, endpoint: Endpoint) {
@@ -413,7 +544,12 @@ async fn generate(
             ))
         })?;
         // Base prompt, then agents (selection order), then Profile context.
-        let system = with_agents(state, system_prompt(now_ms()), &conversation.agent_ids)?;
+        let web_search = can_search_web(&endpoint);
+        let system = with_agents(
+            state,
+            system_prompt(now_ms(), web_search),
+            &conversation.agent_ids,
+        )?;
         let mut system = with_profile(state, system, conversation.profile_context)?;
         let (tools, notices) = if conversation.mcp_server_ids.is_empty() {
             (None, Vec::new())
@@ -457,6 +593,15 @@ async fn generate(
                 })
                 .collect(),
             max_output_tokens: providers::max_output_tokens(state, &model)?,
+            web: web_search.then(|| WebSearch {
+                observer: Some(Arc::new(ChatWeb {
+                    generations: state.generations.clone(),
+                    events: state.events.clone(),
+                    conversation_id,
+                    message_id,
+                    targets: Mutex::default(),
+                })),
+            }),
             rounds: Vec::new(),
         };
         let generations = state.generations.clone();
@@ -476,6 +621,7 @@ async fn generate(
     }
     .await;
 
+    providers::note_outcome(state, &model.provider_id, &outcome);
     let (content, activity) = state.generations.finish(message_id);
     let (status, error) = match outcome {
         Ok(Finish::Cancelled) => (MessageStatus::Stopped, None),
@@ -673,6 +819,84 @@ mod tests {
             .collect();
         assert_eq!(turns, ["one", "ok", "two"]);
         assert_eq!(list_conversations(&state).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn chats_may_search_the_web_and_show_what_was_searched() {
+        use crate::llm::WebSource;
+        let (state, _, llm) = setup(
+            FakeLanguageModel::replying(&["| Company | Role |"]).searching(vec![
+                WebEvent::Started {
+                    id: "s1".into(),
+                    kind: WebKind::Search,
+                    target: "AI jobs Vienna".into(),
+                },
+                WebEvent::Finished {
+                    id: "s1".into(),
+                    kind: WebKind::Search,
+                    target: String::new(),
+                    sources: vec![WebSource {
+                        title: "Senior AI Engineer".into(),
+                        url: "https://jobs.example.com/1".into(),
+                    }],
+                    error: None,
+                },
+            ]),
+        )
+        .await;
+        let sent = send_message(&state, send(None, "Find AI jobs in Vienna"))
+            .await
+            .unwrap();
+        let done = wait_until_done(&state, sent.assistant_message.id).await;
+
+        let (_, request) = llm.requests.lock().unwrap()[0].clone();
+        assert!(request.web.is_some());
+        let system = request.system.unwrap();
+        assert!(system.contains("You can search the web"));
+        assert!(system.contains("Link each job to the posting itself"));
+
+        assert_eq!(done.activity.len(), 1);
+        let search = &done.activity[0];
+        assert_eq!(search.kind, ActivityKind::WebSearch);
+        assert_eq!(search.status, ToolStatus::Completed);
+        assert_eq!(
+            search.arguments, "AI jobs Vienna",
+            "the query from the start is kept"
+        );
+        assert_eq!(search.sources[0].url, "https://jobs.example.com/1");
+    }
+
+    #[test]
+    fn local_models_are_told_they_cannot_search() {
+        let prompt = system_prompt(0, false);
+        assert!(prompt.contains("cannot search the web"));
+        assert!(!prompt.contains("You can search the web"));
+    }
+
+    #[tokio::test]
+    async fn settings_show_an_account_without_credits_until_a_request_succeeds() {
+        let mut llm = FakeLanguageModel::replying(&["Hi"]);
+        llm.fail_with = Some("No API credits left.".into());
+        llm.fail_billing = true;
+        let (state, _, _) = setup(llm).await;
+        let out_of_credits = |state: &AppState| {
+            providers::provider_view(state, "openai")
+                .unwrap()
+                .out_of_credits
+        };
+        assert!(!out_of_credits(&state));
+        let sent = send_message(&state, send(None, "Hello")).await.unwrap();
+        let failed = wait_until_done(&state, sent.assistant_message.id).await;
+        assert_eq!(failed.status, MessageStatus::Error);
+        assert!(out_of_credits(&state));
+        let view = providers::provider_view(&state, "openai").unwrap();
+        assert_eq!(
+            view.billing_url.as_deref(),
+            Some(crate::llm::http::OPENAI_BILLING_URL)
+        );
+
+        providers::note_outcome(&state, "openai", &Ok::<(), AppError>(()));
+        assert!(!out_of_credits(&state));
     }
 
     #[tokio::test]

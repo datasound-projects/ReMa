@@ -6,7 +6,7 @@ Rust owns application state, persistence, scheduling, validation, provider confi
 
 ## What ReMa does
 
-- **Chat**: a general-purpose AI chat with streaming responses, Stop, Retry, Copy, Markdown (code, lists, tables, links) and persistent conversation history ("Recents").
+- **Chat**: a general-purpose AI chat with streaming responses, Stop, Retry, Copy, Markdown (code, lists, tables, links) and persistent conversation history ("Recents"). Models search the web with their provider's own web search, so job searches return real, current postings with direct links (see [Web search](#web-search)).
 - **Models**: OpenAI, Anthropic, Google Gemini, and any OpenAI-compatible endpoint (Ollama, LM Studio, vLLM, …). Connect OpenAI with your **ChatGPT account** and Anthropic with your **Claude Console account** in the browser, or use API keys. Pick the model in the chat composer.
 - **Scheduled Tasks**: schedule the prompt you are writing, straight from the composer. Supports one-time, daily, every N days, selected weekdays, and intervals of 15 minutes or more. A task can end on a date or after N runs. You can edit, pause, resume, delete or run tasks now, and each task keeps its run history with results.
 - **Settings**: connect providers, choose which models appear in the chat, and set the default model. Connect Google Workspace (Gmail and Calendar) with one sign-in.
@@ -48,7 +48,7 @@ Integrations                src-tauri/src/integrations/google (OAuth, Gmail tool
 Rules:
 
 - **Deterministic core.** The scheduler decides when tasks run, using pure, unit-tested schedule math. The LLM never controls timing, state, credentials or configuration.
-- **Provider-neutral.** Chat and scheduler use one `LanguageModel` interface. Provider, transport, authentication and model are separate concepts: the HTTPS adapters (`llm/openai.rs`, `llm/anthropic.rs`, `llm/gemini.rs`) and the Codex runtime (`accounts/codex.rs`) are transports; a connection method says how a request is authenticated; models are discovered per connection. The OpenAI adapter also serves every OpenAI-compatible endpoint.
+- **Provider-neutral.** Chat and scheduler use one `LanguageModel` interface. Provider, transport, authentication and model are separate concepts: the HTTPS adapters (`llm/openai_responses.rs` for OpenAI's Responses API, `llm/anthropic.rs`, `llm/gemini.rs`, and `llm/openai.rs` for every OpenAI-compatible endpoint's Chat Completions) and the Codex runtime (`accounts/codex.rs`) are transports; a connection method says how a request is authenticated; models are discovered per connection. Web search is each provider's hosted tool, reported back as `WebEvent`s.
 - **Rust is the source of truth.** IPC types, commands and events are generated from Rust. The frontend never hand-writes copies of them.
 - **Streaming via events.** Replies stream as typed `ChatEvent`s. Generation runs in the background, so switching chats does not interrupt it.
 
@@ -73,7 +73,7 @@ React → Tauri command → services::accounts → accounts::{codex, claude_cons
 - **Sign-in.** **Continue with ChatGPT** calls `account/login/start`. ReMa opens the returned `auth.openai.com` page in your browser, and Codex receives the result on its own local callback.
 - **Device code.** **Use a code instead** switches to device-code sign-in: ReMa shows a one-time code to enter on OpenAI's page.
 - **Credentials and requests.** Codex stores and refreshes the credentials, in the OS keychain when available (`cli_auth_credentials_store = "auto"`). It also sends every model request.
-- **Chat.** Each chat turn runs on an ephemeral thread. ReMa's system prompt replaces Codex's instructions, earlier messages are added as history, and every Codex tool is turned off (shell, file edits, web search, apps, plugins, sub-agents). The only tools are the MCP tools you selected in the chat, offered as Codex dynamic tools and run by ReMa (with the same approvals as other providers). The thread uses a read-only sandbox in an empty folder, and Codex's own approvals are always declined.
+- **Chat.** Each chat turn runs on an ephemeral thread. ReMa's system prompt replaces Codex's instructions and earlier messages are added as history. Codex's live web search is turned on for chat threads (`config: {"web_search": "live"}`; OpenAI runs the searches), and every local tool is off (shell, file edits, apps, plugins, sub-agents). The only other tools are the MCP tools you selected in the chat, offered as Codex dynamic tools and run by ReMa (with the same approvals as other providers). The thread uses a read-only sandbox in an empty folder, and Codex's own approvals are always declined.
 - **Isolation.** The runtime is private to ReMa: its own `CODEX_HOME` under the app data folder, so your Codex CLI settings, sessions and MCP servers are neither read nor changed. It keeps no history.
 - **Install.** Release builds of ReMa ship the latest Codex (see [Bundled runtimes](#bundled-runtimes)). ReMa uses the newest of the bundled and any installed copy (0.151 or newer).
 
@@ -82,7 +82,7 @@ React → Tauri command → services::accounts → accounts::{codex, claude_cons
 - **Sign-in.** `ant` opens the Claude Console sign-in in your browser, receives the result on a local callback, and stores and refreshes the token.
 - **Requests.** For requests, ReMa asks `ant auth print-credentials --access-token` for a short-lived token. This is the documented way to hand the credential to another program. ReMa keeps the token in memory for at most a minute and calls the Anthropic API with `Authorization: Bearer` and `anthropic-beta: oauth-2025-04-20`.
 - **Isolation.** The CLI uses a ReMa-owned `ANTHROPIC_CONFIG_DIR`, so your own `ant` profiles are untouched.
-- **Billing.** Usage is billed to your Console organization at API rates, like an API key.
+- **Billing.** Usage is billed to your Console organization's prepaid API credits, like an API key. It is separate from a Claude Pro or Max plan: with no credits left, every request fails with "credit balance is too low". ReMa then says so in the chat (with a link to the Console's billing page) and shows **No API credits left · Add credits** on the Anthropic row in Settings until a request succeeds.
 
 **Claude Pro/Max (Claude.ai) sign-in is not offered.** Anthropic's documentation rules it out for apps like ReMa:
 
@@ -217,11 +217,28 @@ In Chat, the **+** menu selects any number of agents (up to 8). Their instructio
 
 Release builds include the official **Codex** runtime (latest `@openai/codex` from npm) and Anthropic's **`ant`** CLI (from Anthropic's Homebrew tap), so the account sign-ins work without installing anything. `pnpm build:app` downloads the current versions for the target platform (checking their published SHA-512 / SHA-256), then builds the app with them as sidecars (`src-tauri/tauri.runtimes.conf.json`). At run time ReMa uses the newest of the bundled and any installed copy. `pnpm tauri dev` and `pnpm tauri build` work without them.
 
+## Web search
+
+Chat answers and scheduled prompt tasks can search the web. ReMa never runs searches or scrapes pages itself: each model uses its provider's own hosted web search, and ReMa only shows what it did.
+
+| Connection | Web search |
+| --- | --- |
+| OpenAI · ChatGPT account | Codex live web search, turned on per chat thread |
+| OpenAI · API key | The Responses API's `web_search` tool (requests are stateless, `store: false`) |
+| Anthropic · Claude Console or API key | Server tools `web_search` and `web_fetch` (`_20260209` on Claude Opus/Sonnet 4.6 and later and 5-series models, `web_search_20250305` on older ones), up to 8 uses each per answer; a `pause_turn` is resumed automatically |
+| Gemini · API key | Grounding with Google Search |
+| Local and compatible endpoints | None: the model is told it has no web access and must not present remembered postings as open |
+
+- **Job searches.** The system prompt tells a model with web search to search job boards and company career pages, open the postings it lists, list only postings it found, and link each job to the posting itself (not a search page), as a table that Analytics reads.
+- **What you see.** Above the answer, **Searching the web…** while it runs, then **Searched the web · N searches · N pages**; expand it for each query, its results and the pages opened (links open in the ReMa browser).
+- **Fallback.** If a provider rejects its web tools for a model or account (for example web search disabled for an Anthropic organization), ReMa answers without them and says why.
+- ReMa's own extraction requests (reading a job list, CV import, Gmail triage) never search the web.
+
 ## Analytics
 
 **Opening it.** The **Analytics** button in the header opens a panel at half the width of the workspace, beside the current page. It is not a page in the navigation. The panel can be resized, collapsed to a strip, maximized, minimized to the header button, and closed. It reopens as you left it: size and mode are kept in the window, and the scope, filters, ranking, columns, tab and options are saved in SQLite. **Analyze** on a chat answer or task result opens it with that search selected. A job row opens the job in the built-in browser, and Analytics and the browser can sit side by side.
 
-**Where the jobs come from.** Every chat answer and prompt-task result that contains a job table is read automatically when it finishes, and older history is read once at start. (The chat system prompt asks the model to list jobs as a table with company, role, location, work mode, salary, posting date, key skills and link.) Answers that list jobs as text can be read with **Analyze**, which parses common list formats and then asks the model; the model's values must appear verbatim in the answer. Each answer or run becomes a *job search run*, which keeps its own list of jobs even when those jobs are shared with other runs.
+**Where the jobs come from.** Every chat answer and prompt-task result that contains a job table is read automatically when it finishes, and older history is read once at start. (The chat system prompt asks the model to list jobs as a table with company, role, location, work mode, salary, posting date, key skills and link.) **Analyze N jobs** under such an answer opens those jobs in Analytics (ranking, skill gaps, requirements, learning). **Analyze jobs** appears under answers that seem to link to postings without a table: it asks the model that wrote the answer (or the default model if that one is gone) to copy the list out, and keeps only values that appear verbatim in the answer. Answers that only suggest searches (links to search result pages) don't get the button; if nothing is found, ReMa says the answer lists no postings and how to ask for them. Each answer or run becomes a *job search run*, which keeps its own list of jobs even when those jobs are shared with other runs.
 
 **Normalization.** Rust normalizes each job: role (seniority words removed), seniority, work mode, employment type, cities and countries, salary (minimum, maximum, currency, period) and posting date. A value the source does not state stays empty. ReMa never guesses a salary, seniority, location, date or requirement. Estimated salaries are ignored. Relative dates ("3 days ago") count from when the job was found, and the date it was found is never used as a posting date. Ambiguous dates such as `03/04/2026` are not guessed.
 

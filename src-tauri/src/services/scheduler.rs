@@ -23,7 +23,7 @@ use crate::{
     error::{AppError, AppResult},
     integrations::google::{self, calendar::CalendarApi, calendar::HttpCalendar, gmail::HttpGmail},
     jobs::{self, JobRunConfig, RunModel, Tools},
-    llm::{ChatRequest, Finish, Turn},
+    llm::{ChatRequest, Finish, Turn, WebSearch},
     models::{
         chat::MessageRole,
         google::GoogleService,
@@ -31,7 +31,7 @@ use crate::{
         task::{ExecutionStatus, ExecutionTrigger, TaskExecution, TaskKind},
     },
     services::{
-        chat::{system_prompt, with_profile},
+        chat::{can_search_web, system_prompt, with_profile},
         providers,
         schedule::{self, Limits},
     },
@@ -322,7 +322,7 @@ async fn run_task(
                     format!(
                         "{} This request is a scheduled task running automatically; \
                          reply with the finished result.",
-                        system_prompt(started_at)
+                        system_prompt(started_at, can_search_web(&endpoint))
                     ),
                     task.use_profile,
                 )?),
@@ -331,11 +331,12 @@ async fn run_task(
                     content: task.prompt.clone(),
                 }],
                 max_output_tokens,
+                web: can_search_web(&endpoint).then(WebSearch::default),
                 ..ChatRequest::default()
             };
             let mut text = String::new();
             let mut on_delta = |delta: &str| text.push_str(delta);
-            let finish = state
+            let outcome = state
                 .llm
                 .stream_chat(
                     &endpoint,
@@ -344,7 +345,9 @@ async fn run_task(
                     cancel,
                     &mut on_delta,
                 )
-                .await?;
+                .await;
+            providers::note_outcome(state, &task.model.provider_id, &outcome);
+            let finish = outcome?;
             Ok(Output {
                 finish,
                 text,

@@ -62,6 +62,26 @@ pub enum ToolStatus {
     Unavailable,
 }
 
+/// What an activity entry records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityKind {
+    /// A tool on one of the user's MCP servers.
+    #[default]
+    Mcp,
+    /// A web search by the model's provider (`arguments` holds the query).
+    WebSearch,
+    /// A web page the model's provider opened (`arguments` holds the URL).
+    WebPage,
+}
+
+/// A page a web search found or opened.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct ActivitySource {
+    pub title: String,
+    pub url: String,
+}
+
 /// A tool call (or an unavailable server) while answering, shown with the
 /// message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -79,6 +99,11 @@ pub struct ToolActivity {
     pub detail: Option<String>,
     /// The server marks the tool read-only (it ran without approval).
     pub read_only: bool,
+    #[serde(default)]
+    pub kind: ActivityKind,
+    /// Web activity: the pages found or opened.
+    #[serde(default)]
+    pub sources: Vec<ActivitySource>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]

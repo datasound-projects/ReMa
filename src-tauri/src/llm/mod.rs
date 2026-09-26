@@ -13,17 +13,25 @@
 //!   account and an OpenAI API key can offer different models.
 //!
 //! Each HTTP adapter only knows how to build its requests and parse its
-//! stream events; streaming, cancellation and error mapping are shared. The
-//! OpenAI adapter also serves every OpenAI-compatible endpoint (Ollama, LM
-//! Studio, vLLM, …).
+//! stream events; streaming, cancellation and error mapping are shared.
+//! OpenAI's own API is reached through the Responses API (`openai_responses`);
+//! the Chat Completions adapter (`openai`) serves every OpenAI-compatible
+//! endpoint (Ollama, LM Studio, vLLM, …).
+//!
+//! **Web search** is the provider's own hosted tool, run on the provider's
+//! side: Codex's live web search for a ChatGPT account, OpenAI's
+//! `web_search`, Anthropic's `web_search`/`web_fetch` server tools and
+//! Gemini's Google Search grounding. ReMa never runs searches itself; it
+//! only reports what the model searched and read ([`WebEvent`]).
 
 pub mod anthropic;
 pub mod gemini;
 pub mod http;
 pub mod openai;
+pub mod openai_responses;
 pub mod sse;
 
-use std::{fmt, future::Future, pin::Pin, sync::Arc};
+use std::{collections::HashMap, fmt, future::Future, pin::Pin, sync::Arc};
 
 use reqwest::RequestBuilder;
 use serde_json::Value;
@@ -89,11 +97,76 @@ impl ToolOutput {
 
 /// One step of tool use within an answer: the model's text and calls, and
 /// what the tools returned.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct ToolRound {
     pub text: String,
     pub calls: Vec<ToolCall>,
     pub outputs: Vec<ToolOutput>,
+    /// The provider's own record of this step, sent back verbatim when set
+    /// (Anthropic's content blocks, which carry server tool results).
+    pub content: Option<Value>,
+    /// The provider paused its own tool loop (Anthropic `pause_turn`): the
+    /// step is sent back as is so the model continues where it stopped.
+    pub paused: bool,
+}
+
+/// Something the model did on the web while answering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WebEvent {
+    /// A search or page visit began (`target` is the query or the URL; it
+    /// may be empty until the provider reports it).
+    Started {
+        id: String,
+        kind: WebKind,
+        target: String,
+    },
+    /// It finished, with the pages found or opened, or an error.
+    Finished {
+        id: String,
+        kind: WebKind,
+        target: String,
+        sources: Vec<WebSource>,
+        error: Option<String>,
+    },
+    /// Web search could not be used for this answer.
+    Unavailable { reason: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebKind {
+    Search,
+    Page,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebSource {
+    pub title: String,
+    pub url: String,
+}
+
+/// Receives [`WebEvent`]s as they happen (chat shows them with the answer).
+pub trait WebObserver: Send + Sync {
+    fn observe(&self, event: WebEvent);
+}
+
+/// Lets the model search the web with its provider's hosted search.
+#[derive(Clone, Default)]
+pub struct WebSearch {
+    pub observer: Option<Arc<dyn WebObserver>>,
+}
+
+impl WebSearch {
+    fn report(&self, event: WebEvent) {
+        if let Some(observer) = &self.observer {
+            observer.observe(event);
+        }
+    }
+}
+
+impl fmt::Debug for WebSearch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WebSearch").finish_non_exhaustive()
+    }
 }
 
 /// Runs the model's tool calls (for chat: MCP tools, with approvals).
@@ -118,6 +191,8 @@ impl fmt::Debug for ToolBox {
 
 /// Most model calls in one answer when tools are used.
 pub const MAX_TOOL_ROUNDS: usize = 8;
+/// Most times one answer resumes a provider's paused tool loop.
+pub const MAX_CONTINUATIONS: usize = 4;
 
 #[derive(Debug, Clone, Default)]
 pub struct ChatRequest {
@@ -127,6 +202,9 @@ pub struct ChatRequest {
     pub max_output_tokens: Option<u32>,
     /// Tools the model may call (none unless the user selected MCP servers).
     pub tools: Option<ToolBox>,
+    /// The model may search the web (chat and scheduled prompts; never for
+    /// ReMa's own extraction requests).
+    pub web: Option<WebSearch>,
     /// Tool use so far in this answer, after `turns`.
     pub rounds: Vec<ToolRound>,
 }
@@ -258,7 +336,32 @@ pub struct StreamPiece {
     /// The provider signalled the end of the stream.
     pub done: bool,
     pub tools: Vec<ToolDelta>,
+    /// Searches and page visits reported by the provider.
+    pub web: Vec<WebEvent>,
+    /// The provider paused its server-side tool loop; send the step back to
+    /// continue.
+    pub paused: bool,
 }
+
+/// State an adapter keeps across the events of one stream.
+#[derive(Debug, Default)]
+pub struct StreamState {
+    /// The response's content blocks as the provider sent them (Anthropic),
+    /// rebuilt from the stream so a step can be sent back verbatim.
+    pub blocks: Vec<Value>,
+    /// Partial JSON of blocks whose input streams in pieces, by index.
+    pub partial_json: HashMap<usize, String>,
+}
+
+/// How one model call ended.
+struct Step {
+    finish: Finish,
+    calls: Vec<ToolCall>,
+    paused: bool,
+    content: Option<Value>,
+}
+
+type ParseFn = fn(&SseEvent, &mut StreamState) -> AppResult<StreamPiece>;
 
 /// Collects streamed tool-call pieces into calls.
 #[derive(Default)]
@@ -414,19 +517,14 @@ impl LanguageModel for ProviderLanguageModel {
                     .stream_chat(model_id, request, cancel, on_delta)
                     .await;
             }
-            let Some(tools) = request.tools.as_ref() else {
-                return self
-                    .stream_once(endpoint, model_id, request, &cancel, on_delta)
-                    .await
-                    .map(|(finish, _)| finish);
-            };
-            // Tools: call the model, run the tools it asks for, and call it
-            // again with the results, until it answers without tools.
+            // Call the model; run the tools it asks for (or resume a paused
+            // server-side tool loop) and call it again, until it answers.
             let mut request = request.clone();
             let mut separate = false;
-            for _ in 0..=MAX_TOOL_ROUNDS {
+            let mut continuations = 0;
+            loop {
                 let mut round_text = String::new();
-                let (finish, calls) = {
+                let result = {
                     let mut forward = |text: &str| {
                         // A blank line between the text of successive steps.
                         if separate && round_text.is_empty() && !text.trim().is_empty() {
@@ -436,19 +534,55 @@ impl LanguageModel for ProviderLanguageModel {
                         on_delta(text);
                     };
                     self.stream_once(endpoint, model_id, &request, &cancel, &mut forward)
-                        .await?
+                        .await
+                };
+                let step = match result {
+                    // The provider refused its web tools for this model or
+                    // account: answer without them rather than not at all.
+                    Err(error)
+                        if request.web.is_some()
+                            && request.rounds.is_empty()
+                            && round_text.is_empty()
+                            && rejects_web_tools(&error) =>
+                    {
+                        if let Some(web) = request.web.take() {
+                            web.report(WebEvent::Unavailable {
+                                reason: error.to_string(),
+                            });
+                        }
+                        continue;
+                    }
+                    other => other?,
                 };
                 separate |= !round_text.trim().is_empty();
-                if calls.is_empty() || finish != Finish::Complete {
-                    return Ok(finish);
+                if step.paused && step.finish == Finish::Complete {
+                    if continuations == MAX_CONTINUATIONS {
+                        return Err(AppError::provider(
+                            "The model kept searching without answering. Try a narrower request.",
+                        ));
+                    }
+                    continuations += 1;
+                    request.rounds.push(ToolRound {
+                        text: round_text,
+                        content: step.content,
+                        paused: true,
+                        ..ToolRound::default()
+                    });
+                    continue;
                 }
-                if request.rounds.len() == MAX_TOOL_ROUNDS {
+                let Some(tools) = request.tools.as_ref() else {
+                    return Ok(step.finish);
+                };
+                if step.calls.is_empty() || step.finish != Finish::Complete {
+                    return Ok(step.finish);
+                }
+                if request.rounds.iter().filter(|r| !r.paused).count() == MAX_TOOL_ROUNDS {
                     return Err(AppError::provider(
                         "The model kept calling tools without answering. Try a narrower request.",
                     ));
                 }
-                let mut outputs = Vec::with_capacity(calls.len());
-                for call in &calls {
+                let mut outputs = Vec::with_capacity(step.calls.len());
+                for call in &step.calls {
                     if cancel.is_cancelled() {
                         return Ok(Finish::Cancelled);
                     }
@@ -459,17 +593,18 @@ impl LanguageModel for ProviderLanguageModel {
                 }
                 request.rounds.push(ToolRound {
                     text: round_text,
-                    calls,
+                    calls: step.calls,
                     outputs,
+                    content: step.content,
+                    paused: false,
                 });
             }
-            Err(AppError::provider("Too many tool calls in one answer."))
         })
     }
 }
 
 impl ProviderLanguageModel {
-    /// One HTTPS call to the model: streams its text and returns how it
+    /// One HTTPS call to the model: streams its text and reports how it
     /// finished and the tools it called.
     async fn stream_once(
         &self,
@@ -478,50 +613,99 @@ impl ProviderLanguageModel {
         request: &ChatRequest,
         cancel: &CancellationToken,
         on_delta: DeltaSink<'_>,
-    ) -> AppResult<(Finish, Vec<ToolCall>)> {
+    ) -> AppResult<Step> {
         let secrets = endpoint.secrets();
-        let (http_request, parse): (RequestBuilder, fn(&SseEvent) -> AppResult<StreamPiece>) =
-            match endpoint.kind {
-                ProviderKind::Openai | ProviderKind::OpenaiCompatible => (
-                    openai::chat_request(&self.http, endpoint, model_id, request),
-                    openai::parse_event,
-                ),
-                ProviderKind::Anthropic => (
-                    anthropic::chat_request(&self.http, endpoint, model_id, request),
-                    anthropic::parse_event,
-                ),
-                ProviderKind::Gemini => (
-                    gemini::chat_request(&self.http, endpoint, model_id, request),
-                    gemini::parse_event,
-                ),
-            };
+        let (http_request, parse): (RequestBuilder, ParseFn) = match endpoint.kind {
+            ProviderKind::Openai => (
+                openai_responses::chat_request(&self.http, endpoint, model_id, request),
+                openai_responses::parse_event,
+            ),
+            ProviderKind::OpenaiCompatible => (
+                openai::chat_request(&self.http, endpoint, model_id, request),
+                openai::parse_event,
+            ),
+            ProviderKind::Anthropic => (
+                anthropic::chat_request(&self.http, endpoint, model_id, request),
+                anthropic::parse_event,
+            ),
+            ProviderKind::Gemini => (
+                gemini::chat_request(&self.http, endpoint, model_id, request),
+                gemini::parse_event,
+            ),
+        };
         let Some(response) = http::send(http_request, cancel, &endpoint.name, &secrets).await?
         else {
-            return Ok((Finish::Cancelled, Vec::new()));
+            return Ok(Step {
+                finish: Finish::Cancelled,
+                calls: Vec::new(),
+                paused: false,
+                content: None,
+            });
         };
-        drive_stream(response, cancel, on_delta, parse).await
+        let web = request.web.as_ref();
+        let mut step = drive_stream(response, cancel, on_delta, parse, web).await?;
+        if endpoint.kind != ProviderKind::Anthropic {
+            step.content = None;
+        }
+        Ok(step)
     }
 }
 
-/// Reads a provider stream, forwarding text and collecting tool calls.
+/// A 400 that names the provider's web tools: the model or account cannot
+/// use them.
+fn rejects_web_tools(error: &AppError) -> bool {
+    let AppError::Provider(message) = error else {
+        return false;
+    };
+    let message = message.to_lowercase();
+    message.contains("(400)")
+        && [
+            "web_search",
+            "web search",
+            "web_fetch",
+            "web fetch",
+            "google_search",
+            "googlesearch",
+            "grounding",
+            "server tool",
+            "tool use with",
+            "tools.",
+            "unsupported tool",
+            "tool type",
+        ]
+        .iter()
+        .any(|needle| message.contains(needle))
+}
+
+/// Reads a provider stream, forwarding text and web activity and collecting
+/// tool calls.
 async fn drive_stream(
     response: reqwest::Response,
     cancel: &CancellationToken,
     on_delta: DeltaSink<'_>,
-    parse: fn(&SseEvent) -> AppResult<StreamPiece>,
-) -> AppResult<(Finish, Vec<ToolCall>)> {
+    parse: ParseFn,
+    web: Option<&WebSearch>,
+) -> AppResult<Step> {
     let mut finish = Finish::Complete;
+    let mut paused = false;
     let mut calls = CallCollector::default();
+    let mut state = StreamState::default();
     let end = read_sse(response, cancel, |event| {
-        let piece = parse(&event)?;
+        let piece = parse(&event, &mut state)?;
         if let Some(text) = piece.text.as_deref().filter(|t| !t.is_empty()) {
             on_delta(text);
         }
         if let Some(reason) = piece.finish {
             finish = reason;
         }
+        paused |= piece.paused;
         for delta in piece.tools {
             calls.push(delta);
+        }
+        if let Some(web) = web {
+            for event in piece.web {
+                web.report(event);
+            }
         }
         Ok(if piece.done {
             Flow::Stop
@@ -531,8 +715,18 @@ async fn drive_stream(
     })
     .await?;
     Ok(match end {
-        StreamEnd::Cancelled => (Finish::Cancelled, Vec::new()),
-        StreamEnd::Completed => (finish, calls.finish()),
+        StreamEnd::Cancelled => Step {
+            finish: Finish::Cancelled,
+            calls: Vec::new(),
+            paused: false,
+            content: None,
+        },
+        StreamEnd::Completed => Step {
+            finish,
+            calls: calls.finish(),
+            paused,
+            content: (!state.blocks.is_empty()).then_some(Value::Array(state.blocks)),
+        },
     })
 }
 

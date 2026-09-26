@@ -9,6 +9,7 @@ import type { ModelCatalog } from '../../services/providerService';
 import { CheckIcon, CopyIcon, RetryIcon } from '../icons';
 import { AnalyzeButton } from '../analytics/AnalyzeButton';
 import { IconButton } from '../ui/IconButton';
+import { LinkedText } from '../ui/LinkedText';
 import { Markdown } from './Markdown';
 import { ToolActivityList } from './ToolActivityList';
 
@@ -76,7 +77,7 @@ function AssistantMessage({ message, catalog, canRetry, onRetry, run }: Assistan
       )}
       {message.status === 'error' && (
         <div className="message__error" role="alert">
-          {message.error ?? 'Something went wrong.'}
+          <LinkedText text={message.error ?? 'Something went wrong.'} />
         </div>
       )}
       {!streaming && (

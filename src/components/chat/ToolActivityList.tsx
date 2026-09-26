@@ -3,6 +3,8 @@ import { useState } from 'react';
 import { toApiError } from '../../services/ipc';
 import { respondToolApproval, type ApprovalDecision, type ToolActivity } from '../../services/chatService';
 import { ChevronDownIcon, ChevronRightIcon, PlugIcon, ToolIcon } from '../icons';
+import { isWebActivity } from '../../lib/toolActivity';
+import { WebActivity } from './WebActivity';
 
 const STATUS: Record<ToolActivity['status'], { label: string; tone: string }> = {
   awaiting_approval: { label: 'Needs your approval', tone: 'warning' },
@@ -21,12 +23,18 @@ function pretty(json: string): string {
   }
 }
 
-/** The MCP tools used while answering, with approval for the ones that need it. */
+/**
+ * What the model used while answering: its web searches, and MCP tools
+ * (with approval for the ones that need it).
+ */
 export function ToolActivityList({ messageId, activity }: { messageId: number; activity: ToolActivity[] }) {
   if (activity.length === 0) return null;
+  const web = activity.filter(isWebActivity);
+  const tools = activity.filter((a) => !isWebActivity(a));
   return (
     <div className="tool-activity" aria-label="Tools used">
-      {activity.map((a) =>
+      {web.length > 0 && <WebActivity activity={web} />}
+      {tools.map((a) =>
         a.status === 'unavailable' ? (
           <p key={a.id} className="tool-activity__notice" role="status">
             <PlugIcon aria-hidden="true" />

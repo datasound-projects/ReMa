@@ -200,6 +200,26 @@ export function CloudProviderRow({
         <p className="provider__account">{provider.accountLabel}</p>
       )}
 
+      {connected && provider.outOfCredits && !choosing && (
+        <div className="notice notice--warning" role="status">
+          <span className="notice__text">
+            <strong>No API credits left.</strong> Requests to {provider.name} fail until you add credits
+            {provider.connection === 'claude_console' ? ' to your Claude Console organization' : ''}. API credits are
+            billed separately from {provider.kind === 'anthropic' ? 'Claude Pro and Max plans' : 'ChatGPT plans'}.
+          </span>
+          {provider.billingUrl && (
+            <button
+              type="button"
+              className="button button--secondary button--small"
+              onClick={() => void openExternalUrl(provider.billingUrl ?? '').catch(() => {})}
+            >
+              Add credits
+              <ExternalIcon className="button__icon" />
+            </button>
+          )}
+        </div>
+      )}
+
       {problem && provider.statusMessage && !running && !choosing && (
         <p className="notice notice--danger" role="alert">
           {provider.statusMessage}

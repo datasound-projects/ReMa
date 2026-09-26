@@ -25,6 +25,7 @@ use crate::{
     models::{
         analytics::{DetailsStatus, RunSource},
         chat::MessageRole,
+        provider::ModelRef,
     },
     services::{chat::make_title, providers},
     state::AppState,
@@ -557,8 +558,19 @@ pub fn parse_listed(answer: &str, text: &str) -> AppResult<Vec<RawJob>> {
         .collect())
 }
 
-async fn listed_with_model(state: &AppState, text: &str) -> AppResult<Vec<RawJob>> {
-    let Some(model) = providers::catalog(state)?.default_model else {
+/// Reads a job list written as text with a model: the one that wrote the
+/// text when it is still available, else the default model.
+async fn listed_with_model(
+    state: &AppState,
+    text: &str,
+    author: Option<&ModelRef>,
+) -> AppResult<Vec<RawJob>> {
+    let catalog = providers::catalog(state)?;
+    let model = author
+        .filter(|a| catalog.models.iter().any(|m| &m.model == *a))
+        .cloned()
+        .or(catalog.default_model);
+    let Some(model) = model else {
         return Err(AppError::configuration(
             "This answer has no job table. Connect a model in Settings so ReMa can read job lists written as text.",
         ));
@@ -575,7 +587,7 @@ async fn listed_with_model(state: &AppState, text: &str) -> AppResult<Vec<RawJob
     };
     let mut answer = String::new();
     let mut sink = |delta: &str| answer.push_str(delta);
-    let finish = state
+    let outcome = state
         .llm
         .stream_chat(
             &endpoint,
@@ -584,8 +596,9 @@ async fn listed_with_model(state: &AppState, text: &str) -> AppResult<Vec<RawJob
             CancellationToken::new(),
             &mut sink,
         )
-        .await?;
-    if finish == Finish::Cancelled {
+        .await;
+    providers::note_outcome(state, &model.provider_id, &outcome);
+    if outcome? == Finish::Cancelled {
         return Err(AppError::validation("Reading the answer was cancelled."));
     }
     parse_listed(&answer, text)
@@ -598,13 +611,17 @@ pub async fn analyze_answer(state: &AppState, message_id: i64) -> AppResult<i64>
     let mut jobs = table::jobs(&answer.content);
     let mut source = RunSource::Chat;
     if jobs.is_empty() {
-        jobs = listed_with_model(state, &answer.content).await?;
+        jobs = listed_with_model(state, &answer.content, answer.model.as_ref()).await?;
         source = RunSource::Manual;
     }
     ingest(state, chat_search(&answer, jobs, source))?
         .map(|o| o.run_id)
-        .ok_or_else(|| AppError::validation("ReMa found no job listings in this answer."))
+        .ok_or_else(|| AppError::validation(NO_JOBS))
 }
+
+const NO_JOBS: &str = "This answer doesn't list specific job postings, so there is nothing to \
+     analyze yet. Ask for openings (for example “Find senior AI engineer jobs in Vienna posted \
+     this month”); answers that list jobs are added to Analytics automatically.";
 
 /// The user asked to analyze a scheduled task's result.
 pub async fn analyze_task_result(state: &AppState, execution_id: i64) -> AppResult<i64> {
@@ -612,12 +629,12 @@ pub async fn analyze_task_result(state: &AppState, execution_id: i64) -> AppResu
     let mut jobs = table::jobs(&row.result);
     let mut source = RunSource::Task;
     if jobs.is_empty() {
-        jobs = listed_with_model(state, &row.result).await?;
+        jobs = listed_with_model(state, &row.result, row.model.as_ref()).await?;
         source = RunSource::Manual;
     }
     ingest(state, task_search(&row, jobs, source))?
         .map(|o| o.run_id)
-        .ok_or_else(|| AppError::validation("ReMa found no job listings in this result."))
+        .ok_or_else(|| AppError::validation(NO_JOBS))
 }
 
 #[cfg(test)]

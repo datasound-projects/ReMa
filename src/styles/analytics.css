@@ -1408,9 +1408,17 @@
   height: 14px;
 }
 
-.analyze-button__error {
-  margin-left: var(--space-2);
-  font-size: var(--text-xs);
+.analyze-button__note {
+  flex-basis: 100%;
+  order: 10;
+  max-width: 68ch;
+  margin: var(--space-1) 0 0;
+  font-size: var(--text-sm);
+  line-height: var(--leading-snug);
+  color: var(--color-text-secondary);
+}
+
+.analyze-button__note--error {
   color: var(--color-danger);
 }
 

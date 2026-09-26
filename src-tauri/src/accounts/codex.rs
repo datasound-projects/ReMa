@@ -10,9 +10,11 @@
 //! The runtime is private to ReMa: its own `CODEX_HOME` (the user's Codex
 //! CLI configuration, sessions, MCP servers and skills are not loaded),
 //! credentials in the OS keychain when available, no saved history, and
-//! chat turns on ephemeral threads with every agent tool turned off
-//! (shell, file edits, web search, apps, plugins, sub-agents), a read-only
-//! sandbox in an empty folder and approvals always declined.
+//! chat turns on ephemeral threads with every local agent tool turned off
+//! (shell, file edits, apps, plugins, sub-agents), a read-only sandbox in an
+//! empty folder and approvals always declined. Web search is off by
+//! default; a chat turn that asks for it gets Codex's live web search for
+//! that thread only (OpenAI runs the searches; nothing runs locally).
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -37,7 +39,8 @@ use super::{locate, AccountRuntime, RuntimeStatus, SignInAttempt, SignInOutcome}
 use crate::{
     error::{AppError, AppResult},
     llm::{
-        BoxFuture, ChatRequest, DeltaSink, FetchedModel, Finish, ToolCall, ToolExecutor, ToolOutput,
+        BoxFuture, ChatRequest, DeltaSink, FetchedModel, Finish, ToolCall, ToolExecutor,
+        ToolOutput, WebEvent, WebKind, WebSearch, WebSource,
     },
     models::chat::MessageRole,
 };
@@ -302,6 +305,10 @@ impl CodexRuntime {
         if !tools.is_empty() {
             params["dynamicTools"] = json!(tools);
         }
+        if request.web.is_some() {
+            // Live results from OpenAI's web search, for this thread only.
+            params["config"] = json!({ "web_search": "live" });
+        }
         let started = conn.request("thread/start", params).await?;
         let thread_id = started
             .pointer("/thread/id")
@@ -319,6 +326,7 @@ impl CodexRuntime {
             &cancel,
             on_delta,
             executor.as_deref(),
+            request.web.as_ref(),
         )
         .await;
         drop(route);
@@ -340,6 +348,7 @@ async fn run_turn(
     cancel: &CancellationToken,
     on_delta: DeltaSink<'_>,
     tools: Option<&dyn ToolExecutor>,
+    web: Option<&WebSearch>,
 ) -> AppResult<Finish> {
     if !history.is_empty() {
         conn.request(
@@ -426,6 +435,20 @@ async fn run_turn(
                 let delta = params.get("delta").and_then(Value::as_str).unwrap_or("");
                 stream.push(item, delta, on_delta);
             }
+            "item/started" | "item/completed"
+                if for_turn
+                    && params.pointer("/item/type").and_then(Value::as_str)
+                        == Some("webSearch") =>
+            {
+                if let (Some(web), Some(item)) = (web, params.get("item")) {
+                    if let Some(observer) = &web.observer {
+                        observer.observe(web_search_event(
+                            item,
+                            notification.method == "item/completed",
+                        ));
+                    }
+                }
+            }
             "item/completed" if for_turn => {
                 let item = params.get("item").unwrap_or(&Value::Null);
                 if item.get("type").and_then(Value::as_str) == Some("agentMessage") {
@@ -460,6 +483,67 @@ async fn run_turn(
             }
             _ => {}
         }
+    }
+}
+
+/// A Codex `webSearch` item as web activity.
+fn web_search_event(item: &Value, finished: bool) -> WebEvent {
+    let id = item
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let action = item.get("action").unwrap_or(&Value::Null);
+    let (kind, target) = match action.get("type").and_then(Value::as_str) {
+        Some("openPage" | "findInPage") => (
+            WebKind::Page,
+            action
+                .get("url")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        ),
+        _ => (
+            WebKind::Search,
+            action
+                .get("query")
+                .and_then(Value::as_str)
+                .filter(|q| !q.is_empty())
+                .or_else(|| item.get("query").and_then(Value::as_str))
+                .unwrap_or_default(),
+        ),
+    };
+    let target = target.to_string();
+    if !finished {
+        return WebEvent::Started { id, kind, target };
+    }
+    // Results are opaque JSON; keep the ones with a URL.
+    let mut sources: Vec<WebSource> = item
+        .get("results")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|result| {
+            let url = result.get("url").and_then(Value::as_str)?.to_string();
+            let title = result
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or(&url)
+                .to_string();
+            Some(WebSource { title, url })
+        })
+        .collect();
+    if kind == WebKind::Page && sources.is_empty() && !target.is_empty() {
+        sources.push(WebSource {
+            title: target.clone(),
+            url: target.clone(),
+        });
+    }
+    WebEvent::Finished {
+        id,
+        kind,
+        target,
+        sources,
+        error: None,
     }
 }
 
@@ -1415,6 +1499,114 @@ mod tests {
                 }
             })
         }
+    }
+
+    #[derive(Default)]
+    struct RecordingWeb(Mutex<Vec<WebEvent>>);
+
+    impl crate::llm::WebObserver for RecordingWeb {
+        fn observe(&self, event: WebEvent) {
+            self.0.lock().unwrap().push(event);
+        }
+    }
+
+    #[tokio::test]
+    async fn turns_on_live_web_search_for_the_thread_and_reports_searches() {
+        let (runtime, requests, _) = runtime(Arc::new(|method, params| match method {
+            "thread/start" => vec![json!({ "thread": { "id": "t1" } })],
+            "turn/start" => {
+                let notify =
+                    |method: &str, params: Value| json!({ "method": method, "params": params });
+                vec![
+                    json!({ "turn": { "id": "turn-1", "status": "inProgress", "items": [] } }),
+                    notify(
+                        "item/started",
+                        json!({ "threadId": "t1", "turnId": "turn-1",
+                        "item": { "type": "webSearch", "id": "ws1", "query": "" } }),
+                    ),
+                    notify(
+                        "item/completed",
+                        json!({ "threadId": "t1", "turnId": "turn-1",
+                        "item": { "type": "webSearch", "id": "ws1", "query": "AI jobs Vienna",
+                                  "action": { "type": "search", "query": "AI jobs Vienna" },
+                                  "results": [{ "title": "Senior AI Engineer", "url": "https://jobs.example.com/1" }] } }),
+                    ),
+                    notify(
+                        "item/completed",
+                        json!({ "threadId": "t1", "turnId": "turn-1",
+                        "item": { "type": "webSearch", "id": "ws2", "query": "",
+                                  "action": { "type": "openPage", "url": "https://jobs.example.com/1" } } }),
+                    ),
+                    notify(
+                        "item/completed",
+                        json!({ "threadId": "t1", "turnId": "turn-1",
+                        "item": { "type": "agentMessage", "id": "m1", "text": "Found one." } }),
+                    ),
+                    notify(
+                        "turn/completed",
+                        json!({ "threadId": "t1", "turn": { "id": "turn-1", "status": "completed" } }),
+                    ),
+                ]
+            }
+            _ => basic(method, params),
+        }));
+        let web = Arc::new(RecordingWeb::default());
+        let mut request = chat_request();
+        request.web = Some(WebSearch {
+            observer: Some(web.clone()),
+        });
+        let mut text = String::new();
+        let finish = runtime
+            .stream_chat(
+                "gpt-6",
+                &request,
+                CancellationToken::new(),
+                &mut |d: &str| text.push_str(d),
+            )
+            .await
+            .unwrap();
+        assert_eq!(finish, Finish::Complete);
+        assert_eq!(text, "Found one.");
+
+        let log = requests.lock().unwrap().clone();
+        let thread = log.iter().find(|m| m["method"] == "thread/start").unwrap();
+        assert_eq!(thread["params"]["config"], json!({ "web_search": "live" }));
+
+        let events = web.0.lock().unwrap().clone();
+        assert_eq!(events.len(), 3);
+        assert!(
+            matches!(&events[1], WebEvent::Finished { target, sources, .. }
+            if target == "AI jobs Vienna" && sources[0].url == "https://jobs.example.com/1")
+        );
+        assert!(
+            matches!(&events[2], WebEvent::Finished { kind: WebKind::Page, target, .. }
+            if target == "https://jobs.example.com/1")
+        );
+
+        // Without web search the thread keeps the runtime's default (off).
+        let (runtime, requests, _) = runtime_with_turn();
+        runtime
+            .stream_chat(
+                "gpt-6",
+                &chat_request(),
+                CancellationToken::new(),
+                &mut |_: &str| {},
+            )
+            .await
+            .unwrap();
+        let log = requests.lock().unwrap().clone();
+        let thread = log.iter().find(|m| m["method"] == "thread/start").unwrap();
+        assert!(thread["params"].get("config").is_none());
+    }
+
+    fn runtime_with_turn() -> (
+        CodexRuntime,
+        Arc<Mutex<Vec<Value>>>,
+        mpsc::UnboundedSender<Value>,
+    ) {
+        runtime(turn_server(
+            json!({ "id": "turn-1", "status": "completed" }),
+        ))
     }
 
     #[tokio::test]

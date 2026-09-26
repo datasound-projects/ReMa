@@ -941,6 +941,23 @@ input[type='radio']:disabled {
   color: var(--color-danger);
 }
 
+.notice--warning {
+  align-items: center;
+  border-color: color-mix(in srgb, var(--color-warning) 30%, transparent);
+  background: var(--color-warning-subtle);
+}
+
+.notice--warning strong {
+  color: var(--color-warning);
+}
+
+.linked-text__link {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  overflow-wrap: anywhere;
+}
+
 /* ── Toast ─────────────────────────────────────────────── */
 
 .toast {

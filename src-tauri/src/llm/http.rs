@@ -141,7 +141,34 @@ async fn error_from_response(response: Response, provider: &str, secrets: &[&str
     status_error(status, provider, &scrub(&detail, secrets))
 }
 
+/// Where each provider's API credits are managed.
+pub const ANTHROPIC_BILLING_URL: &str = "https://console.anthropic.com/settings/billing";
+pub const OPENAI_BILLING_URL: &str = "https://platform.openai.com/settings/organization/billing";
+
+/// An error that means the account has no credits or quota left.
+fn billing_error(detail: &str) -> Option<AppError> {
+    let lower = detail.to_lowercase();
+    if lower.contains("credit balance is too low") {
+        return Some(AppError::Billing(format!(
+            "Your Anthropic account has no API credits left, so Claude can't answer. A Claude \
+             Console sign-in or an API key uses prepaid API credits, which are separate from a \
+             Claude Pro or Max plan. Add credits at {ANTHROPIC_BILLING_URL} or choose another model."
+        )));
+    }
+    if lower.contains("insufficient_quota") || lower.contains("exceeded your current quota") {
+        return Some(AppError::Billing(format!(
+            "Your OpenAI API account has no quota left. API keys are billed separately from \
+             ChatGPT plans. Add credits at {OPENAI_BILLING_URL}, or connect OpenAI with your \
+             ChatGPT account in Settings."
+        )));
+    }
+    None
+}
+
 pub fn status_error(status: StatusCode, provider: &str, detail: &str) -> AppError {
+    if let Some(error) = billing_error(detail) {
+        return error;
+    }
     match status {
         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => AppError::authentication(format!(
             "{provider} rejected the credentials. Reconnect {provider} in Settings."
@@ -228,6 +255,31 @@ mod tests {
             scrub("key=abcd1234 end", &["abcd1234"]),
             "key=[redacted] end"
         );
+    }
+
+    #[test]
+    fn explains_empty_credit_balances() {
+        let anthropic = status_error(
+            StatusCode::BAD_REQUEST,
+            "Anthropic",
+            "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.",
+        );
+        assert!(matches!(anthropic, AppError::Billing(_)));
+        assert!(anthropic.to_string().contains(ANTHROPIC_BILLING_URL));
+        assert!(anthropic
+            .to_string()
+            .contains("separate from a Claude Pro or Max plan"));
+
+        let openai = status_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "OpenAI",
+            "You exceeded your current quota, please check your plan and billing details.",
+        );
+        assert!(matches!(openai, AppError::Billing(_)));
+        assert!(openai.to_string().contains(OPENAI_BILLING_URL));
+
+        let other = status_error(StatusCode::BAD_REQUEST, "Anthropic", "max_tokens too large");
+        assert!(matches!(other, AppError::Provider(_)));
     }
 
     #[test]

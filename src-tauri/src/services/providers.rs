@@ -42,6 +42,8 @@ pub fn settings(state: &AppState) -> AppResult<ProviderSettings> {
                     sign_in: state.accounts.sign_in(kind.as_str()),
                     configured: false,
                     has_credential: false,
+                    out_of_credits: false,
+                    billing_url: None,
                     models: Vec::new(),
                 },
             });
@@ -92,8 +94,53 @@ fn view(
         // A key is saved whenever the provider uses one; the secret itself
         // stays in the OS credential store.
         has_credential: row.auth_method != AuthMethod::None,
+        out_of_credits: repo::get_setting(conn, &credits_key(&row.id))?.is_some(),
+        billing_url: billing_url(row.kind, row.connection).map(str::to_string),
         models,
     })
+}
+
+/// Where a connection's pay-as-you-go API credits are managed (not for
+/// account plans such as ChatGPT, whose limits reset on their own).
+fn billing_url(kind: ProviderKind, connection: ConnectionMethod) -> Option<&'static str> {
+    match (kind, connection) {
+        (ProviderKind::Anthropic, ConnectionMethod::ApiKey | ConnectionMethod::ClaudeConsole) => {
+            Some(crate::llm::http::ANTHROPIC_BILLING_URL)
+        }
+        (ProviderKind::Openai, ConnectionMethod::ApiKey) => {
+            Some(crate::llm::http::OPENAI_BILLING_URL)
+        }
+        _ => None,
+    }
+}
+
+fn credits_key(provider_id: &str) -> String {
+    format!("provider.{provider_id}.out_of_credits")
+}
+
+/// Remembers from a model request's outcome whether the provider's account
+/// ran out of credits, so Settings can say so until a request succeeds.
+pub fn note_outcome<T>(state: &AppState, provider_id: &str, outcome: &AppResult<T>) {
+    let key = credits_key(provider_id);
+    let changed = state.db.call(|conn| {
+        let flagged = repo::get_setting(conn, &key)?.is_some();
+        match outcome {
+            Err(AppError::Billing(_)) if !flagged => {
+                repo::set_setting(conn, &key, "1")?;
+                Ok(true)
+            }
+            Ok(_) if flagged => {
+                repo::delete_setting(conn, &key)?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    });
+    match changed {
+        Ok(true) => state.events.providers_changed(),
+        Ok(false) => {}
+        Err(error) => eprintln!("could not record the state of {provider_id}: {error}"),
+    }
 }
 
 pub fn provider_view(state: &AppState, id: &str) -> AppResult<ProviderView> {
@@ -196,6 +243,7 @@ pub fn save_connection(
         )?;
         sync_models(&tx, id, fetched, fresh, None)?;
         ensure_default_model(&tx)?;
+        repo::delete_setting(&tx, &credits_key(id))?;
         tx.commit()?;
         Ok(())
     })?;
@@ -216,6 +264,7 @@ pub async fn disconnect(state: &AppState, provider_id: &str) -> AppResult<()> {
     state.db.call(|conn| {
         let tx = conn.transaction()?;
         repo::delete(&tx, provider_id)?;
+        repo::delete_setting(&tx, &credits_key(provider_id))?;
         ensure_default_model(&tx)?;
         tx.commit()?;
         Ok(())

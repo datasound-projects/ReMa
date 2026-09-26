@@ -222,6 +222,21 @@ export const events = {
 };
 
 /* Types */
+/**  What an activity entry records. */
+export type ActivityKind = 
+/**  A tool on one of the user's MCP servers. */
+"mcp" | 
+/**  A web search by the model's provider (`arguments` holds the query). */
+"web_search" | 
+/**  A web page the model's provider opened (`arguments` holds the URL). */
+"web_page";
+
+/**  A page a web search found or opened. */
+export type ActivitySource = {
+	title: string,
+	url: string,
+};
+
 /**  The outcome of adding several files at once. */
 export type AddDocumentsResult = {
 	added: ProfileDocument[],
@@ -597,7 +612,7 @@ export type EndCondition = { kind: "never" } |
 { kind: "after_runs"; count: number };
 
 /**  Stable, machine-readable error kind sent to the frontend. */
-export type ErrorCode = "validation" | "not_found" | "io" | "database" | "configuration" | "authentication" | "provider" | "network" | "internal";
+export type ErrorCode = "validation" | "not_found" | "io" | "database" | "configuration" | "authentication" | "provider" | "billing" | "network" | "internal";
 
 /**  Wire format of every backend error. */
 export type ErrorPayload = {
@@ -1285,6 +1300,13 @@ export type ProviderView = {
 	configured: boolean,
 	/**  A credential is stored in the OS credential store. */
 	hasCredential: boolean,
+	/**
+	 *  The last request failed because the account has no API credits or
+	 *  quota left (cleared by the next successful request or a reconnect).
+	 */
+	outOfCredits: boolean,
+	/**  Where this connection's API credits are managed, if it uses them. */
+	billingUrl: string | null,
 	models: ProviderModel[],
 };
 
@@ -1620,6 +1642,9 @@ export type ToolActivity = {
 	detail: string | null,
 	/**  The server marks the tool read-only (it ran without approval). */
 	readOnly: boolean,
+	kind?: ActivityKind,
+	/**  Web activity: the pages found or opened. */
+	sources?: ActivitySource[],
 };
 
 export type ToolStatus = 

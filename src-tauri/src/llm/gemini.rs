@@ -1,4 +1,7 @@
 //! Google Gemini API (Generative Language API).
+//!
+//! With web search on, the request adds Grounding with Google Search; the
+//! queries and sources Gemini reports come back as web activity.
 
 use reqwest::RequestBuilder;
 use serde_json::{json, Value};
@@ -6,7 +9,8 @@ use serde_json::{json, Value};
 use super::{
     http::{error_message, join_url, send_json},
     sse::SseEvent,
-    ChatRequest, Endpoint, FetchedModel, Finish, StreamPiece, ToolDelta,
+    ChatRequest, Endpoint, FetchedModel, Finish, StreamPiece, StreamState, ToolDelta, WebEvent,
+    WebKind, WebSource,
 };
 use crate::{
     error::{AppError, AppResult},
@@ -163,10 +167,54 @@ pub fn request_body(request: &ChatRequest) -> Value {
             })
         })
         .collect();
+    let mut tools = Vec::new();
     if !declarations.is_empty() {
-        body["tools"] = json!([{ "functionDeclarations": declarations }]);
+        tools.push(json!({ "functionDeclarations": declarations }));
+    }
+    if request.web.is_some() {
+        tools.push(json!({ "google_search": {} }));
+    }
+    if !tools.is_empty() {
+        body["tools"] = json!(tools);
     }
     body
+}
+
+/// Searches Gemini ran for the answer, with the sources it grounded on.
+fn grounding(candidate: Option<&Value>) -> Vec<WebEvent> {
+    let Some(metadata) = candidate.and_then(|c| c.get("groundingMetadata")) else {
+        return Vec::new();
+    };
+    let sources: Vec<WebSource> = metadata
+        .get("groundingChunks")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|chunk| {
+            let web = chunk.get("web")?;
+            let url = web.get("uri").and_then(Value::as_str)?.to_string();
+            let title = web
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or(&url)
+                .to_string();
+            Some(WebSource { title, url })
+        })
+        .collect();
+    metadata
+        .get("webSearchQueries")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(|query| WebEvent::Finished {
+            id: format!("google:{query}"),
+            kind: WebKind::Search,
+            target: query.to_string(),
+            sources: sources.clone(),
+            error: None,
+        })
+        .collect()
 }
 
 pub fn chat_request(
@@ -187,7 +235,7 @@ pub fn chat_request(
     )
 }
 
-pub fn parse_event(event: &SseEvent) -> AppResult<StreamPiece> {
+pub fn parse_event(event: &SseEvent, _state: &mut StreamState) -> AppResult<StreamPiece> {
     let data: Value = serde_json::from_str(event.data.trim())
         .map_err(|_| AppError::provider("Gemini sent an unreadable stream event"))?;
     if data.get("error").is_some() {
@@ -241,8 +289,9 @@ pub fn parse_event(event: &SseEvent) -> AppResult<StreamPiece> {
     Ok(StreamPiece {
         text: (!text.is_empty()).then_some(text),
         finish,
-        done: false,
         tools,
+        web: grounding(candidate),
+        ..StreamPiece::default()
     })
 }
 
@@ -256,6 +305,10 @@ mod tests {
             event: None,
             data: data.into(),
         }
+    }
+
+    fn parse(event: &SseEvent) -> AppResult<StreamPiece> {
+        parse_event(event, &mut StreamState::default())
     }
 
     #[test]
@@ -292,6 +345,36 @@ mod tests {
     }
 
     #[test]
+    fn grounds_on_google_search_when_web_search_is_on() {
+        let request = ChatRequest {
+            web: Some(crate::llm::WebSearch::default()),
+            ..ChatRequest::default()
+        };
+        assert_eq!(
+            request_body(&request)["tools"],
+            json!([{ "google_search": {} }])
+        );
+
+        let piece = parse(&event(
+            r#"{"candidates":[{"content":{"parts":[{"text":"Found."}]},"finishReason":"STOP","groundingMetadata":{"webSearchQueries":["AI jobs Vienna"],"groundingChunks":[{"web":{"uri":"https://example.com/r","title":"example.com"}}]}}]}"#,
+        ))
+        .unwrap();
+        assert_eq!(
+            piece.web,
+            vec![WebEvent::Finished {
+                id: "google:AI jobs Vienna".into(),
+                kind: WebKind::Search,
+                target: "AI jobs Vienna".into(),
+                sources: vec![WebSource {
+                    title: "example.com".into(),
+                    url: "https://example.com/r".into()
+                }],
+                error: None,
+            }]
+        );
+    }
+
+    #[test]
     fn keeps_text_generation_models() {
         let entries = vec![
             json!({ "name": "models/gemini-2.5-flash", "displayName": "Gemini 2.5 Flash",
@@ -313,23 +396,22 @@ mod tests {
 
     #[test]
     fn parses_stream_chunks() {
-        let piece = parse_event(&event(
+        let piece = parse(&event(
             r#"{"candidates":[{"content":{"parts":[{"text":"thinking…","thought":true},{"text":"Hi"}],"role":"model"}}]}"#,
         ))
         .unwrap();
         assert_eq!(piece.text.as_deref(), Some("Hi"));
 
-        let piece = parse_event(&event(
+        let piece = parse(&event(
             r#"{"candidates":[{"content":{"parts":[{"text":"!"}]},"finishReason":"MAX_TOKENS"}]}"#,
         ))
         .unwrap();
         assert_eq!(piece.finish, Some(Finish::MaxTokens));
 
-        let blocked =
-            parse_event(&event(r#"{"promptFeedback":{"blockReason":"SAFETY"}}"#)).unwrap();
+        let blocked = parse(&event(r#"{"promptFeedback":{"blockReason":"SAFETY"}}"#)).unwrap();
         assert_eq!(blocked.finish, Some(Finish::Refused));
 
-        assert!(parse_event(&event(
+        assert!(parse(&event(
             r#"{"error":{"code":400,"message":"API key not valid"}}"#
         ))
         .is_err());
@@ -338,7 +420,7 @@ mod tests {
     #[test]
     fn keeps_function_calls_and_their_signatures() {
         use crate::llm::{ToolCall, ToolOutput, ToolRound};
-        let piece = parse_event(&event(
+        let piece = parse(&event(
             r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"mcp_jobs_search","args":{"q":"rust"}},"thoughtSignature":"sig=="}]},"finishReason":"STOP"}]}"#,
         ))
         .unwrap();
@@ -364,6 +446,7 @@ mod tests {
                     content: "3 jobs".into(),
                     is_error: false,
                 }],
+                ..ToolRound::default()
             }],
             ..ChatRequest::default()
         };

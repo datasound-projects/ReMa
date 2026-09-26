@@ -338,6 +338,12 @@ export const DEFAULT_RANKING: SortCriterion[] = [
 /** Whether a model answer probably lists jobs (a table, or several links). */
 export function mayListJobs(text: string): boolean {
   const table = /^\s*\|?\s*:?-{3,}/m.test(text) && text.includes('|');
-  const links = (text.match(/https?:\/\//g) ?? []).length;
-  return table || links >= 2;
+  // Links to search result pages are suggestions, not postings.
+  const links = (text.match(/https?:\/\/[^\s)\]>"']+/g) ?? []).filter((url) => !isSearchPage(url));
+  return table || links.length >= 2;
+}
+
+/** A job board's search results page rather than a posting. */
+export function isSearchPage(url: string): boolean {
+  return /[?&](q|query|keywords?|search|k|kw|what|text)=|\/(search|suche|jobs\/search|jobsuche)(\/|\?|$)/i.test(url);
 }

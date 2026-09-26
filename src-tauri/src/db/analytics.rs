@@ -10,6 +10,7 @@ use crate::{
         RequirementCategory, RequirementKind, RequirementSource, ResearchStatus, RunSource,
         SalaryPeriod, Seniority, WorkMode,
     },
+    models::provider::ModelRef,
 };
 
 fn to_json(value: &impl serde::Serialize) -> AppResult<String> {
@@ -814,6 +815,17 @@ pub struct AnswerRow {
     pub created_at: i64,
     /// The user message it answered.
     pub prompt: Option<String>,
+    /// The model that wrote it.
+    pub model: Option<ModelRef>,
+}
+
+fn model_ref(provider_id: Option<String>, model_id: Option<String>) -> Option<ModelRef> {
+    provider_id
+        .zip(model_id)
+        .map(|(provider_id, model_id)| ModelRef {
+            provider_id,
+            model_id,
+        })
 }
 
 fn answer_from_row(r: &Row) -> rusqlite::Result<AnswerRow> {
@@ -823,12 +835,14 @@ fn answer_from_row(r: &Row) -> rusqlite::Result<AnswerRow> {
         content: r.get(2)?,
         created_at: r.get(3)?,
         prompt: r.get(4)?,
+        model: model_ref(r.get(5)?, r.get(6)?),
     })
 }
 
 const ANSWER_SELECT: &str = "SELECT m.id, m.conversation_id, m.content, m.created_at,
      (SELECT u.content FROM messages u WHERE u.conversation_id = m.conversation_id
-        AND u.id < m.id AND u.role = 'user' ORDER BY u.id DESC LIMIT 1)
+        AND u.id < m.id AND u.role = 'user' ORDER BY u.id DESC LIMIT 1),
+     m.provider_id, m.model_id
      FROM messages m";
 
 pub fn answer(conn: &Connection, message_id: i64) -> AppResult<AnswerRow> {
@@ -865,9 +879,12 @@ pub struct TaskResultRow {
     pub prompt: String,
     pub result: String,
     pub started_at: i64,
+    /// The model that ran it.
+    pub model: Option<ModelRef>,
 }
 
-const RESULT_SELECT: &str = "SELECT e.id, e.task_id, t.name, e.prompt, e.result, e.started_at
+const RESULT_SELECT: &str =
+    "SELECT e.id, e.task_id, t.name, e.prompt, e.result, e.started_at, e.provider_id, e.model_id
      FROM task_executions e JOIN scheduled_tasks t ON t.id = e.task_id";
 
 fn result_from_row(r: &Row) -> rusqlite::Result<TaskResultRow> {
@@ -878,6 +895,7 @@ fn result_from_row(r: &Row) -> rusqlite::Result<TaskResultRow> {
         prompt: r.get(3)?,
         result: r.get(4)?,
         started_at: r.get(5)?,
+        model: model_ref(r.get(6)?, r.get(7)?),
     })
 }
 

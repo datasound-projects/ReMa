@@ -1,5 +1,6 @@
-//! OpenAI Chat Completions API — used for OpenAI and for every
-//! OpenAI-compatible endpoint.
+//! OpenAI Chat Completions API — used for every OpenAI-compatible endpoint
+//! (Ollama, LM Studio, vLLM, …). OpenAI itself is reached through the
+//! Responses API (`openai_responses`); model listing is shared.
 
 use reqwest::RequestBuilder;
 use serde_json::{json, Value};
@@ -7,7 +8,7 @@ use serde_json::{json, Value};
 use super::{
     http::{error_message, join_url, send_json},
     sse::SseEvent,
-    ChatRequest, Endpoint, FetchedModel, Finish, StreamPiece, ToolDelta,
+    ChatRequest, Endpoint, FetchedModel, Finish, StreamPiece, StreamState, ToolDelta,
 };
 use crate::{
     error::{AppError, AppResult},
@@ -189,7 +190,7 @@ pub fn chat_request(
     )
 }
 
-pub fn parse_event(event: &SseEvent) -> AppResult<StreamPiece> {
+pub fn parse_event(event: &SseEvent, _state: &mut StreamState) -> AppResult<StreamPiece> {
     let data = event.data.trim();
     if data == "[DONE]" {
         return Ok(StreamPiece::done());
@@ -237,8 +238,8 @@ pub fn parse_event(event: &SseEvent) -> AppResult<StreamPiece> {
     Ok(StreamPiece {
         text,
         finish,
-        done: false,
         tools,
+        ..StreamPiece::default()
     })
 }
 
@@ -252,6 +253,10 @@ mod tests {
             event: None,
             data: data.into(),
         }
+    }
+
+    fn parse(event: &SseEvent) -> AppResult<StreamPiece> {
+        parse_event(event, &mut StreamState::default())
     }
 
     #[test]
@@ -309,21 +314,21 @@ mod tests {
 
     #[test]
     fn parses_stream_chunks() {
-        let piece = parse_event(&event(
+        let piece = parse(&event(
             r#"{"choices":[{"delta":{"content":"Hel"},"finish_reason":null}]}"#,
         ))
         .unwrap();
         assert_eq!(piece.text.as_deref(), Some("Hel"));
         assert_eq!(piece.finish, None);
 
-        let piece = parse_event(&event(
+        let piece = parse(&event(
             r#"{"choices":[{"delta":{},"finish_reason":"length"}]}"#,
         ))
         .unwrap();
         assert_eq!(piece.finish, Some(Finish::MaxTokens));
 
-        assert!(parse_event(&event("[DONE]")).unwrap().done);
-        assert!(parse_event(&event(r#"{"error":{"message":"model not loaded"}}"#)).is_err());
+        assert!(parse(&event("[DONE]")).unwrap().done);
+        assert!(parse(&event(r#"{"error":{"message":"model not loaded"}}"#)).is_err());
     }
 
     #[test]
@@ -346,6 +351,7 @@ mod tests {
                     content: "3 jobs".into(),
                     is_error: false,
                 }],
+                ..ToolRound::default()
             }],
             ..ChatRequest::default()
         };
@@ -373,12 +379,12 @@ mod tests {
 
     #[test]
     fn parses_streamed_tool_calls() {
-        let first = parse_event(&event(
+        let first = parse(&event(
             r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"mcp_jobs_search","arguments":""}}]}}]}"#,
         ))
         .unwrap();
         assert_eq!(first.tools[0].id.as_deref(), Some("call_1"));
-        let more = parse_event(&event(
+        let more = parse(&event(
             r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"q\":"}}]}}]}"#,
         ))
         .unwrap();

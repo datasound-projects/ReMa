@@ -185,6 +185,11 @@ pub struct ProviderView {
     pub configured: bool,
     /// A credential is stored in the OS credential store.
     pub has_credential: bool,
+    /// The last request failed because the account has no API credits or
+    /// quota left (cleared by the next successful request or a reconnect).
+    pub out_of_credits: bool,
+    /// Where this connection's API credits are managed, if it uses them.
+    pub billing_url: Option<String>,
     pub models: Vec<ProviderModel>,
 }
 

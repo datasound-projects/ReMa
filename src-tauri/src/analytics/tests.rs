@@ -8,8 +8,9 @@ use tokio_util::sync::CancellationToken;
 
 use super::*;
 use crate::{
-    analytics::ingest::{ingest, RawJob, RawJobSearch},
+    analytics::ingest::{self, ingest, RawJob, RawJobSearch},
     db::{analytics as repo, conversations, tasks as task_repo},
+    error::AppError,
     llm::fake::FakeLanguageModel,
     models::{
         analytics::{
@@ -866,4 +867,98 @@ async fn researches_learning_resources_for_prioritized_gaps() {
         "the link was checked"
     );
     assert_eq!(rec.path.len(), 3);
+}
+
+#[tokio::test]
+async fn analyze_reads_a_text_answer_with_the_model_that_wrote_it() {
+    let llm = Arc::new(FakeLanguageModel::replying(&[
+        r#"{"jobs": [{"title": "AI Engineer", "company": "Company A", "url": "https://jobs.example.com/1", "skills": []}]}"#,
+    ]));
+    let state = testing::state(llm.clone()).0;
+    providers::connect(&state, ProviderKind::Anthropic, "k")
+        .await
+        .unwrap();
+    let default = ModelRef {
+        provider_id: "anthropic".into(),
+        model_id: "model-a".into(),
+    };
+    providers::set_default_model(&state, &default).unwrap();
+    let author = ModelRef {
+        provider_id: "anthropic".into(),
+        model_id: "model-b".into(),
+    };
+    let text = "Two roles:\n- AI Engineer at Company A: https://jobs.example.com/1\n- Data Engineer at Globex: https://globex.example/2";
+    let answer_id = state
+        .db
+        .call(|c| {
+            let conv = conversations::create(c, "Jobs", &author, 1)?;
+            conversations::insert_message(
+                c,
+                conversations::NewMessage {
+                    conversation_id: conv.id,
+                    role: MessageRole::User,
+                    content: "AI jobs please",
+                    status: MessageStatus::Complete,
+                    model: None,
+                    created_at: SEP_25,
+                },
+            )?;
+            conversations::insert_message(
+                c,
+                conversations::NewMessage {
+                    conversation_id: conv.id,
+                    role: MessageRole::Assistant,
+                    content: text,
+                    status: MessageStatus::Complete,
+                    model: Some(&author),
+                    created_at: SEP_25,
+                },
+            )
+            .map(|m| m.id)
+        })
+        .unwrap();
+
+    ingest::analyze_answer(&state, answer_id).await.unwrap();
+    let requests = llm.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].0, "model-b",
+        "the answer's own model, not the default"
+    );
+    assert!(
+        requests[0].1.web.is_none(),
+        "reading a list never searches the web"
+    );
+}
+
+#[tokio::test]
+async fn analyze_explains_answers_without_job_postings() {
+    let state = connected(&[r#"{"jobs": []}"#]).await;
+    let model = ModelRef {
+        provider_id: "anthropic".into(),
+        model_id: "model-a".into(),
+    };
+    let answer_id = state
+        .db
+        .call(|c| {
+            let conv = conversations::create(c, "Jobs", &model, 1)?;
+            conversations::insert_message(
+                c,
+                conversations::NewMessage {
+                    conversation_id: conv.id,
+                    role: MessageRole::Assistant,
+                    content: "Try https://www.linkedin.com/jobs/search?keywords=ai and https://www.karriere.at/jobs/ai",
+                    status: MessageStatus::Complete,
+                    model: Some(&model),
+                    created_at: SEP_25,
+                },
+            )
+            .map(|m| m.id)
+        })
+        .unwrap();
+    let error = ingest::analyze_answer(&state, answer_id).await.unwrap_err();
+    assert!(matches!(error, AppError::Validation(_)));
+    assert!(error
+        .to_string()
+        .contains("doesn't list specific job postings"));
 }

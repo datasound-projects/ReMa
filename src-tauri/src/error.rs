@@ -39,6 +39,11 @@ pub enum AppError {
     #[error("{0}")]
     Provider(String),
 
+    /// The provider account has no credits or quota left; requests fail
+    /// until the user adds some in the provider's billing settings.
+    #[error("{0}")]
+    Billing(String),
+
     /// The network request failed (offline, DNS, TLS, timeout).
     #[error("Network error: {0}")]
     Network(String),
@@ -59,6 +64,7 @@ pub enum ErrorCode {
     Configuration,
     Authentication,
     Provider,
+    Billing,
     Network,
     Internal,
 }
@@ -112,6 +118,7 @@ impl AppError {
             Self::Configuration(_) => ErrorCode::Configuration,
             Self::Authentication(_) => ErrorCode::Authentication,
             Self::Provider(_) => ErrorCode::Provider,
+            Self::Billing(_) => ErrorCode::Billing,
             Self::Network(_) => ErrorCode::Network,
             Self::Internal(_) => ErrorCode::Internal,
         }

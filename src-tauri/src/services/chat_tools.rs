@@ -20,7 +20,7 @@ use crate::{
     error::{AppError, AppResult},
     llm::{BoxFuture, ToolBox, ToolCall, ToolExecutor, ToolOutput, ToolSpec},
     mcp::client::{tool_info, Connection},
-    models::chat::{ApprovalDecision, ChatEvent, ToolActivity, ToolStatus},
+    models::chat::{ActivityKind, ApprovalDecision, ChatEvent, ToolActivity, ToolStatus},
     services::mcp,
     state::AppState,
 };
@@ -189,6 +189,8 @@ impl ChatTools {
                         arguments: String::new(),
                         detail: Some(shorten(&error.to_string(), MAX_DETAIL)),
                         read_only: false,
+                        kind: ActivityKind::Mcp,
+                        sources: Vec::new(),
                     });
                     continue;
                 }
@@ -257,6 +259,8 @@ impl ChatTools {
             arguments: shorten(&call.arguments.to_string(), MAX_ARGUMENTS_SHOWN),
             detail: None,
             read_only: tool.read_only,
+            kind: ActivityKind::Mcp,
+            sources: Vec::new(),
         };
         let Value::Object(arguments) = call.arguments.clone() else {
             activity.status = ToolStatus::Failed;

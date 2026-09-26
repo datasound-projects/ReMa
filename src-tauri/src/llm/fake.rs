@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     BoxFuture, ChatRequest, DeltaSink, Endpoint, FetchedModel, Finish, LanguageModel, ToolCall,
-    ToolExecutor, ToolOutput, ToolRound,
+    ToolExecutor, ToolOutput, ToolRound, WebEvent,
 };
 use crate::error::{AppError, AppResult};
 
@@ -26,6 +26,8 @@ pub struct FakeLanguageModel {
     pub delay: Duration,
     /// When set, streaming fails with this provider error after the chunks.
     pub fail_with: Option<String>,
+    /// Report `fail_with` as the account having no credits left.
+    pub fail_billing: bool,
     /// Requests received (model id, request).
     pub requests: Mutex<Vec<(String, ChatRequest)>>,
     /// Tool calls to make, in order, before streaming `chunks` (only when
@@ -33,6 +35,9 @@ pub struct FakeLanguageModel {
     pub tool_calls: Vec<ToolCall>,
     /// What the tools returned, as a finished answer would have seen it.
     pub tool_outputs: Mutex<Vec<ToolOutput>>,
+    /// Web activity reported (when the request allows web search) before
+    /// the answer streams.
+    pub web_events: Vec<WebEvent>,
 }
 
 impl FakeLanguageModel {
@@ -46,10 +51,18 @@ impl FakeLanguageModel {
             chunks: chunks.iter().map(|c| c.to_string()).collect(),
             delay: Duration::ZERO,
             fail_with: None,
+            fail_billing: false,
             requests: Mutex::default(),
             tool_calls: Vec::new(),
             tool_outputs: Mutex::default(),
+            web_events: Vec::new(),
         }
+    }
+
+    /// Reports this web activity (when web search is allowed) first.
+    pub fn searching(mut self, events: Vec<WebEvent>) -> Self {
+        self.web_events = events;
+        self
     }
 
     /// Calls these tools (when offered) before answering.
@@ -98,11 +111,7 @@ impl LanguageModel for FakeLanguageModel {
                 .push((model_id.to_string(), request.clone()));
             // Like a provider that calls every offered tool first.
             if let Some(tools) = &request.tools {
-                let mut round = ToolRound {
-                    text: String::new(),
-                    calls: Vec::new(),
-                    outputs: Vec::new(),
-                };
+                let mut round = ToolRound::default();
                 for call in &self.tool_calls {
                     if cancel.is_cancelled() {
                         return Ok(Finish::Cancelled);
@@ -124,6 +133,11 @@ impl LanguageModel for FakeLanguageModel {
                         .push((model_id.to_string(), with_round));
                 }
             }
+            if let Some(observer) = request.web.as_ref().and_then(|w| w.observer.as_ref()) {
+                for event in &self.web_events {
+                    observer.observe(event.clone());
+                }
+            }
             for chunk in &self.chunks {
                 tokio::select! {
                     _ = cancel.cancelled() => return Ok(Finish::Cancelled),
@@ -131,6 +145,7 @@ impl LanguageModel for FakeLanguageModel {
                 }
             }
             match &self.fail_with {
+                Some(message) if self.fail_billing => Err(AppError::Billing(message.clone())),
                 Some(message) => Err(AppError::provider(message.clone())),
                 None => Ok(Finish::Complete),
             }
