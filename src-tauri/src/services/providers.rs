@@ -529,7 +529,7 @@ pub fn current_default_model(state: &AppState) -> AppResult<Option<ModelRef>> {
     state.db.call(|c| default_model(c))
 }
 
-fn default_model(conn: &rusqlite::Connection) -> AppResult<Option<ModelRef>> {
+pub(crate) fn default_model(conn: &rusqlite::Connection) -> AppResult<Option<ModelRef>> {
     Ok(
         repo::get_setting(conn, DEFAULT_MODEL_KEY)?.and_then(|value| {
             let (provider_id, model_id) = value.split_once('/')?;

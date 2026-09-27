@@ -1,5 +1,9 @@
 include!("src/ipc_commands.rs");
 
+#[allow(dead_code)]
+#[path = "src/connectors/build_config.rs"]
+mod build_config;
+
 /// Generated permission set allowing every app command. Granted to the main
 /// webview in `capabilities/default.json`.
 const PERMISSION_SET_PATH: &str = "permissions/app-commands.toml";
@@ -22,17 +26,7 @@ fn main() {
         std::fs::write(PERMISSION_SET_PATH, set).expect("write the permission set");
     }
     println!("cargo:rerun-if-changed=src/ipc_commands.rs");
-    // ReMa's own OAuth app registrations are compiled in (see `connectors`).
-    for var in [
-        "REMA_GOOGLE_CLIENT_ID",
-        "REMA_GOOGLE_CLIENT_SECRET",
-        "REMA_MICROSOFT_CLIENT_ID",
-        "REMA_MICROSOFT_TENANT",
-        "REMA_LINKEDIN_CLIENT_ID",
-        "REMA_LINKEDIN_APPROVED_SCOPES",
-    ] {
-        println!("cargo:rerun-if-env-changed={var}");
-    }
+    connector_config();
     // Development builds look for runtimes fetched into `runtimes/` (see
     // `accounts::locate`), which are named after the target.
     println!(
@@ -49,4 +43,58 @@ fn main() {
         ),
     )
     .expect("failed to run tauri-build");
+}
+
+/// ReMa's own OAuth app registrations (`connectors.toml`, overridden by the
+/// environment), checked and compiled into the app as
+/// `connectors::config`. A release build without Google or Microsoft fails
+/// here instead of shipping connectors that cannot sign in.
+fn connector_config() {
+    const FILE: &str = "connectors.toml";
+    println!("cargo:rerun-if-changed={FILE}");
+    for key in build_config::KEYS {
+        println!("cargo:rerun-if-env-changed={}", key.env);
+    }
+    let table: toml::Table = match std::fs::read_to_string(FILE) {
+        Ok(text) => text.parse().unwrap_or_else(|error| {
+            eprintln!("error: {FILE} is not valid TOML: {error}");
+            std::process::exit(1);
+        }),
+        Err(_) => toml::Table::new(),
+    };
+    let file = |key: build_config::Key| {
+        table
+            .get(key.table)
+            .and_then(|t| t.get(key.name))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    };
+    let env = |name: &str| std::env::var(name).ok();
+    let release = std::env::var("PROFILE").as_deref() == Ok("release");
+    let config = match build_config::resolve(&file, &env, release) {
+        Ok(config) => config,
+        Err(errors) => {
+            eprintln!(
+                "error: ReMa's connector configuration is incomplete or invalid:\n  - {}\n\n\
+                 Fill in src-tauri/{FILE} or set the environment variables named there\n\
+                 (see docs/connectors/registration.md). Client IDs are public identifiers,\n\
+                 not user secrets; users never enter them.",
+                errors.join("\n  - ")
+            );
+            std::process::exit(1);
+        }
+    };
+    if !config.missing.is_empty() {
+        println!(
+            "cargo:warning=development build without {}: those connectors show a developer \
+             diagnostic (a release build fails instead)",
+            config.missing.join(", ")
+        );
+    }
+    let out = std::path::PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets OUT_DIR"));
+    std::fs::write(
+        out.join("connector_apps.rs"),
+        build_config::to_rust(&config),
+    )
+    .expect("write the connector configuration");
 }

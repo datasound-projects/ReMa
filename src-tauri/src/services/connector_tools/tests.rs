@@ -99,7 +99,7 @@ async fn setup(connect_gmail: bool) -> Option<Setup> {
         state
             .vault
             .set(
-                &connectors::tokens::vault_account(ProviderId::Google),
+                &connectors::tokens::legacy_key(ProviderId::Google),
                 Credential::OAuth {
                     access_token: "at".into(),
                     refresh_token: Some("rt".into()),

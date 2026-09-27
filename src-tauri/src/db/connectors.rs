@@ -5,7 +5,7 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 
 use crate::{
     error::AppResult,
-    models::connectors::{ConnectorId, ProviderId},
+    models::connectors::{ConnectorErrorCode, ConnectorId, ProviderId},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,10 +125,13 @@ pub struct ConnectorRecord {
     pub last_success_at: Option<i64>,
     pub last_error: Option<String>,
     pub last_error_detail: Option<String>,
+    /// Set when the error came from a connection check (not a sync).
+    pub last_error_code: Option<ConnectorErrorCode>,
 }
 
 fn connector_from_row(row: &Row) -> rusqlite::Result<ConnectorRecord> {
     let id: String = row.get(0)?;
+    let code: Option<String> = row.get(7)?;
     Ok(ConnectorRecord {
         id: ConnectorId::parse(&id).unwrap_or(ConnectorId::Gmail),
         enabled: row.get(1)?,
@@ -137,13 +140,14 @@ fn connector_from_row(row: &Row) -> rusqlite::Result<ConnectorRecord> {
         last_success_at: row.get(4)?,
         last_error: row.get(5)?,
         last_error_detail: row.get(6)?,
+        last_error_code: code.as_deref().and_then(ConnectorErrorCode::parse),
     })
 }
 
 // Mail is read only by the built-in task "Job Mail & Interview Sync"; the
 // `background_sync` and `next_sync_at` columns are no longer used.
 const CONNECTOR_COLUMNS: &str = "id, enabled, last_sync_started_at, last_sync_completed_at,
-    last_success_at, last_error, last_error_detail";
+    last_success_at, last_error, last_error_detail, last_error_code";
 
 pub fn connector(conn: &Connection, id: ConnectorId) -> AppResult<ConnectorRecord> {
     Ok(conn.query_row(
@@ -164,7 +168,8 @@ pub fn set_enabled(conn: &Connection, id: ConnectorId, enabled: bool, now: i64) 
     conn.execute(
         "UPDATE connectors SET enabled = ?2, updated_at = ?3,
              last_error = CASE WHEN ?2 = 1 THEN last_error ELSE NULL END,
-             last_error_detail = CASE WHEN ?2 = 1 THEN last_error_detail ELSE NULL END
+             last_error_detail = CASE WHEN ?2 = 1 THEN last_error_detail ELSE NULL END,
+             last_error_code = CASE WHEN ?2 = 1 THEN last_error_code ELSE NULL END
          WHERE id = ?1",
         params![id.as_str(), enabled, now],
     )?;
@@ -189,7 +194,7 @@ pub fn sync_finished(
     conn.execute(
         "UPDATE connectors SET last_sync_completed_at = ?2,
              last_success_at = CASE WHEN ?3 IS NULL THEN ?2 ELSE last_success_at END,
-             last_error = ?3, last_error_detail = ?4
+             last_error = ?3, last_error_detail = ?4, last_error_code = NULL
          WHERE id = ?1",
         params![id.as_str(), now, error.map(|e| e.0), error.map(|e| e.1)],
     )?;
@@ -200,8 +205,26 @@ pub fn sync_finished(
 /// last success is where reading resumes if a sync position expires.
 pub fn clear_error(conn: &Connection, id: ConnectorId) -> AppResult<()> {
     conn.execute(
-        "UPDATE connectors SET last_error = NULL, last_error_detail = NULL WHERE id = ?1",
+        "UPDATE connectors SET last_error = NULL, last_error_detail = NULL,
+             last_error_code = NULL
+         WHERE id = ?1",
         [id.as_str()],
+    )?;
+    Ok(())
+}
+
+/// Records why the connection check after a sign-in failed.
+pub fn set_check_error(
+    conn: &Connection,
+    id: ConnectorId,
+    code: ConnectorErrorCode,
+    message: &str,
+    detail: Option<&str>,
+) -> AppResult<()> {
+    conn.execute(
+        "UPDATE connectors SET last_error = ?2, last_error_detail = ?3, last_error_code = ?4
+         WHERE id = ?1",
+        params![id.as_str(), message, detail, code.as_str()],
     )?;
     Ok(())
 }
@@ -209,7 +232,8 @@ pub fn clear_error(conn: &Connection, id: ConnectorId) -> AppResult<()> {
 pub fn clear_sync_state(conn: &Connection, id: ConnectorId) -> AppResult<()> {
     conn.execute(
         "UPDATE connectors SET last_sync_started_at = NULL, last_sync_completed_at = NULL,
-             last_success_at = NULL, last_error = NULL, last_error_detail = NULL
+             last_success_at = NULL, last_error = NULL, last_error_detail = NULL,
+             last_error_code = NULL
          WHERE id = ?1",
         [id.as_str()],
     )?;

@@ -80,7 +80,8 @@ pub async fn migrate(state: &AppState) -> AppResult<()> {
         if let Some(credential) = old_token.clone() {
             state
                 .vault
-                .set(&tokens::vault_account(ProviderId::Google), credential)
+                // Moves to the account's own key when it is first used.
+                .set(&tokens::legacy_key(ProviderId::Google), credential)
                 .await?;
         }
     } else if let Some(Credential::OAuth {

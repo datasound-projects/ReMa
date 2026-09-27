@@ -174,6 +174,8 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 career_search::bootstrap::run(&startup).await;
             });
+            // Which of ReMa's own app registrations this build carries.
+            eprintln!("{}", connectors::config::summary());
             app.manage(state);
             Ok(())
         })

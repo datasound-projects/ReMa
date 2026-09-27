@@ -12,11 +12,24 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
+use super::failure::{self, Failure, TokenPhase};
 use crate::{
     error::{AppError, AppResult},
     llm::http::scrub,
-    oauth_loopback::{self, Loopback, Pages},
+    oauth_loopback::{self, Loopback, Reply, WaitError},
 };
+
+/// One `[oauth]` diagnostic line: the provider and the phase of a sign-in,
+/// plus facts that are never secret (a port, an error category). Codes,
+/// tokens, verifiers, `state` and client secrets are never logged.
+pub fn log(provider: &str, phase: &str, facts: &str) {
+    let provider = provider.to_ascii_lowercase();
+    super::diag(if facts.is_empty() {
+        format!("[oauth] provider={provider} phase={phase}")
+    } else {
+        format!("[oauth] provider={provider} phase={phase} {facts}")
+    });
+}
 
 /// ReMa's own app registration with a provider. Configured when ReMa is
 /// built, never entered by users. A Google "Desktop app" client comes with a
@@ -117,10 +130,16 @@ pub enum Callback {
 }
 
 /// Parses the request target of a loopback redirect (`/?state=…&code=…`).
-/// `None` for unrelated requests (favicon etc.). A wrong or missing `state`
-/// is rejected (CSRF protection).
+/// `None` for unrelated requests (a favicon, any other path, a request
+/// without `code` or `error`). A wrong or missing `state` is rejected (CSRF
+/// protection).
 pub fn parse_callback(target: &str, expected_state: &str) -> Option<AppResult<Callback>> {
     let url = Url::parse(&format!("http://127.0.0.1{target}")).ok()?;
+    // The redirect URI is the bare loopback origin, so the provider comes
+    // back to "/" and nowhere else.
+    if url.path() != "/" {
+        return None;
+    }
     let param = |name: &str| {
         url.query_pairs()
             .find(|(k, _)| k == name)
@@ -154,49 +173,41 @@ pub fn parse_callback(target: &str, expected_state: &str) -> Option<AppResult<Ca
     }))
 }
 
-/// Waits for the browser to hit the loopback redirect and returns the code.
-pub async fn wait_for_code(
+/// Waits for the browser to come back to the loopback redirect. Returns the
+/// code with the browser's request, whose page the caller answers once the
+/// sign-in has finished. A refusal or a forged `state` is answered with the
+/// failure page here. The listener is closed on return, so a repeated or
+/// late callback finds nothing.
+pub async fn wait_for_callback(
     loopback: Loopback,
     expected_state: &str,
     provider: &str,
     cancel: &CancellationToken,
     timeout: Duration,
-) -> AppResult<String> {
-    let target = oauth_loopback::receive_on(
+) -> Result<(String, Reply), Failure> {
+    let (target, reply) = oauth_loopback::wait_on(
         loopback,
         |target| parse_callback(target, expected_state).is_some(),
-        |target| {
-            matches!(
-                parse_callback(target, expected_state),
-                Some(Ok(Callback::Code(_)))
-            )
-        },
-        Pages {
-            service: provider,
-            success_title: Some("ReMa connected successfully."),
-        },
         cancel,
         timeout,
     )
-    .await?;
-    match parse_callback(&target, expected_state) {
-        Some(Ok(Callback::Code(code))) => Ok(code),
-        Some(Ok(Callback::Denied { error, description })) => Err(match error.as_str() {
-            "access_denied" | "consent_required" => {
-                AppError::validation(format!("{provider} access was not granted."))
-            }
-            _ => AppError::authentication(format!(
-                "{provider} sign-in failed ({error}{}).",
-                description
-                    .map(|d| format!(": {}", d.chars().take(160).collect::<String>()))
-                    .unwrap_or_default()
-            )),
-        }),
-        Some(Err(error)) => Err(error),
-        None => Err(AppError::authentication(format!(
-            "{provider} sign-in did not complete."
-        ))),
-    }
+    .await
+    .map_err(|error| match error {
+        WaitError::Cancelled => failure::cancelled(provider),
+        WaitError::TimedOut => failure::timed_out(provider),
+        WaitError::Failed(error) => failure::network(provider).with_detail(error.to_string()),
+    })?;
+    log(provider, "callback_received", "");
+    let failure = match parse_callback(&target, expected_state) {
+        Some(Ok(Callback::Code(code))) => return Ok((code, reply)),
+        Some(Ok(Callback::Denied { error, description })) => {
+            failure::from_redirect(provider, &error, description.as_deref())
+        }
+        Some(Err(_)) => failure::invalid_state(provider),
+        None => failure::invalid_state(provider),
+    };
+    reply.send(oauth_loopback::NOT_CONNECTED).await;
+    Err(failure)
 }
 
 /// A token endpoint response. Never printed.
@@ -225,34 +236,16 @@ struct TokenError {
     error_description: Option<String>,
 }
 
-/// Why a token request failed.
-#[derive(Debug)]
-pub enum TokenFailure {
-    /// The grant is no longer valid (revoked, expired, password changed,
-    /// consent withdrawn): the user must sign in again.
-    Reauthenticate(String),
-    Other(AppError),
-}
-
-impl TokenFailure {
-    pub fn into_error(self, provider: &str) -> AppError {
-        match self {
-            Self::Reauthenticate(_) => AppError::authentication(format!(
-                "{provider} access was revoked or has expired. Reconnect in Settings → Connectors."
-            )),
-            Self::Other(error) => error,
-        }
-    }
-}
-
-/// POSTs a token request. Secret form values are scrubbed from any error.
+/// POSTs a token request (code exchange or refresh). Every value sent is
+/// scrubbed from the provider's error text before it goes anywhere.
 pub async fn token_request(
     http: &reqwest::Client,
     token_url: &str,
     app: &OAuthApp,
     provider: &str,
+    phase: TokenPhase,
     mut form: Vec<(&str, String)>,
-) -> Result<TokenResponse, TokenFailure> {
+) -> Result<TokenResponse, Failure> {
     form.push(("client_id", app.client_id.clone()));
     if let Some(secret) = &app.client_secret {
         form.push(("client_secret", secret.clone()));
@@ -274,59 +267,35 @@ pub async fn token_request(
         .send()
         .await
         .map_err(|e| {
-            TokenFailure::Other(AppError::provider(format!(
-                "{provider} could not be reached ({}).",
-                if e.is_timeout() {
-                    "timed out"
-                } else {
-                    "network error"
-                }
-            )))
+            failure::network(provider).with_detail(if e.is_timeout() {
+                "timed out"
+            } else {
+                "network error"
+            })
         })?;
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
     if status.is_success() {
         return serde_json::from_str(&body).map_err(|_| {
-            TokenFailure::Other(AppError::provider(format!(
-                "{provider} sent an unreadable token response."
-            )))
+            Failure::new(
+                crate::models::connectors::ConnectorErrorCode::TokenExchangeFailed,
+                format!("{provider} sent an unreadable answer. Click Retry."),
+            )
         });
     }
     let refs: Vec<&str> = secrets.iter().map(String::as_str).collect();
-    match serde_json::from_str::<TokenError>(&body).ok() {
-        Some(e)
-            if matches!(
-                e.error.as_str(),
-                "invalid_grant" | "interaction_required" | "consent_required" | "login_required"
-            ) =>
-        {
-            Err(TokenFailure::Reauthenticate(scrub(
-                &e.error_description.unwrap_or(e.error),
-                &refs,
-            )))
-        }
-        Some(e) if e.error == "invalid_client" || e.error == "unauthorized_client" => {
-            Err(TokenFailure::Other(AppError::configuration(format!(
-                "{provider} rejected ReMa's app registration ({}). This build of ReMa needs an \
-                 updated {provider} sign-in configuration.",
-                e.error
-            ))))
-        }
-        Some(e) => {
-            let detail = scrub(&e.error_description.unwrap_or(e.error), &refs);
-            Err(TokenFailure::Other(AppError::authentication(format!(
-                "{provider} sign-in failed: {}",
-                detail.chars().take(300).collect::<String>()
-            ))))
-        }
-        None if status.as_u16() == 429 => Err(TokenFailure::Other(AppError::provider(format!(
-            "{provider} is rate limiting sign-ins. Try again in a minute."
-        )))),
-        None => Err(TokenFailure::Other(AppError::provider(format!(
-            "{provider} sign-in failed ({}).",
-            status.as_u16()
-        )))),
-    }
+    let error = serde_json::from_str::<TokenError>(&body).ok();
+    let description = error
+        .as_ref()
+        .and_then(|e| e.error_description.as_deref())
+        .map(|d| scrub(d, &refs));
+    Err(failure::from_token_error(
+        provider,
+        phase,
+        status.as_u16(),
+        error.as_ref().map(|e| e.error.as_str()),
+        description.as_deref(),
+    ))
 }
 
 /// Claims of an ID token received directly from the provider's token

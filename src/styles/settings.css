@@ -514,6 +514,25 @@
   margin: 0;
 }
 
+.connector-detail__capabilities {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.connector-detail__capabilities li {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.connector-detail__capability-state {
+  color: var(--color-text-secondary);
+}
+
 .connector-detail__permissions {
   display: flex;
   flex-direction: column;

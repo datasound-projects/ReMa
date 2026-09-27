@@ -64,8 +64,8 @@ impl LinkedinEndpoints {
 }
 
 /// ReMa's LinkedIn app (a native PKCE client), set when ReMa is built
-/// (`REMA_LINKEDIN_CLIENT_ID`); debug builds may override it at run time
-/// (`REMA_DEV_LINKEDIN_CLIENT_ID`). Never a client secret.
+/// (`connectors.toml` or `LINKEDIN_CLIENT_ID`); debug builds may override it
+/// at run time (`REMA_DEV_LINKEDIN_CLIENT_ID`). Never a client secret.
 pub fn app() -> Option<OAuthApp> {
     #[cfg(debug_assertions)]
     if let Some(client_id) = std::env::var("REMA_DEV_LINKEDIN_CLIENT_ID")
@@ -77,26 +77,22 @@ pub fn app() -> Option<OAuthApp> {
             client_secret: None,
         });
     }
-    option_env!("REMA_LINKEDIN_CLIENT_ID")
-        .filter(|v| !v.trim().is_empty())
-        .map(|client_id| OAuthApp {
-            client_id: client_id.to_string(),
-            client_secret: None,
-        })
+    super::config::LINKEDIN_CLIENT_ID.map(|client_id| OAuthApp {
+        client_id: client_id.to_string(),
+        client_secret: None,
+    })
 }
 
 /// Scopes LinkedIn approved for ReMa's app beyond identity, as the build
-/// records them (`REMA_LINKEDIN_APPROVED_SCOPES`, space-separated; debug
-/// builds: `REMA_DEV_LINKEDIN_APPROVED_SCOPES`). Only known restricted
-/// scopes are accepted.
+/// records them (`connectors.toml` or `LINKEDIN_APPROVED_SCOPES`,
+/// space-separated; debug builds: `REMA_DEV_LINKEDIN_APPROVED_SCOPES`). Only
+/// known restricted scopes are accepted.
 pub fn approved_scopes() -> Vec<String> {
     #[cfg(debug_assertions)]
     if let Ok(scopes) = std::env::var("REMA_DEV_LINKEDIN_APPROVED_SCOPES") {
         return known(&scopes);
     }
-    option_env!("REMA_LINKEDIN_APPROVED_SCOPES")
-        .map(known)
-        .unwrap_or_default()
+    known(super::config::LINKEDIN_APPROVED_SCOPES)
 }
 
 fn known(scopes: &str) -> Vec<String> {

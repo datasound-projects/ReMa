@@ -16,6 +16,7 @@ use crate::{
     events::RecordingEvents,
     llm::fake::FakeLanguageModel,
     models::jobs::ApplicationStatus,
+    secrets::Credential,
     state::testing,
     test_support::{MockServer, Recorded},
 };
@@ -29,13 +30,20 @@ fn id_token(claims: serde_json::Value) -> String {
     format!("h.{}.s", URL_SAFE_NO_PAD.encode(claims.to_string()))
 }
 
-/// What the mock providers grant and whether refreshes work.
+/// What the mock providers grant, whether refreshes work, and how the
+/// connection-check endpoints answer.
 struct Grants {
     google_scope: Mutex<String>,
     microsoft_scope: Mutex<String>,
     /// LinkedIn reports granted scopes comma-separated.
     linkedin_scope: Mutex<String>,
     refresh_ok: Mutex<bool>,
+    /// The token endpoints cannot be reached (offline).
+    token_down: Mutex<bool>,
+    /// Overrides the Google code exchange (status, body).
+    google_exchange: Mutex<Option<(u16, String)>>,
+    gmail_profile: Mutex<(u16, String)>,
+    outlook_messages: Mutex<(u16, String)>,
 }
 
 struct Providers {
@@ -63,11 +71,44 @@ async fn providers() -> Providers {
         microsoft_scope: Mutex::new("Mail.Read User.Read openid profile email".into()),
         linkedin_scope: Mutex::new("email,openid,profile".into()),
         refresh_ok: Mutex::new(true),
+        token_down: Mutex::new(false),
+        google_exchange: Mutex::new(None),
+        gmail_profile: Mutex::new((
+            200,
+            r#"{"emailAddress":"ana@gmail.com","messagesTotal":12,"threadsTotal":9,"historyId":"77"}"#
+                .into(),
+        )),
+        outlook_messages: Mutex::new((200, r#"{"value":[{"id":"m1"}]}"#.into())),
     });
     let g = grants.clone();
     let server = MockServer::start(move |req| {
         let refresh_ok = *g.refresh_ok.lock().unwrap();
         let exchange = req.body.contains("grant_type=authorization_code");
+        // Connection checks, by path.
+        match req.target.split('?').next().unwrap_or_default() {
+            "/gmail/v1/users/me/profile" => return Some(g.gmail_profile.lock().unwrap().clone()),
+            "/calendar/v3/calendars/primary/events" => {
+                return Some((200, r#"{"kind":"calendar#events"}"#.into()))
+            }
+            "/graph/v1.0/me" => {
+                return Some((
+                    200,
+                    r#"{"id":"m-graph-id","displayName":"Ana Example","mail":null,"userPrincipalName":"ana@outlook.com"}"#
+                        .into(),
+                ))
+            }
+            "/graph/v1.0/me/messages" => return Some(g.outlook_messages.lock().unwrap().clone()),
+            "/graph/v1.0/me/calendar" => return Some((200, r#"{"id":"cal-1"}"#.into())),
+            _ => {}
+        }
+        if *g.token_down.lock().unwrap() && req.target.contains("token") {
+            return Some((503, "Service Unavailable".into()));
+        }
+        if exchange && req.target == "/token" {
+            if let Some(answer) = g.google_exchange.lock().unwrap().clone() {
+                return Some(answer);
+            }
+        }
         match req.target.as_str() {
             "/token" if exchange => Some((
                 200,
@@ -179,6 +220,8 @@ enum Consent {
     Allow,
     Deny,
     WrongState,
+    /// The provider returns this `error` and `error_description`.
+    Error(&'static str, &'static str),
 }
 
 impl Browser {
@@ -192,6 +235,10 @@ impl Browser {
                 Consent::Allow => format!("{redirect}/?state={state}&code=auth-code-123"),
                 Consent::Deny => format!("{redirect}/?state={state}&error=access_denied"),
                 Consent::WrongState => format!("{redirect}/?state=forged&code=auth-code-123"),
+                Consent::Error(error, description) => format!(
+                    "{redirect}/?state={state}&error={error}&error_description={}",
+                    description.replace(' ', "+")
+                ),
             };
             let page = self.page.clone();
             tokio::spawn(async move {
@@ -261,34 +308,50 @@ fn database_text(state: &AppState) -> String {
 }
 
 async fn stored(state: &AppState, provider: ProviderId) -> Option<Credential> {
-    state
-        .vault
-        .get(&tokens::vault_account(provider))
-        .await
-        .unwrap()
+    tokens::grant(state, provider).await
 }
 
+/// Lets the account's access token expire: the one in memory, and for
+/// LinkedIn (whose access token is its grant) the stored one.
 async fn expire(state: &AppState, provider: ProviderId) {
-    let Some(Credential::OAuth {
+    let grant = stored(state, provider).await.expect("connected");
+    state.connectors.forget_provider_access(provider);
+    if let Credential::OAuth {
         access_token,
         refresh_token,
         ..
-    }) = stored(state, provider).await
-    else {
-        panic!("connected");
-    };
-    state
-        .vault
-        .set(
-            &tokens::vault_account(provider),
-            Credential::OAuth {
-                access_token,
-                refresh_token,
-                expires_at: Some(now_ms() - 1_000),
-            },
-        )
-        .await
-        .unwrap();
+    } = grant
+    {
+        let account = state
+            .db
+            .call(|c| repo::account(c, provider))
+            .unwrap()
+            .and_then(|a| a.account_id)
+            .unwrap();
+        state
+            .vault
+            .set(
+                &tokens::vault_key(provider, &account),
+                Credential::OAuth {
+                    access_token,
+                    refresh_token,
+                    expires_at: Some(now_ms() - 1_000),
+                },
+            )
+            .await
+            .unwrap();
+    }
+}
+
+/// Waits for the fake browser's tab to show a page.
+async fn page_shown(browser: &Browser) -> String {
+    for _ in 0..200 {
+        if let Some(page) = browser.page.lock().unwrap().clone() {
+            return page;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("the browser tab never got a page");
 }
 
 // ── Sign-in ─────────────────────────────────────────────────────────
@@ -330,16 +393,17 @@ async fn gmail_signs_in_with_pkce_through_the_loopback_redirect() {
         query["code_challenge"]
     );
 
-    // The browser shows the success page.
-    for _ in 0..50 {
-        if browser.page.lock().unwrap().is_some() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    let page = browser.page.lock().unwrap().clone().unwrap();
+    // The browser shows the success page, once ReMa is really connected.
+    let page = page_shown(&browser).await;
     assert!(page.contains("ReMa connected successfully."));
-    assert!(page.contains("You can close this tab and return to ReMa."));
+    assert!(page.contains("You can close this browser tab and return to ReMa."));
+    for secret in ["auth-code-123", "g-at-1", "g-rt-1", query["state"].as_str()] {
+        assert!(!page.contains(secret), "{secret} shown in the browser");
+    }
+    // Checked with one small request: the Gmail profile, no message.
+    let checks = providers.requests("/gmail/");
+    assert_eq!(checks.len(), 1);
+    assert!(checks[0].target.starts_with("/gmail/v1/users/me/profile"));
 
     let gmail = card(&state, ConnectorId::Gmail).await;
     assert_eq!(gmail.state, ConnectorState::Connected);
@@ -378,11 +442,27 @@ async fn tokens_live_only_in_the_credential_store() {
         .unwrap();
     let verifier = form(&providers.requests("/token")[0].body)["code_verifier"].clone();
 
+    // Only the refresh token is kept, under the account's own key; the
+    // access token stays in memory.
     assert!(matches!(
         stored(&state, ProviderId::Google).await,
-        Some(Credential::OAuth { ref access_token, refresh_token: Some(ref refresh), .. })
-            if access_token == "g-at-1" && refresh == "g-rt-1"
+        Some(Credential::RefreshToken { ref refresh_token }) if refresh_token == "g-rt-1"
     ));
+    let key = tokens::vault_key(ProviderId::Google, "g-123");
+    let raw = state.vault.get_text(&key).await.unwrap().unwrap();
+    assert!(raw.contains("g-rt-1") && !raw.contains("g-at-1"), "{raw}");
+    assert!(state
+        .vault
+        .get_text(&tokens::legacy_key(ProviderId::Google))
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        tokens::get_valid_access_token(&state, ProviderId::Google)
+            .await
+            .unwrap(),
+        "g-at-1"
+    );
     let secrets = [
         "g-at-1",
         "g-rt-1",
@@ -390,6 +470,11 @@ async fn tokens_live_only_in_the_credential_store() {
         verifier.as_str(),
         GOOGLE_SECRET,
     ];
+    // A refresh, so a refresh request is logged too.
+    state.connectors.forget_provider_access(ProviderId::Google);
+    tokens::get_valid_access_token(&state, ProviderId::Google)
+        .await
+        .unwrap();
     let database = database_text(&state);
     let overview = serde_json::to_string(&overview(&state).await.unwrap()).unwrap();
     let debug = format!(
@@ -398,11 +483,17 @@ async fn tokens_live_only_in_the_credential_store() {
         state.connectors.app(ProviderId::Google),
         Pkce::from_verifier(verifier.clone())
     );
-    for secret in secrets {
+    let logs = diag_lines().lock().unwrap().join("\n");
+    assert!(logs.contains("[oauth] provider=google phase=token_exchange_success"));
+    assert!(logs.contains("[oauth] provider=google phase=token_refreshed"));
+    for secret in secrets.into_iter().chain(["g-at-2"]) {
         assert!(!database.contains(secret), "{secret} in SQLite");
         assert!(!overview.contains(secret), "{secret} sent to the interface");
         assert!(!debug.contains(secret), "{secret} in debug output");
+        assert!(!logs.contains(secret), "{secret} logged");
     }
+    // Diagnostics name no account either.
+    assert!(!logs.contains("ana@gmail.com") && !logs.contains("g-123"));
 }
 
 #[tokio::test]
@@ -441,7 +532,12 @@ async fn adding_a_second_google_connector_asks_for_the_union_of_scopes() {
         // and claims no sync.
         assert_eq!(connector.last_sync_at, None, "{id:?}");
     }
-    assert!(providers.requests("/gmail/").is_empty(), "no mail was read");
+    // Checks only: no message and no event was read.
+    assert!(providers.requests("/gmail/v1/users/me/messages").is_empty());
+    assert!(providers.requests("/gmail/v1/users/me/history").is_empty());
+    let events = providers.requests("/calendar/v3/calendars/primary/events");
+    assert_eq!(events.len(), 1);
+    assert!(events[0].target.contains("maxResults=1") && events[0].target.contains("fields=kind"));
 }
 
 #[tokio::test]
@@ -451,16 +547,28 @@ async fn a_permission_left_unchecked_is_reported() {
     let browser = Browser::default();
     // The user unticks the calendar permission on Google's consent screen.
     providers.grant_google(&["openid", "email", "profile", google::SCOPE_GMAIL_READONLY]);
-    connect(
+    let error = connect(
         &state,
         ConnectorId::GoogleCalendar,
         browser.open(Consent::Allow),
     )
     .await
-    .unwrap();
+    .unwrap_err();
+    // Not a generic OAuth failure: the sign-in worked, a permission is
+    // missing (Spec B §47).
+    assert!(matches!(error, AppError::Permission(_)), "{error}");
+    assert!(page_shown(&browser)
+        .await
+        .contains("ReMa could not complete authorization."));
     let calendar = card(&state, ConnectorId::GoogleCalendar).await;
     assert_eq!(calendar.state, ConnectorState::PermissionMissing);
+    assert_eq!(
+        calendar.error_code,
+        Some(ConnectorErrorCode::ScopeNotGranted)
+    );
     assert!(calendar.message.unwrap().contains("Calendar — Read events"));
+    // No request was needed to know it.
+    assert!(providers.requests("/calendar/").is_empty());
     let error = require(&state, ConnectorId::GoogleCalendar)
         .await
         .unwrap_err();
@@ -479,6 +587,12 @@ async fn denied_consent_and_a_forged_state_connect_nothing() {
         .unwrap_err();
     assert!(error.to_string().contains("not granted"), "{error}");
 
+    // Declining is the user's choice: the card simply offers `+` again.
+    assert_eq!(
+        card(&state, ConnectorId::Gmail).await.state,
+        ConnectorState::Disconnected
+    );
+
     let error = connect(
         &state,
         ConnectorId::Gmail,
@@ -486,17 +600,20 @@ async fn denied_consent_and_a_forged_state_connect_nothing() {
     )
     .await
     .unwrap_err();
-    assert!(error.to_string().contains("invalid state"), "{error}");
+    assert!(error.to_string().contains("did not start"), "{error}");
 
     assert!(
         providers.requests("/token").is_empty(),
         "no code was exchanged"
     );
     assert!(stored(&state, ProviderId::Google).await.is_none());
-    assert_eq!(
-        card(&state, ConnectorId::Gmail).await.state,
-        ConnectorState::Disconnected
-    );
+    let gmail = card(&state, ConnectorId::Gmail).await;
+    assert_eq!(gmail.state, ConnectorState::Error, "Retry is offered");
+    assert_eq!(gmail.error_code, Some(ConnectorErrorCode::InvalidState));
+    assert!(!gmail.enabled);
+    assert!(page_shown(&browser)
+        .await
+        .contains("ReMa could not complete authorization."));
 }
 
 #[tokio::test]
@@ -523,9 +640,10 @@ async fn a_sign_in_shows_connecting_and_can_be_cancelled() {
 }
 
 #[tokio::test]
-async fn an_unanswered_sign_in_times_out() {
+async fn an_unanswered_sign_in_times_out_and_a_late_callback_finds_nothing() {
     let loopback = Loopback::ipv4().await.unwrap();
-    let error = oauth::wait_for_code(
+    let port = loopback.port();
+    let failure = match oauth::wait_for_callback(
         loopback,
         "state",
         "Google",
@@ -533,8 +651,16 @@ async fn an_unanswered_sign_in_times_out() {
         Duration::from_millis(100),
     )
     .await
-    .unwrap_err();
-    assert!(error.to_string().to_lowercase().contains("time"), "{error}");
+    {
+        Err(failure) => failure,
+        Ok(_) => panic!("nothing called back"),
+    };
+    assert_eq!(failure.code, ConnectorErrorCode::SignInTimedOut);
+    assert!(failure.message.contains("Retry"));
+    // The listener is gone: the browser's late redirect is refused.
+    assert!(tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .is_err());
 }
 
 #[tokio::test]
@@ -603,6 +729,18 @@ async fn outlook_signs_in_as_a_public_client_on_localhost() {
     assert_eq!(outlook.state, ConnectorState::Connected);
     assert_eq!(outlook.account_email.as_deref(), Some("ana@outlook.com"));
     assert_eq!(outlook.publisher, "Microsoft");
+    // Identity from Graph /me, then one small mail check.
+    assert_eq!(providers.requests("/graph/v1.0/me?").len(), 1);
+    let mail = providers.requests("/graph/v1.0/me/messages");
+    assert_eq!(mail.len(), 1);
+    assert!(mail[0].target.contains("%24top=1") || mail[0].target.contains("$top=1"));
+    // The grant is keyed by the account's Microsoft id.
+    assert!(state
+        .vault
+        .get_text(&tokens::vault_key(ProviderId::Microsoft, "m-oid"))
+        .await
+        .unwrap()
+        .is_some());
 }
 
 #[tokio::test]
@@ -801,10 +939,11 @@ async fn linkedin_cancel_and_forged_state_connect_nothing() {
     assert!(providers
         .requests("/linkedin/oauth/v2/accessToken")
         .is_empty());
-    assert_eq!(
-        card(&state, ConnectorId::Linkedin).await.state,
-        ConnectorState::Disconnected
-    );
+    // The forged answer is reported on the card, with Retry.
+    let linkedin = card(&state, ConnectorId::Linkedin).await;
+    assert_eq!(linkedin.state, ConnectorState::Error);
+    assert_eq!(linkedin.error_code, Some(ConnectorErrorCode::InvalidState));
+    assert!(!linkedin.enabled);
     assert!(stored(&state, ProviderId::Linkedin).await.is_none());
 }
 
@@ -865,7 +1004,7 @@ async fn access_tokens_are_refreshed_silently_before_they_expire() {
     // Google kept the refresh token (none was returned).
     assert!(matches!(
         stored(&state, ProviderId::Google).await,
-        Some(Credential::OAuth { refresh_token: Some(ref r), .. }) if r == "g-rt-1"
+        Some(Credential::RefreshToken { ref refresh_token }) if refresh_token == "g-rt-1"
     ));
     // Forced refresh (after a 401).
     tokens::refresh_access_token(&state, ProviderId::Google)
@@ -898,7 +1037,7 @@ async fn microsoft_refresh_tokens_rotate() {
     assert!(!refresh.contains_key("client_secret"));
     assert!(matches!(
         stored(&state, ProviderId::Microsoft).await,
-        Some(Credential::OAuth { refresh_token: Some(ref r), .. }) if r == "m-rt-2"
+        Some(Credential::RefreshToken { ref refresh_token }) if refresh_token == "m-rt-2"
     ));
 }
 
@@ -931,7 +1070,8 @@ async fn a_revoked_grant_requires_reconnecting_and_never_retries_on_its_own() {
     );
     let gmail = card(&state, ConnectorId::Gmail).await;
     assert_eq!(gmail.state, ConnectorState::ReauthRequired);
-    assert!(gmail.message.unwrap().contains("Reconnect"));
+    assert_eq!(gmail.error_code, Some(ConnectorErrorCode::ReauthRequired));
+    assert!(gmail.message.unwrap().starts_with("Reconnect required"));
     assert_eq!(
         gmail.account_email.as_deref(),
         Some("ana@gmail.com"),
@@ -1131,10 +1271,16 @@ async fn old_google_tokens_from_the_built_in_client_keep_working() {
     old_google(&state, false).await;
     legacy::migrate(&state).await.unwrap();
 
-    assert!(matches!(
-        stored(&state, ProviderId::Google).await,
-        Some(Credential::OAuth { ref access_token, .. }) if access_token == "old-at"
-    ));
+    // The old grant keeps working: its access token is used until it
+    // expires, with no refresh.
+    assert!(stored(&state, ProviderId::Google).await.is_some());
+    assert_eq!(
+        tokens::get_valid_access_token(&state, ProviderId::Google)
+            .await
+            .unwrap(),
+        "old-at"
+    );
+    assert!(providers.requests("/token").is_empty());
     assert!(state.vault.get("google").await.unwrap().is_none());
     for id in [ConnectorId::Gmail, ConnectorId::GoogleCalendar] {
         let status = card(&state, id).await;
@@ -1167,4 +1313,523 @@ async fn old_google_tokens_from_a_user_client_are_revoked_and_reconnect_is_asked
     let gmail = card(&state, ConnectorId::Gmail).await;
     assert_eq!(gmail.state, ConnectorState::ReauthRequired);
     assert!(gmail.detail.unwrap().contains("its own Google sign-in"));
+}
+
+/// Release checks (B §51, §80): the backend opens the system browser through
+/// the opener plugin, and no webview may open addresses itself.
+#[test]
+fn the_opener_plugin_is_registered_and_no_webview_can_open_addresses() {
+    let lib = include_str!("../lib.rs");
+    assert!(lib.contains(".plugin(tauri_plugin_opener::init())"));
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("capabilities");
+    let mut files = 0;
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|e| e == "json") {
+            files += 1;
+            let capability: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            let permissions = capability["permissions"].to_string();
+            assert!(
+                !permissions.contains("opener:") && !permissions.contains("shell:"),
+                "{}: {permissions}",
+                path.display()
+            );
+        }
+    }
+    assert!(files >= 1);
+}
+
+// ── Spec B: one sign-in at a time, pages, checks, errors ─────────────
+
+#[tokio::test]
+async fn a_second_sign_in_is_refused_while_one_is_open() {
+    let providers = providers().await;
+    let (state, _) = state_for(&providers, apps());
+    let first = state.clone();
+    let waiting =
+        tokio::spawn(async move { connect(&first, ConnectorId::Gmail, |_| Ok(())).await });
+    for _ in 0..100 {
+        if card(&state, ConnectorId::Gmail).await.state == ConnectorState::Connecting {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // A double click, or Calendar while Gmail's sign-in is open.
+    let opened = Arc::new(Mutex::new(0));
+    for id in [ConnectorId::Gmail, ConnectorId::GoogleCalendar] {
+        let count = opened.clone();
+        let error = connect(&state, id, move |_| {
+            *count.lock().unwrap() += 1;
+            Ok(())
+        })
+        .await
+        .unwrap_err();
+        assert!(matches!(error, AppError::Conflict(_)), "{error}");
+    }
+    assert_eq!(*opened.lock().unwrap(), 0, "no second browser window");
+    // Microsoft is a different account: its sign-in may run meanwhile.
+    connect(
+        &state,
+        ConnectorId::OutlookMail,
+        Browser::default().open(Consent::Allow),
+    )
+    .await
+    .unwrap();
+    state.connectors.cancel_sign_in(ProviderId::Google);
+    assert!(waiting.await.unwrap().is_err());
+    assert_eq!(
+        card(&state, ConnectorId::Gmail).await.state,
+        ConnectorState::Disconnected
+    );
+}
+
+#[tokio::test]
+async fn a_failed_code_exchange_says_so_in_the_browser_and_offers_retry() {
+    let providers = providers().await;
+    let (state, _) = state_for(&providers, apps());
+    *providers.grants.google_exchange.lock().unwrap() = Some((
+        401,
+        r#"{"error":"invalid_client","error_description":"The OAuth client was not found."}"#
+            .into(),
+    ));
+    let browser = Browser::default();
+    let error = connect(&state, ConnectorId::Gmail, browser.open(Consent::Allow))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, AppError::Configuration(_)), "{error}");
+    let page = page_shown(&browser).await;
+    assert!(page.contains("ReMa could not complete authorization."));
+    assert!(page.contains("Return to ReMa for details."));
+    assert!(!page.contains("connected successfully"));
+    let gmail = card(&state, ConnectorId::Gmail).await;
+    assert_eq!(gmail.state, ConnectorState::Error);
+    assert_eq!(
+        gmail.error_code,
+        Some(ConnectorErrorCode::ProviderConfigurationError)
+    );
+    assert!(gmail
+        .message
+        .unwrap()
+        .contains("not a problem with your account"));
+    assert!(gmail.detail.unwrap().contains("invalid_client"));
+    assert!(stored(&state, ProviderId::Google).await.is_none());
+
+    // Retry works once the registration is fixed, and clears the failure.
+    *providers.grants.google_exchange.lock().unwrap() = None;
+    connect(
+        &state,
+        ConnectorId::Gmail,
+        Browser::default().open(Consent::Allow),
+    )
+    .await
+    .unwrap();
+    let gmail = card(&state, ConnectorId::Gmail).await;
+    assert_eq!(gmail.state, ConnectorState::Connected);
+    assert_eq!(gmail.error_code, None);
+}
+
+#[tokio::test]
+async fn the_redirect_is_taken_once_and_only_on_its_own_path() {
+    let providers = providers().await;
+    let (state, _) = state_for(&providers, apps());
+    let redirect = Arc::new(Mutex::new(String::new()));
+    let seen = redirect.clone();
+    let browser = Browser::default();
+    let open = browser.open(Consent::Allow);
+    connect(&state, ConnectorId::Gmail, move |url| {
+        *seen.lock().unwrap() = params(url)["redirect_uri"].clone();
+        open(url)
+    })
+    .await
+    .unwrap();
+    // After the sign-in nothing listens there: a repeated callback (a
+    // reloaded tab, a replayed code) is refused.
+    let port: u16 = redirect
+        .lock()
+        .unwrap()
+        .rsplit(':')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .is_err());
+    assert_eq!(providers.requests("/token").len(), 1, "one code exchange");
+
+    // Another path on the loopback port is not the redirect.
+    assert!(oauth::parse_callback("/other?state=s1&code=x", "s1").is_none());
+    assert!(oauth::parse_callback("/favicon.ico?code=x&state=s1", "s1").is_none());
+    assert!(oauth::parse_callback("/?state=s1&code=x", "s1").is_some());
+}
+
+#[tokio::test]
+async fn concurrent_requests_share_one_refresh() {
+    let providers = providers().await;
+    let (state, _) = state_for(&providers, apps());
+    connect(
+        &state,
+        ConnectorId::Gmail,
+        Browser::default().open(Consent::Allow),
+    )
+    .await
+    .unwrap();
+    expire(&state, ProviderId::Google).await;
+    let callers: Vec<_> = (0..8)
+        .map(|_| {
+            let state = state.clone();
+            tokio::spawn(async move {
+                tokens::get_valid_access_token(&state, ProviderId::Google)
+                    .await
+                    .unwrap()
+            })
+        })
+        .collect();
+    for caller in callers {
+        assert_eq!(caller.await.unwrap(), "g-at-2");
+    }
+    let refreshes = providers
+        .requests("/token")
+        .into_iter()
+        .filter(|r| r.body.contains("grant_type=refresh_token"))
+        .count();
+    assert_eq!(refreshes, 1, "a single refresh for every caller");
+}
+
+#[tokio::test]
+async fn grants_move_from_the_provider_key_to_the_account_key() {
+    let providers = providers().await;
+    let (state, _) = state_for(&providers, apps());
+    // Stored by an earlier version: one key per provider, access token too.
+    state
+        .vault
+        .set(
+            &tokens::legacy_key(ProviderId::Google),
+            Credential::OAuth {
+                access_token: "at-from-before".into(),
+                refresh_token: Some("rt-from-before".into()),
+                expires_at: Some(now_ms() + 3_600_000),
+            },
+        )
+        .await
+        .unwrap();
+    let now = now_ms();
+    state
+        .db
+        .call(|c| {
+            repo::save_account(
+                c,
+                &AccountRecord {
+                    provider: ProviderId::Google,
+                    account_id: Some("g-123".into()),
+                    email: Some("ana@gmail.com".into()),
+                    display_name: None,
+                    granted_scopes: google::scopes(&[ConnectorId::Gmail]),
+                    status: AccountStatus::Connected,
+                    status_reason: None,
+                    connected_at: now,
+                    updated_at: now,
+                },
+            )?;
+            repo::set_enabled(c, ConnectorId::Gmail, true, now)
+        })
+        .unwrap();
+    // The access token still works (no refresh) …
+    assert_eq!(
+        tokens::get_valid_access_token(&state, ProviderId::Google)
+            .await
+            .unwrap(),
+        "at-from-before"
+    );
+    assert!(providers.requests("/token").is_empty());
+    // … and only the refresh token remains, under the account's key.
+    assert!(state
+        .vault
+        .get_text(&tokens::legacy_key(ProviderId::Google))
+        .await
+        .unwrap()
+        .is_none());
+    let raw = state
+        .vault
+        .get_text(&tokens::vault_key(ProviderId::Google, "g-123"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(raw.contains("rt-from-before") && !raw.contains("at-from-before"));
+    assert_eq!(
+        card(&state, ConnectorId::Gmail).await.state,
+        ConnectorState::Connected
+    );
+}
+
+#[tokio::test]
+async fn a_connector_is_connected_only_when_its_api_answers() {
+    let providers = providers().await;
+    let (state, _) = state_for(&providers, apps());
+    *providers.grants.gmail_profile.lock().unwrap() = (
+        403,
+        r#"{"error":{"code":403,"message":"Gmail API has not been used in project 1234 before or it is disabled.","status":"PERMISSION_DENIED","details":[{"reason":"SERVICE_DISABLED"}]}}"#
+            .into(),
+    );
+    let browser = Browser::default();
+    let error = connect(&state, ConnectorId::Gmail, browser.open(Consent::Allow))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, AppError::Configuration(_)), "{error}");
+    assert!(page_shown(&browser)
+        .await
+        .contains("ReMa could not complete authorization."));
+    let gmail = card(&state, ConnectorId::Gmail).await;
+    assert_eq!(gmail.state, ConnectorState::Error);
+    assert_eq!(gmail.error_code, Some(ConnectorErrorCode::ApiNotEnabled));
+    assert!(gmail.message.unwrap().contains("Gmail API is not enabled"));
+    // The sign-in itself is kept: once the API answers, nothing else is needed.
+    assert!(stored(&state, ProviderId::Google).await.is_some());
+
+    // After a restart the card still says why (it is stored).
+    let restarted = card(&state, ConnectorId::Gmail).await;
+    assert_eq!(
+        restarted.error_code,
+        Some(ConnectorErrorCode::ApiNotEnabled)
+    );
+
+    *providers.grants.gmail_profile.lock().unwrap() =
+        (200, r#"{"emailAddress":"ana@gmail.com"}"#.into());
+    connect(
+        &state,
+        ConnectorId::Gmail,
+        Browser::default().open(Consent::Allow),
+    )
+    .await
+    .unwrap();
+    let gmail = card(&state, ConnectorId::Gmail).await;
+    assert_eq!(gmail.state, ConnectorState::Connected);
+    assert_eq!(gmail.error_code, None);
+}
+
+#[tokio::test]
+async fn a_check_the_provider_cannot_answer_leaves_the_connector_connected() {
+    let providers = providers().await;
+    let (state, _) = state_for(&providers, apps());
+    *providers.grants.gmail_profile.lock().unwrap() = (503, "Service Unavailable".into());
+    connect(
+        &state,
+        ConnectorId::Gmail,
+        Browser::default().open(Consent::Allow),
+    )
+    .await
+    .unwrap();
+    let gmail = card(&state, ConnectorId::Gmail).await;
+    assert_eq!(gmail.state, ConnectorState::Connected);
+    assert_eq!(gmail.error_code, None);
+}
+
+#[tokio::test]
+async fn an_outlook_account_without_a_mailbox_is_explained() {
+    let providers = providers().await;
+    let (state, _) = state_for(&providers, apps());
+    *providers.grants.outlook_messages.lock().unwrap() = (
+        404,
+        r#"{"error":{"code":"MailboxNotEnabledForRESTAPI","message":"The mailbox is either inactive, soft-deleted, or is hosted on-premise."}}"#
+            .into(),
+    );
+    assert!(connect(
+        &state,
+        ConnectorId::OutlookMail,
+        Browser::default().open(Consent::Allow),
+    )
+    .await
+    .is_err());
+    let outlook = card(&state, ConnectorId::OutlookMail).await;
+    assert_eq!(outlook.state, ConnectorState::Error);
+    assert_eq!(
+        outlook.error_code,
+        Some(ConnectorErrorCode::AccountNotSupported)
+    );
+}
+
+#[tokio::test]
+async fn an_organization_that_requires_admin_approval_is_named_as_the_reason() {
+    let providers = providers().await;
+    *providers.grants.microsoft_scope.lock().unwrap() =
+        "Calendars.ReadWrite User.Read openid profile email".into();
+    let (state, _) = state_for(&providers, apps());
+    let browser = Browser::default();
+    let error = connect(
+        &state,
+        ConnectorId::OutlookCalendar,
+        browser.open(Consent::Error(
+            "access_denied",
+            "AADSTS90094: An administrator of Contoso has set a policy that prevents you from granting ReMa the permissions it is requesting.",
+        )),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, AppError::Permission(_)), "{error}");
+    let calendar = card(&state, ConnectorId::OutlookCalendar).await;
+    assert_eq!(calendar.state, ConnectorState::Error);
+    assert_eq!(
+        calendar.error_code,
+        Some(ConnectorErrorCode::ProviderAdminPolicy)
+    );
+    assert!(calendar.message.unwrap().starts_with(
+        "Your organization requires administrator approval before ReMa can access this Microsoft account."
+    ));
+    assert!(providers.requests("/common/oauth2/v2.0/token").is_empty());
+    // A personal account still connects.
+    connect(
+        &state,
+        ConnectorId::OutlookCalendar,
+        Browser::default().open(Consent::Allow),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        card(&state, ConnectorId::OutlookCalendar).await.state,
+        ConnectorState::Connected
+    );
+}
+
+#[tokio::test]
+async fn offline_keeps_the_connection_and_its_grant() {
+    let providers = providers().await;
+    let (state, _) = state_for(&providers, apps());
+    connect(
+        &state,
+        ConnectorId::Gmail,
+        Browser::default().open(Consent::Allow),
+    )
+    .await
+    .unwrap();
+    expire(&state, ProviderId::Google).await;
+    *providers.grants.token_down.lock().unwrap() = true;
+    let error = tokens::get_valid_access_token(&state, ProviderId::Google)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, AppError::Network(_)), "{error}");
+    assert!(stored(&state, ProviderId::Google).await.is_some(), "kept");
+    assert_eq!(
+        card(&state, ConnectorId::Gmail).await.state,
+        ConnectorState::Connected
+    );
+    // Back online: the next request refreshes normally.
+    *providers.grants.token_down.lock().unwrap() = false;
+    assert_eq!(
+        tokens::get_valid_access_token(&state, ProviderId::Google)
+            .await
+            .unwrap(),
+        "g-at-2"
+    );
+}
+
+/// A credential store that counts reads and can be made to hang.
+#[derive(Default)]
+struct SlowStore {
+    reads: Mutex<usize>,
+    hang: Mutex<bool>,
+    inner: crate::secrets::MemoryStore,
+}
+
+impl crate::secrets::SecretStore for SlowStore {
+    fn get(&self, account: &str) -> AppResult<Option<String>> {
+        *self.reads.lock().unwrap() += 1;
+        if *self.hang.lock().unwrap() {
+            std::thread::sleep(Duration::from_secs(2));
+        }
+        self.inner.get(account)
+    }
+
+    fn set(&self, account: &str, secret: &str) -> AppResult<()> {
+        self.inner.set(account, secret)
+    }
+
+    fn delete(&self, account: &str) -> AppResult<()> {
+        self.inner.delete(account)
+    }
+}
+
+#[tokio::test]
+async fn settings_never_wait_on_the_keychain_for_cards_that_were_never_connected() {
+    let providers = providers().await;
+    let (mut state, _) = state_for(&providers, apps());
+    let store = Arc::new(SlowStore::default());
+    state.vault = crate::secrets::SecretVault::new(store.clone());
+    *store.hang.lock().unwrap() = true;
+    let started = std::time::Instant::now();
+    let cards = overview(&state).await.unwrap();
+    assert!(started.elapsed() < Duration::from_millis(500));
+    assert_eq!(
+        *store.reads.lock().unwrap(),
+        0,
+        "a fresh install reads no keychain"
+    );
+    assert!(cards
+        .connectors
+        .iter()
+        .filter(|c| c.provider != ProviderId::Xing)
+        .all(|c| c.state == ConnectorState::Disconnected));
+
+    // Connected, then the keychain stops answering: the card says so and
+    // the section still appears.
+    *store.hang.lock().unwrap() = false;
+    connect(
+        &state,
+        ConnectorId::Gmail,
+        Browser::default().open(Consent::Allow),
+    )
+    .await
+    .unwrap();
+    let (mut restarted, _) = state_for(&providers, apps());
+    restarted.db = state.db.clone();
+    restarted.vault = crate::secrets::SecretVault::new(store.clone());
+    *store.hang.lock().unwrap() = true;
+    let started = std::time::Instant::now();
+    let gmail = card(&restarted, ConnectorId::Gmail).await;
+    assert!(started.elapsed() < Duration::from_millis(1500));
+    assert_eq!(gmail.state, ConnectorState::Error);
+    assert!(gmail.message.unwrap().contains("system keychain"));
+    *store.hang.lock().unwrap() = false;
+}
+
+#[test]
+fn a_card_opening_the_browser_says_so_before_it_asks_to_finish_there() {
+    let record = ConnectorRecord {
+        id: ConnectorId::Gmail,
+        enabled: false,
+        last_sync_started_at: None,
+        last_sync_completed_at: None,
+        last_success_at: None,
+        last_error: None,
+        last_error_detail: None,
+        last_error_code: None,
+    };
+    let signing_in = |opened| SigningIn {
+        connectors: vec![ConnectorId::Gmail],
+        opened,
+    };
+    let opening = status_of(
+        &record,
+        None,
+        Ok(false),
+        Some(signing_in(false)),
+        false,
+        true,
+        None,
+    );
+    assert_eq!(opening.state, ConnectorState::Connecting);
+    assert_eq!(opening.message.as_deref(), Some("Opening Google sign-in…"));
+    let waiting = status_of(
+        &record,
+        None,
+        Ok(false),
+        Some(signing_in(true)),
+        false,
+        true,
+        None,
+    );
+    assert_eq!(
+        waiting.message.as_deref(),
+        Some("Finish signing in with Google in your browser.")
+    );
 }

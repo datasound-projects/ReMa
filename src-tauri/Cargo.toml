@@ -14,6 +14,8 @@ name = "rema_lib"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# Reads connectors.toml (ReMa's public OAuth client configuration).
+toml = "1"
 
 [dependencies]
 # `unstable`: child webviews for the built-in browser workspace.
@@ -81,6 +83,8 @@ gtk = "0.18"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util"] }
+# Checks the committed connectors.toml.
+toml = "1"
 
 # Small, fast release binaries.
 [profile.release]

@@ -64,9 +64,11 @@ impl GoogleEndpoints {
     }
 }
 
-/// ReMa's Google OAuth client, set when ReMa is built
-/// (`REMA_GOOGLE_CLIENT_ID`, `REMA_GOOGLE_CLIENT_SECRET`). Debug builds may
-/// override it at run time for development (`REMA_DEV_GOOGLE_CLIENT_ID`).
+/// ReMa's Google "Desktop app" OAuth client, compiled in from
+/// `connectors.toml` (or `GOOGLE_DESKTOP_CLIENT_ID` and
+/// `GOOGLE_DESKTOP_CLIENT_SECRET`); release builds always have it. Debug
+/// builds may override it at run time for development
+/// (`REMA_DEV_GOOGLE_CLIENT_ID`).
 pub fn app() -> Option<OAuthApp> {
     #[cfg(debug_assertions)]
     if let Some(client_id) = std::env::var("REMA_DEV_GOOGLE_CLIENT_ID")
@@ -80,14 +82,10 @@ pub fn app() -> Option<OAuthApp> {
                 .filter(|v| !v.trim().is_empty()),
         });
     }
-    option_env!("REMA_GOOGLE_CLIENT_ID")
-        .filter(|v| !v.trim().is_empty())
-        .map(|client_id| OAuthApp {
-            client_id: client_id.to_string(),
-            client_secret: option_env!("REMA_GOOGLE_CLIENT_SECRET")
-                .filter(|v| !v.trim().is_empty())
-                .map(str::to_string),
-        })
+    super::config::GOOGLE_CLIENT_ID.map(|client_id| OAuthApp {
+        client_id: client_id.to_string(),
+        client_secret: super::config::GOOGLE_CLIENT_SECRET.map(str::to_string),
+    })
 }
 
 /// The scopes for a set of connectors: identity plus each connector's own.

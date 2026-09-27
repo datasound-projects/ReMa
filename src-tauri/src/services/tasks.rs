@@ -621,7 +621,7 @@ mod tests {
         state
             .vault
             .set(
-                &crate::connectors::tokens::vault_account(ProviderId::Google),
+                &crate::connectors::tokens::legacy_key(ProviderId::Google),
                 Credential::OAuth {
                     access_token: "at".into(),
                     refresh_token: Some("rt".into()),

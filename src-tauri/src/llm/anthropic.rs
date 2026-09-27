@@ -41,7 +41,8 @@ fn authorize(endpoint: &Endpoint, request: RequestBuilder) -> RequestBuilder {
         Some(Credential::OAuth { access_token, .. }) => request
             .bearer_auth(access_token)
             .header("anthropic-beta", OAUTH_BETA),
-        None => request,
+        // Connector grants never belong to a model provider.
+        Some(Credential::RefreshToken { .. }) | None => request,
     }
 }
 

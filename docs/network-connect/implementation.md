@@ -163,12 +163,14 @@ kept to what they state. Re-check on a normal network before release
 
 - A LinkedIn developer app with the "Sign In with LinkedIn using OpenID
   Connect" product and native PKCE enabled by LinkedIn; its client ID in
-  `REMA_LINKEDIN_CLIENT_ID` at build time (see
+  `src-tauri/connectors.toml` (`[linkedin] client_id`, or
+  `LINKEDIN_CLIENT_ID`; see
   [connectors/registration.md](../connectors/registration.md)). Without it
-  the LinkedIn card says it is unavailable in this build.
+  the LinkedIn card says LinkedIn is not part of that version.
 - Connection-list access needs LinkedIn's approval of `r_1st_connections`
-  for that app, recorded in `REMA_LINKEDIN_APPROVED_SCOPES`; until then the
-  capability stays "Not available".
+  for that app, recorded in `[linkedin] approved_scopes`
+  (`LINKEDIN_APPROVED_SCOPES`); until then the capability stays "Not
+  available".
 - XING: nothing can be registered today; the connector stays unavailable.
 
 ## 7. Limitations

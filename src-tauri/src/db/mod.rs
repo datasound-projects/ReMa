@@ -40,6 +40,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0010_run_history.sql"),
     include_str!("migrations/0011_network_connect.sql"),
     include_str!("migrations/0012_business.sql"),
+    include_str!("migrations/0013_connector_checks.sql"),
 ];
 
 #[derive(Clone)]

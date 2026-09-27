@@ -1,58 +1,136 @@
 //! The token manager: the only code that touches connector tokens.
 //!
-//! Tokens live in the OS credential store (and in Rust memory) under
-//! `connector:<provider>`; never in SQLite, settings, logs, the frontend or a
-//! model's context. Access tokens are refreshed silently before they expire.
+//! A connected account's grant lives in the OS credential store under
+//! `connector:<provider>:<account id>` (the provider plus its stable account
+//! id, never the email address): the refresh token for Google and
+//! Microsoft; for LinkedIn, which issues no refresh tokens, its access token.
+//! Google and Microsoft access tokens are kept in memory only and renewed
+//! silently; after a restart the first request refreshes. Concurrent
+//! requests for one account share a single refresh. Nothing here reaches
+//! SQLite, settings, logs, the frontend or a model's context.
+//!
 //! When a refresh is rejected (revoked consent, password change, expired
 //! refresh token) the account becomes "reauth_required" and stays so until
-//! the user clicks Reconnect: ReMa never opens a sign-in on its own.
+//! the user clicks Reconnect: ReMa never opens a sign-in on its own. A
+//! provider that cannot be reached leaves the grant alone.
 
-use super::{oauth, oauth::TokenResponse, ConnectorsContext};
+use super::{failure::TokenPhase, oauth, oauth::TokenResponse};
 use crate::{
     db::connectors::{self as repo, AccountStatus},
     error::{AppError, AppResult},
-    models::connectors::ProviderId,
+    models::connectors::{ConnectorErrorCode, ProviderId},
     secrets::Credential,
     state::AppState,
     time::now_ms,
 };
 
-/// Refresh this long before an access token expires.
-const EXPIRY_MARGIN_MS: i64 = 5 * 60_000;
+/// An access token is renewed this long before it expires.
+pub const EXPIRY_MARGIN_MS: i64 = 5 * 60_000;
 
-/// The credential-store account for a provider's tokens.
-pub fn vault_account(provider: ProviderId) -> String {
+/// The credential-store key of one connected account.
+pub fn vault_key(provider: ProviderId, account_id: &str) -> String {
+    format!("connector:{}:{account_id}", provider.as_str())
+}
+
+/// The provider-wide key grants were stored under before per-account keys.
+/// A grant found there moves to its account's key when it is first used.
+pub fn legacy_key(provider: ProviderId) -> String {
     format!("connector:{}", provider.as_str())
 }
 
-/// Stores tokens from a sign-in or refresh. A refresh response without a
-/// refresh token keeps the previous one; Microsoft rotates refresh tokens,
-/// so a new one always replaces the old. LinkedIn issues no refresh tokens:
-/// its access token is kept until it expires.
+/// The key of the provider's connected account (the legacy key while the
+/// account has no stable id).
+fn key_of(state: &AppState, provider: ProviderId) -> AppResult<String> {
+    let account = state.db.call(|c| repo::account(c, provider))?;
+    Ok(match account.and_then(|a| a.account_id) {
+        Some(id) => vault_key(provider, &id),
+        None => legacy_key(provider),
+    })
+}
+
+/// The stored grant of the provider's account and its key. A grant under
+/// the legacy key moves to the account's key; a still-valid access token it
+/// held is kept in memory.
+async fn load(state: &AppState, provider: ProviderId) -> AppResult<Option<(String, Credential)>> {
+    let key = key_of(state, provider)?;
+    if let Some(credential) = state.vault.get(&key).await? {
+        return Ok(Some((key, credential)));
+    }
+    let legacy = legacy_key(provider);
+    if key == legacy {
+        return Ok(None);
+    }
+    let Some(old) = state.vault.get(&legacy).await? else {
+        return Ok(None);
+    };
+    let grant = match old {
+        Credential::OAuth {
+            access_token,
+            refresh_token: Some(refresh_token),
+            expires_at,
+        } if super::issues_refresh_tokens(provider) => {
+            if let Some(at) = expires_at {
+                state.connectors.cache_access(&key, access_token, at);
+            }
+            Credential::RefreshToken { refresh_token }
+        }
+        other => other,
+    };
+    state.vault.set(&key, grant.clone()).await?;
+    state.vault.delete(&legacy).await?;
+    super::diag(format!(
+        "[connector] provider={} credential=moved_to_account_key",
+        provider.as_str()
+    ));
+    Ok(Some((key, grant)))
+}
+
+/// The refresh token of the provider's current grant, if it has one.
+pub async fn current_refresh_token(
+    state: &AppState,
+    provider: ProviderId,
+) -> AppResult<Option<String>> {
+    Ok(match load(state, provider).await? {
+        Some((_, Credential::RefreshToken { refresh_token })) => Some(refresh_token),
+        Some((_, Credential::OAuth { refresh_token, .. })) => refresh_token,
+        _ => None,
+    })
+}
+
+/// Stores the grant of a sign-in for `account_id`. Google and Microsoft keep
+/// only the refresh token (`previous_refresh` stands in when the provider
+/// issued none this time); the access token goes to memory. LinkedIn's
+/// access token is its grant.
 pub async fn store(
     state: &AppState,
     provider: ProviderId,
+    account_id: &str,
     tokens: &TokenResponse,
     previous_refresh: Option<String>,
 ) -> AppResult<()> {
+    let key = vault_key(provider, account_id);
+    let expires_at = now_ms() + tokens.expires_in.unwrap_or(3_600) * 1000;
     let refresh_token = tokens.refresh_token.clone().or(previous_refresh);
-    if refresh_token.is_none() && super::issues_refresh_tokens(provider) {
-        return Err(AppError::authentication(format!(
-            "{} did not grant long-lived access. Try connecting again.",
-            provider.name()
-        )));
-    }
+    let grant = if super::issues_refresh_tokens(provider) {
+        let Some(refresh_token) = refresh_token else {
+            return Err(AppError::authentication(format!(
+                "{} did not grant lasting access. Try connecting again.",
+                provider.name()
+            )));
+        };
+        Credential::RefreshToken { refresh_token }
+    } else {
+        Credential::OAuth {
+            access_token: tokens.access_token.clone(),
+            refresh_token,
+            expires_at: tokens.expires_in.map(|_| expires_at),
+        }
+    };
+    state.vault.set(&key, grant).await?;
     state
-        .vault
-        .set(
-            &vault_account(provider),
-            Credential::OAuth {
-                access_token: tokens.access_token.clone(),
-                refresh_token,
-                expires_at: tokens.expires_in.map(|s| now_ms() + s * 1000),
-            },
-        )
-        .await
+        .connectors
+        .cache_access(&key, tokens.access_token.clone(), expires_at);
+    Ok(())
 }
 
 fn reconnect_error(provider: ProviderId) -> AppError {
@@ -62,36 +140,77 @@ fn reconnect_error(provider: ProviderId) -> AppError {
     ))
 }
 
-/// A valid access token, refreshed silently when it is about to expire.
+/// A valid access token for the provider's account: from memory, or renewed
+/// once for every caller waiting at the same time.
 pub async fn get_valid_access_token(state: &AppState, provider: ProviderId) -> AppResult<String> {
-    let _guard = state.connectors.refresh_lock(provider).lock().await;
-    match state.vault.get(&vault_account(provider)).await? {
-        Some(Credential::OAuth {
-            access_token,
-            expires_at,
-            ..
-        }) if expires_at.is_some_and(|at| at > now_ms() + EXPIRY_MARGIN_MS) => Ok(access_token),
-        Some(Credential::OAuth {
-            refresh_token: Some(refresh_token),
-            ..
-        }) => refresh_with(state, provider, refresh_token).await,
-        // Expired and not refreshable (LinkedIn): sign in again.
-        Some(Credential::OAuth { .. }) => {
-            mark_reauth_required(state, provider, "the access token expired").await?;
-            Err(reconnect_error(provider))
-        }
-        _ => Err(reconnect_error(provider)),
+    let key = key_of(state, provider)?;
+    if let Some(token) = state.connectors.cached_access(&key) {
+        return Ok(token);
     }
+    let lock = state.connectors.refresh_lock(&key);
+    let _guard = lock.lock().await;
+    // Another caller may have renewed it while this one waited.
+    if let Some(token) = state.connectors.cached_access(&key) {
+        return Ok(token);
+    }
+    renew(state, provider).await
 }
 
-/// Forces a refresh (e.g. after the API rejected the current token).
+/// Renews the access token after the API rejected it, unless a concurrent
+/// caller already did.
 pub async fn refresh_access_token(state: &AppState, provider: ProviderId) -> AppResult<String> {
-    let _guard = state.connectors.refresh_lock(provider).lock().await;
-    match state.vault.get(&vault_account(provider)).await? {
-        Some(Credential::OAuth {
-            refresh_token: Some(refresh_token),
-            ..
-        }) => refresh_with(state, provider, refresh_token).await,
+    let key = key_of(state, provider)?;
+    let rejected = state.connectors.cached_access(&key);
+    let lock = state.connectors.refresh_lock(&key);
+    let _guard = lock.lock().await;
+    if let Some(token) = state.connectors.cached_access(&key) {
+        if Some(&token) != rejected.as_ref() {
+            return Ok(token);
+        }
+    }
+    state.connectors.forget_access(&key);
+    renew(state, provider).await
+}
+
+async fn renew(state: &AppState, provider: ProviderId) -> AppResult<String> {
+    let loaded = load(state, provider).await?;
+    // Moving a grant from the legacy key keeps its valid access token.
+    if let Some(token) = loaded
+        .as_ref()
+        .and_then(|(key, _)| state.connectors.cached_access(key))
+    {
+        return Ok(token);
+    }
+    match loaded {
+        Some((key, Credential::RefreshToken { refresh_token })) => {
+            refresh_with(state, provider, &key, refresh_token).await
+        }
+        // An access token stored with the grant (LinkedIn, or a grant from
+        // before refresh-token-only storage) is used while it is valid.
+        Some((
+            key,
+            Credential::OAuth {
+                access_token,
+                refresh_token,
+                expires_at,
+            },
+        )) => {
+            if expires_at.is_none_or(|at| at > now_ms() + EXPIRY_MARGIN_MS) {
+                if let Some(at) = expires_at {
+                    state
+                        .connectors
+                        .cache_access(&key, access_token.clone(), at);
+                }
+                return Ok(access_token);
+            }
+            match refresh_token {
+                Some(refresh_token) => refresh_with(state, provider, &key, refresh_token).await,
+                None => {
+                    mark_reauth_required(state, provider, "the access token expired").await?;
+                    Err(reconnect_error(provider))
+                }
+            }
+        }
         _ => Err(reconnect_error(provider)),
     }
 }
@@ -99,9 +218,10 @@ pub async fn refresh_access_token(state: &AppState, provider: ProviderId) -> App
 async fn refresh_with(
     state: &AppState,
     provider: ProviderId,
+    key: &str,
     refresh_token: String,
 ) -> AppResult<String> {
-    let ctx: &ConnectorsContext = &state.connectors;
+    let ctx = &state.connectors;
     let app = ctx
         .app(provider)
         .ok_or_else(|| super::unavailable_error(provider))?;
@@ -134,31 +254,85 @@ async fn refresh_with(
         ctx.token_url(provider),
         &app,
         provider.name(),
+        TokenPhase::Refresh,
         form,
     )
     .await
     {
         Ok(tokens) => {
-            let access = tokens.access_token.clone();
-            store(state, provider, &tokens, Some(refresh_token)).await?;
-            Ok(access)
+            // Microsoft rotates refresh tokens; an old-style grant becomes a
+            // refresh-token grant. Otherwise the stored grant is unchanged.
+            let rotated = tokens.refresh_token.clone().filter(|t| *t != refresh_token);
+            let converting = matches!(state.vault.get(key).await?, Some(Credential::OAuth { .. }))
+                && super::issues_refresh_tokens(provider);
+            if rotated.is_some() || converting {
+                state
+                    .vault
+                    .set(
+                        key,
+                        Credential::RefreshToken {
+                            refresh_token: rotated.unwrap_or(refresh_token),
+                        },
+                    )
+                    .await?;
+            }
+            let expires_at = now_ms() + tokens.expires_in.unwrap_or(3_600) * 1000;
+            ctx.cache_access(key, tokens.access_token.clone(), expires_at);
+            oauth::log(provider.name(), "token_refreshed", "");
+            Ok(tokens.access_token)
         }
-        Err(oauth::TokenFailure::Reauthenticate(reason)) => {
+        Err(failure) if failure.code == ConnectorErrorCode::ReauthRequired => {
+            oauth::log(
+                provider.name(),
+                "refresh_rejected",
+                "category=REAUTH_REQUIRED",
+            );
+            let reason = failure.detail.unwrap_or(failure.message);
             mark_reauth_required(state, provider, &reason).await?;
             Err(reconnect_error(provider))
         }
-        Err(oauth::TokenFailure::Other(error)) => Err(error),
+        Err(failure) => {
+            oauth::log(
+                provider.name(),
+                "refresh_failed",
+                &format!("category={}", failure.code.as_str()),
+            );
+            Err(failure.into_error())
+        }
     }
 }
 
-/// The grant is gone: forget the tokens, keep the account visible and ask
-/// the user to reconnect (once, as a notification).
+/// Deletes an account's grant and its access token in memory.
+pub async fn forget_account(
+    state: &AppState,
+    provider: ProviderId,
+    account_id: Option<&str>,
+) -> AppResult<()> {
+    let key = match account_id {
+        Some(id) => vault_key(provider, id),
+        None => legacy_key(provider),
+    };
+    state.connectors.forget_access(&key);
+    state.vault.delete(&key).await?;
+    let legacy = legacy_key(provider);
+    if key != legacy {
+        state.vault.delete(&legacy).await?;
+    }
+    Ok(())
+}
+
+/// The grant is gone: forget it, keep the account visible and ask the user
+/// to reconnect (once, as a notification).
 pub async fn mark_reauth_required(
     state: &AppState,
     provider: ProviderId,
     reason: &str,
 ) -> AppResult<()> {
-    state.vault.delete(&vault_account(provider)).await?;
+    let account_id = state
+        .db
+        .call(|c| repo::account(c, provider))?
+        .and_then(|a| a.account_id);
+    forget_account(state, provider, account_id.as_deref()).await?;
     if provider == ProviderId::Linkedin {
         state.network.forget_provider_data();
     }
@@ -172,6 +346,10 @@ pub async fn mark_reauth_required(
             now_ms(),
         )
     })?;
+    super::diag(format!(
+        "[connector] provider={} state=reauth_required",
+        provider.as_str()
+    ));
     crate::services::notifications::add(
         state,
         crate::services::notifications::Notice {
@@ -196,27 +374,48 @@ pub async fn mark_reauth_required(
 }
 
 /// Revokes ReMa's access at the provider (where it offers revocation) and
-/// deletes the stored tokens. Local deletion happens even if the provider
+/// deletes the stored grant. Local deletion happens even if the provider
 /// cannot be reached.
 pub async fn revoke_connection(state: &AppState, provider: ProviderId) -> AppResult<()> {
-    if let Some(Credential::OAuth {
-        access_token,
-        refresh_token,
-        ..
-    }) = state.vault.get(&vault_account(provider)).await?
-    {
-        if provider == ProviderId::Google {
-            let token = refresh_token.unwrap_or(access_token);
-            let _ = revoke_google(&state.connectors, &token).await;
+    let grant = load(state, provider).await?;
+    if provider == ProviderId::Google {
+        let token = match grant {
+            Some((_, Credential::RefreshToken { refresh_token })) => Some(refresh_token),
+            Some((
+                _,
+                Credential::OAuth {
+                    access_token,
+                    refresh_token,
+                    ..
+                },
+            )) => Some(refresh_token.unwrap_or(access_token)),
+            _ => None,
+        };
+        if let Some(token) = token {
+            let revoked = revoke_google(state, &token).await;
+            oauth::log(
+                "Google",
+                if revoked.is_ok() {
+                    "revoked"
+                } else {
+                    "revoke_failed"
+                },
+                "",
+            );
         }
         // Microsoft and LinkedIn have no token revocation for public
         // clients; the user can remove ReMa in their account settings
         // (shown in the UI).
     }
-    state.vault.delete(&vault_account(provider)).await
+    let account_id = state
+        .db
+        .call(|c| repo::account(c, provider))?
+        .and_then(|a| a.account_id);
+    forget_account(state, provider, account_id.as_deref()).await
 }
 
-async fn revoke_google(ctx: &ConnectorsContext, token: &str) -> AppResult<()> {
+async fn revoke_google(state: &AppState, token: &str) -> AppResult<()> {
+    let ctx = &state.connectors;
     let response = ctx
         .http
         .post(&ctx.google.revoke)
@@ -236,15 +435,21 @@ async fn revoke_google(ctx: &ConnectorsContext, token: &str) -> AppResult<()> {
     }
 }
 
-/// Whether stored tokens can still be used: refreshable, or an access
+/// Whether the stored grant can still be used: refreshable, or an access
 /// token that has not expired (LinkedIn issues no refresh token).
 pub async fn usable(state: &AppState, provider: ProviderId) -> AppResult<bool> {
-    Ok(match state.vault.get(&vault_account(provider)).await? {
-        Some(Credential::OAuth {
-            refresh_token: Some(_),
-            ..
-        }) => true,
-        Some(Credential::OAuth { expires_at, .. }) => expires_at.is_none_or(|at| at > now_ms()),
+    Ok(match load(state, provider).await? {
+        Some((_, Credential::RefreshToken { .. }))
+        | Some((
+            _,
+            Credential::OAuth {
+                refresh_token: Some(_),
+                ..
+            },
+        )) => true,
+        Some((_, Credential::OAuth { expires_at, .. })) => {
+            expires_at.is_none_or(|at| at > now_ms())
+        }
         _ => false,
     })
 }
@@ -252,9 +457,16 @@ pub async fn usable(state: &AppState, provider: ProviderId) -> AppResult<bool> {
 /// Whether the user must sign in again before this provider can be used.
 pub async fn requires_reauthentication(state: &AppState, provider: ProviderId) -> AppResult<bool> {
     let account = state.db.call(|c| repo::account(c, provider))?;
-    let has_token = usable(state, provider).await?;
     Ok(match account {
-        Some(account) => account.status == AccountStatus::ReauthRequired || !has_token,
+        Some(account) => {
+            account.status == AccountStatus::ReauthRequired || !usable(state, provider).await?
+        }
         None => false,
     })
+}
+
+/// The stored grant (tests).
+#[cfg(test)]
+pub async fn grant(state: &AppState, provider: ProviderId) -> Option<Credential> {
+    load(state, provider).await.unwrap().map(|(_, c)| c)
 }

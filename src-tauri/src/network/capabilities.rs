@@ -258,9 +258,7 @@ fn summary(
         ProviderAccess::NotAvailable if provider == ProviderId::Xing => {
             crate::connectors::xing::UNAVAILABLE.to_string()
         }
-        ProviderAccess::NotAvailable => {
-            format!("{name} sign-in is not available in this build of ReMa.")
-        }
+        ProviderAccess::NotAvailable => crate::connectors::unavailable_reason(provider),
         ProviderAccess::NotConnected => format!(
             "{name} is not connected. ReMa researches companies, jobs and people from public \
              sources without it."

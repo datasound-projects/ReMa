@@ -376,7 +376,8 @@ impl Endpoint {
         match &self.credential {
             Some(Credential::ApiKey { key }) => request.bearer_auth(key),
             Some(Credential::OAuth { access_token, .. }) => request.bearer_auth(access_token),
-            None => request,
+            // Connector grants never belong to a model provider.
+            Some(Credential::RefreshToken { .. }) | None => request,
         }
     }
 }

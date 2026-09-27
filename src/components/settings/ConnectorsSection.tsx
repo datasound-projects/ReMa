@@ -14,8 +14,10 @@ import {
   setBackgroundSettings,
   type ConnectorStatus,
   type ConnectorsOverview,
+  type MailProcessing,
 } from '../../services/connectorService';
 import { openExternalUrl } from '../../services/systemService';
+import { runTaskNow, type ScheduledTask } from '../../services/taskService';
 import { AlertIcon, CheckIcon, ChevronDownIcon, ChevronRightIcon, PlusIcon } from '../icons';
 import { Dialog } from '../ui/Dialog';
 import { IconButton } from '../ui/IconButton';
@@ -27,11 +29,31 @@ const MICROSOFT_APPS_URL = 'https://account.microsoft.com/privacy/app-access';
 const GOOGLE_APPS_URL = 'https://myaccount.google.com/connections';
 const LINKEDIN_APPS_URL = 'https://www.linkedin.com/psettings/permitted-services';
 
+/** "Job Mail & Interview Sync" when it is set up and turned on. */
+function useMailTask(): ScheduledTask | null | undefined {
+  const tasks = useTasks();
+  if (tasks.state.status !== 'success') return undefined;
+  return tasks.state.data.find((t) => t.builtin === 'job_mail_sync' && t.enabled) ?? null;
+}
+
 /** Whether "Job Mail & Interview Sync" is set up and turned on. */
 function useMailTracking(): boolean | null {
-  const tasks = useTasks();
-  if (tasks.state.status !== 'success') return null;
-  return tasks.state.data.some((t) => t.builtin === 'job_mail_sync' && t.enabled);
+  const task = useMailTask();
+  return task === undefined ? null : task !== null;
+}
+
+/** A sign-in or connection check failed (Retry), as opposed to a sync. */
+const signInFailed = (c: ConnectorStatus) =>
+  c.state === 'error' && c.errorCode !== null && c.errorCode !== 'CREDENTIAL_STORE_UNAVAILABLE';
+
+/** Where job-related mail goes to be read (Spec B §64), stated plainly. */
+function mailPrivacy(mail: MailProcessing | null): string {
+  const tokens = 'Sign-in tokens never reach the interface or a model.';
+  if (!mail) return `Only job-related email is read in full, and only by the model you choose. ${tokens}`;
+  if (mail.onDevice) {
+    return `Job-related email is read by ${mail.model} on this computer: mail leaves it only between ReMa and Google or Microsoft. ${tokens}`;
+  }
+  return `Job-related email text is sent to ${mail.recipient} (${mail.model}) to be read; other mail is filtered on this computer and never sent. ${tokens}`;
 }
 
 /** Whether a connector counts as added (it may still need attention). */
@@ -84,10 +106,7 @@ export function ConnectorsSection({ focus = false }: { focus?: boolean }) {
           </div>
           <MailTrackingNote />
           <BackgroundOptions overview={overview} />
-          <p className="form__hint connectors__privacy">
-            Only job-related email is read in full, and only relevant email reaches your model. Tokens never reach the
-            interface or a model.
-          </p>
+          <p className="form__hint connectors__privacy">{mailPrivacy(overview.mailProcessing)}</p>
         </>
       )}
       {open && overview && (
@@ -173,8 +192,24 @@ function ConnectorCard({ connector: c, onOpen }: { connector: ConnectorStatus; o
       );
       break;
     case 'error':
-      // The last run of a task that used it failed; the next run retries.
-      status = <StatusIndicator tone="error" label="Last sync failed" />;
+      if (signInFailed(c)) {
+        // Connecting or its check failed: Retry opens the sign-in again.
+        status = (
+          <button
+            type="button"
+            className="button button--secondary button--small"
+            disabled={connect.busy}
+            onClick={() => void connect.connect()}
+          >
+            Retry
+          </button>
+        );
+      } else if (c.errorCode === 'CREDENTIAL_STORE_UNAVAILABLE') {
+        status = <StatusIndicator tone="error" label="Keychain unavailable" />;
+      } else {
+        // The last run of a task that used it failed; the next run retries.
+        status = <StatusIndicator tone="error" label="Last sync failed" />;
+      }
       break;
     case 'unavailable':
       status = <StatusIndicator tone="idle" label="Unavailable" />;
@@ -212,10 +247,13 @@ function ConnectorCard({ connector: c, onOpen }: { connector: ConnectorStatus; o
           {c.lastSyncAt !== null && <span>Synced {formatRelative(c.lastSyncAt)}</span>}
         </p>
       )}
-      {(attention || c.state === 'unavailable') && c.message && (
+      {(attention || c.state === 'unavailable' || (c.errorCode !== null && c.message)) && c.message && (
         <p className="connector-card__problem">
           <AlertIcon className="connector-card__problem-icon" aria-hidden="true" />
-          <span>{c.message}</span>
+          <span>
+            {signInFailed(c) && <strong>Connection failed. </strong>}
+            {c.message}
+          </span>
         </p>
       )}
       {attention && c.detail && (
@@ -231,7 +269,8 @@ function ConnectorCard({ connector: c, onOpen }: { connector: ConnectorStatus; o
           {showDetail && <pre className="connector-card__details">{c.detail}</pre>}
         </>
       )}
-      {connect.error && (
+      {/* A failed sign-in is reported on the card itself. */}
+      {connect.error && c.errorCode === null && c.state !== 'connecting' && (
         <p className="form-error" role="alert">
           {connect.error}
         </p>
@@ -251,9 +290,13 @@ function ConnectorDetail({
 }) {
   const connect = useConnect(c);
   const action = useAction();
+  const sync = useAction();
+  const mailTask = useMailTask();
   const [confirming, setConfirming] = useState(false);
   const [showDetail, setShowDetail] = useState(false);
+  const [synced, setSynced] = useState(false);
   const siblings = overview.connectors.filter((o) => o.provider === c.provider && o.id !== c.id && added(o));
+  const account = overview.connectors.filter((o) => o.provider === c.provider);
   const lastOfAccount = siblings.length === 0;
   const microsoft = c.provider === 'microsoft';
   const linkedin = c.provider === 'linkedin';
@@ -329,6 +372,21 @@ function ConnectorDetail({
         {c.message && <p className="connector-detail__message">{c.message}</p>}
 
         <dl className="connector-detail__facts">
+          {c.kind !== 'network' && (
+            <>
+              <dt>Capabilities</dt>
+              <dd>
+                <ul className="connector-detail__capabilities">
+                  {account.map((o) => (
+                    <li key={o.id}>
+                      <span>{o.name}</span>
+                      <span className="connector-detail__capability-state">{capabilityState(o)}</span>
+                    </li>
+                  ))}
+                </ul>
+              </dd>
+            </>
+          )}
           <dt>Permissions</dt>
           <dd>
             <ul className="connector-detail__permissions">
@@ -362,6 +420,22 @@ function ConnectorDetail({
         {c.kind === 'mail' && <MailTrackingLine />}
 
         <div className="connector-detail__actions">
+          {c.kind !== 'network' && mailTask && (
+            // Runs the built-in Job Mail & Interview Sync now: the only way
+            // ReMa reads mail, turned on by the user.
+            <button
+              type="button"
+              className="button button--secondary button--small"
+              disabled={sync.busy || c.state === 'connecting'}
+              onClick={() =>
+                void sync.run(() => runTaskNow(mailTask.id)).then((ok) => {
+                  if (ok) setSynced(true);
+                })
+              }
+            >
+              {sync.busy ? 'Starting…' : 'Sync now'}
+            </button>
+          )}
           {c.state === 'connecting' ? (
             <button type="button" className="button button--ghost button--small" onClick={connect.cancel}>
               Cancel sign-in
@@ -381,9 +455,14 @@ function ConnectorDetail({
             Disconnect
           </button>
         </div>
-        {(action.error ?? connect.error) && (
+        {synced && (
+          <p className="form__hint" role="status">
+            Job Mail &amp; Interview Sync is running; see Scheduled Tasks for its result.
+          </p>
+        )}
+        {(action.error ?? sync.error ?? (c.errorCode === null ? connect.error : null)) && (
           <p className="form-error" role="alert">
-            {action.error ?? connect.error}
+            {action.error ?? sync.error ?? connect.error}
           </p>
         )}
 
@@ -434,13 +513,34 @@ function DetailStatus({ connector: c }: { connector: ConnectorStatus }) {
     case 'connecting':
       return <StatusIndicator tone="pending" label="Waiting for sign-in" live />;
     case 'reauth_required':
-      return <StatusIndicator tone="error" label="Reconnect needed" />;
+      return <StatusIndicator tone="error" label="Reconnect required" />;
     case 'permission_missing':
       return <StatusIndicator tone="error" label="Permission missing" />;
     case 'error':
-      return <StatusIndicator tone="error" label="Sync failed" />;
+      return <StatusIndicator tone="error" label={signInFailed(c) ? 'Connection failed' : 'Sync failed'} />;
     default:
       return <StatusIndicator tone="idle" label="Not connected" />;
+  }
+}
+
+/** One connector of the account, in the details' capability list. */
+function capabilityState(c: ConnectorStatus): string {
+  switch (c.state) {
+    case 'connected':
+    case 'syncing':
+      return 'Connected';
+    case 'connecting':
+      return 'Signing in…';
+    case 'reauth_required':
+      return 'Reconnect required';
+    case 'permission_missing':
+      return 'Permission missing';
+    case 'error':
+      return signInFailed(c) ? 'Connection failed' : 'Needs attention';
+    case 'unavailable':
+      return 'Unavailable';
+    default:
+      return 'Not added';
   }
 }
 

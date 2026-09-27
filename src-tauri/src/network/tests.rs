@@ -482,7 +482,7 @@ async fn connect_linkedin(state: &AppState, scopes: &[&str]) {
     state
         .vault
         .set(
-            &tokens::vault_account(ProviderId::Linkedin),
+            &tokens::legacy_key(ProviderId::Linkedin),
             Credential::OAuth {
                 access_token: "li-token".into(),
                 refresh_token: None,

@@ -1082,6 +1082,45 @@ export type ConnectionsOutcome =
 /**  The connection list was checked. */
 { state: "checked"; provider: ProviderId; checked: number; matched: number } | { state: "failed"; reason: string };
 
+/**
+ *  Why connecting or checking a connector failed (Spec B §60). Each code
+ *  comes with an actionable message; none carries a provider token or code.
+ */
+export type ConnectorErrorCode = 
+/**  The user cancelled or declined the provider's consent. */
+"USER_CANCELLED" | 
+/**  The browser sign-in was not finished in time. */
+"SIGN_IN_TIMED_OUT" | 
+/**  The default browser could not be opened. */
+"BROWSER_UNAVAILABLE" | 
+/**  The provider rejected ReMa's return address. */
+"REDIRECT_MISMATCH" | 
+/**  The browser returned a sign-in ReMa did not start (CSRF protection). */
+"INVALID_STATE" | 
+/**  The provider did not turn the sign-in into access for ReMa. */
+"TOKEN_EXCHANGE_FAILED" | 
+/**  The user did not grant a permission the connector needs. */
+"SCOPE_NOT_GRANTED" | 
+/**  An organization's policy requires an administrator's approval. */
+"PROVIDER_ADMIN_POLICY" | 
+/**  The provider API is not enabled for ReMa's registration. */
+"API_NOT_ENABLED" | 
+/**  The account has no mailbox or calendar ReMa can use. */
+"ACCOUNT_NOT_SUPPORTED" | 
+/**  Access was revoked or expired; the user must reconnect. */
+"REAUTH_REQUIRED" | 
+/**  The provider could not be reached. */
+"NETWORK_ERROR" | 
+/**  The provider has not verified ReMa's app for this account. */
+"OAUTH_APP_NOT_VERIFIED" | 
+/**  ReMa's own app registration was rejected (fixed by a ReMa update). */
+"PROVIDER_CONFIGURATION_ERROR" | 
+/**
+ *  The system keychain did not answer, so the stored sign-in could not
+ *  be read (the connection itself is unchanged).
+ */
+"CREDENTIAL_STORE_UNAVAILABLE";
+
 /**  One connector card in Settings → Connectors. */
 export type ConnectorId = "gmail" | "google_calendar" | "outlook_mail" | "outlook_calendar" | "linkedin" | "xing";
 
@@ -1101,7 +1140,10 @@ export type ConnectorState =
 "permission_missing" | 
 /**  A sync is running right now. */
 "syncing" | 
-/**  The last sync failed (retryable). */
+/**
+ *  Connecting failed, the connection check failed, or the last sync
+ *  failed (retryable; `error_code` tells which).
+ */
 "error" | 
 /**  This build of ReMa has no sign-in configured for the provider. */
 "unavailable";
@@ -1130,6 +1172,11 @@ export type ConnectorStatus = {
 	message: string | null,
 	/**  Technical details for "Show details" (no secrets). */
 	detail: string | null,
+	/**
+	 *  Why the last sign-in or connection check failed (none for a failed
+	 *  sync or a working connector).
+	 */
+	errorCode: ConnectorErrorCode | null,
 };
 
 /**  Connectors changed (state, account, sync). */
@@ -1138,6 +1185,8 @@ export type ConnectorsChanged = null;
 export type ConnectorsOverview = {
 	connectors: ConnectorStatus[],
 	background: BackgroundSettings,
+	/**  None until a model is connected. */
+	mailProcessing: MailProcessing | null,
 };
 
 /**  A person or role at the buyer (permitted public professional data only). */
@@ -2000,6 +2049,25 @@ export type Locations = {
 	 *  never applied by guessing.
 	 */
 	radiusKm: number | null,
+};
+
+/**
+ *  Where job-related email is read by a model (Spec B §64): the model of
+ *  "Job Mail & Interview Sync", or the default model it would start with.
+ */
+export type MailProcessing = {
+	/**  The model, as ReMa names it. */
+	model: string,
+	/**
+	 *  Who receives the text of job-related email: a provider ("OpenAI"),
+	 *  a server's host name, or "this computer".
+	 */
+	recipient: string,
+	/**
+	 *  The model runs on this computer: mail leaves it only between ReMa and
+	 *  Google or Microsoft.
+	 */
+	onDevice: boolean,
 };
 
 /**  An opportunity the user adds by hand. */

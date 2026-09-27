@@ -25,9 +25,7 @@ pub struct MicrosoftEndpoints {
 
 /// Personal Microsoft accounts (Outlook.com) and work or school accounts.
 fn tenant() -> &'static str {
-    option_env!("REMA_MICROSOFT_TENANT")
-        .filter(|v| !v.trim().is_empty())
-        .unwrap_or("common")
+    super::config::MICROSOFT_TENANT
 }
 
 impl Default for MicrosoftEndpoints {
@@ -62,8 +60,9 @@ impl MicrosoftEndpoints {
     }
 }
 
-/// ReMa's Entra application (public client), set when ReMa is built
-/// (`REMA_MICROSOFT_CLIENT_ID`). Debug builds may override it at run time
+/// ReMa's Entra application (public client), compiled in from
+/// `connectors.toml` (or `MICROSOFT_PUBLIC_CLIENT_ID`); release builds always
+/// have it. Debug builds may override it at run time
 /// (`REMA_DEV_MICROSOFT_CLIENT_ID`). There is no client secret.
 pub fn app() -> Option<OAuthApp> {
     #[cfg(debug_assertions)]
@@ -76,12 +75,10 @@ pub fn app() -> Option<OAuthApp> {
             client_secret: None,
         });
     }
-    option_env!("REMA_MICROSOFT_CLIENT_ID")
-        .filter(|v| !v.trim().is_empty())
-        .map(|client_id| OAuthApp {
-            client_id: client_id.to_string(),
-            client_secret: None,
-        })
+    super::config::MICROSOFT_CLIENT_ID.map(|client_id| OAuthApp {
+        client_id: client_id.to_string(),
+        client_secret: None,
+    })
 }
 
 pub fn scopes(connectors: &[ConnectorId]) -> Vec<String> {

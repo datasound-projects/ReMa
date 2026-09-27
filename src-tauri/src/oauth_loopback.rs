@@ -1,6 +1,12 @@
 //! The local end of a browser sign-in: a one-shot HTTP listener on the
 //! loopback interface that receives the provider's redirect (RFC 8252
 //! loopback redirect for native apps).
+//!
+//! The listener is bound before the browser opens, answers only the
+//! redirect it expects (anything else gets a 404; it serves no files and no
+//! ReMa data), accepts one redirect, and closes as soon as that arrives, the
+//! wait times out or the sign-in is cancelled: a repeated or late callback
+//! finds nothing listening.
 
 use std::time::Duration;
 
@@ -13,15 +19,34 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::{AppError, AppResult};
 
-/// The pages shown in the browser once the redirect arrived.
+/// A page shown in the browser tab once the redirect arrived.
+#[derive(Debug, Clone, Copy)]
+pub struct Page<'a> {
+    pub title: &'a str,
+    pub text: &'a str,
+}
+
+/// After a connector sign-in succeeded (Spec B §13).
+pub const CONNECTED: Page<'static> = Page {
+    title: "ReMa connected successfully.",
+    text: "You can close this browser tab and return to ReMa.",
+};
+
+/// After a connector sign-in failed; ReMa shows the reason.
+pub const NOT_CONNECTED: Page<'static> = Page {
+    title: "ReMa could not complete authorization.",
+    text: "Return to ReMa for details.",
+};
+
+/// The pages of [`receive`] (MCP server sign-in).
 pub struct Pages<'a> {
-    /// Product name for the messages, e.g. "Google" or an MCP server name.
+    /// Product name for the messages, e.g. an MCP server name.
     pub service: &'a str,
     /// Replaces "ReMa is connected to <service>" on success.
     pub success_title: Option<&'a str>,
 }
 
-fn page(title: &str, text: &str) -> String {
+fn html(page: Page<'_>) -> String {
     let escape = |s: &str| {
         s.replace('&', "&amp;")
             .replace('<', "&lt;")
@@ -32,8 +57,8 @@ fn page(title: &str, text: &str) -> String {
         "<!doctype html><meta charset=utf-8><title>ReMa</title>\
          <body style=\"font-family:-apple-system,Segoe UI,sans-serif;text-align:center;padding:64px\">\
          <h2>{}</h2><p>{}</p>",
-        escape(title),
-        escape(text)
+        escape(page.title),
+        escape(page.text)
     )
 }
 
@@ -78,38 +103,47 @@ impl Loopback {
     }
 }
 
-/// Waits for a request whose target `is_redirect` accepts and returns that
-/// target (path and query). Other requests (a favicon) get a 404.
-pub async fn receive(
-    listener: TcpListener,
-    is_redirect: impl Fn(&str) -> bool,
-    succeeded: impl Fn(&str) -> bool,
-    pages: Pages<'_>,
-    cancel: &CancellationToken,
-    timeout: Duration,
-) -> AppResult<String> {
-    receive_on(
-        Loopback::from_listener(listener)?,
-        is_redirect,
-        succeeded,
-        pages,
-        cancel,
-        timeout,
-    )
-    .await
+/// Why no redirect arrived.
+#[derive(Debug)]
+pub enum WaitError {
+    Cancelled,
+    TimedOut,
+    Failed(AppError),
 }
 
-/// [`receive`] on every listener of a [`Loopback`].
-pub async fn receive_on(
+/// The browser request that brought the redirect. Its tab waits for
+/// [`Reply::send`], so the page can report how the sign-in actually ended.
+pub struct Reply {
+    socket: TcpStream,
+}
+
+impl Reply {
+    pub async fn send(mut self, page: Page<'_>) {
+        respond(&mut self.socket, "200 OK", &html(page)).await;
+    }
+}
+
+async fn respond(socket: &mut TcpStream, status: &str, body: &str) {
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\n\
+         Cache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let _ = socket.write_all(response.as_bytes()).await;
+    let _ = socket.shutdown().await;
+}
+
+/// Waits for a request whose target (path and query) `is_redirect` accepts
+/// and returns it with the still-open browser request. Other requests (a
+/// favicon, a wrong path) get a 404. Every listener is closed on return.
+pub async fn wait_on(
     loopback: Loopback,
     is_redirect: impl Fn(&str) -> bool,
-    succeeded: impl Fn(&str) -> bool,
-    pages: Pages<'_>,
     cancel: &CancellationToken,
     timeout: Duration,
-) -> AppResult<String> {
+) -> Result<(String, Reply), WaitError> {
     // Every listener hands its connections to one queue; the tasks end when
-    // this function returns (the guard aborts them).
+    // this function returns (the guard aborts them, closing the listeners).
     let (tx, mut rx) = mpsc::channel::<TcpStream>(8);
     let tasks: Vec<_> = loopback
         .listeners
@@ -140,15 +174,13 @@ pub async fn receive_on(
     tokio::pin!(deadline);
     loop {
         let mut socket = tokio::select! {
-            _ = cancel.cancelled() => {
-                return Err(AppError::validation(format!("{} sign-in was cancelled.", pages.service)))
-            }
-            _ = &mut deadline => {
-                return Err(AppError::validation(format!("{} sign-in timed out. Try again.", pages.service)))
-            }
+            _ = cancel.cancelled() => return Err(WaitError::Cancelled),
+            _ = &mut deadline => return Err(WaitError::TimedOut),
             accepted = rx.recv() => match accepted {
                 Some(socket) => socket,
-                None => return Err(AppError::internal("the sign-in listener stopped")),
+                None => {
+                    return Err(WaitError::Failed(AppError::internal("the sign-in listener stopped")))
+                }
             },
         };
         let mut buf = vec![0u8; 8192];
@@ -157,7 +189,8 @@ pub async fn receive_on(
         while len < buf.len() {
             let n = tokio::time::timeout(Duration::from_secs(5), socket.read(&mut buf[len..]))
                 .await
-                .unwrap_or(Ok(0))?;
+                .unwrap_or(Ok(0))
+                .unwrap_or(0);
             if n == 0 {
                 break;
             }
@@ -173,38 +206,79 @@ pub async fn receive_on(
             .and_then(|line| line.split_whitespace().nth(1))
             .unwrap_or("/")
             .to_string();
-
-        let accepted = is_redirect(&target);
-        let (status, body) = if !accepted {
-            ("404 Not Found", String::new())
-        } else if succeeded(&target) {
-            let title = pages
-                .success_title
-                .map(str::to_string)
-                .unwrap_or_else(|| format!("ReMa is connected to {}", pages.service));
-            (
-                "200 OK",
-                page(&title, "You can close this tab and return to ReMa."),
-            )
-        } else {
-            (
-                "200 OK",
-                page(
-                    &format!("{} sign-in was not completed", pages.service),
-                    "You can close this tab and try again in ReMa.",
-                ),
-            )
-        };
-        let response = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        );
-        let _ = socket.write_all(response.as_bytes()).await;
-        let _ = socket.shutdown().await;
-        if accepted {
-            return Ok(target);
+        if is_redirect(&target) {
+            return Ok((target, Reply { socket }));
         }
+        respond(&mut socket, "404 Not Found", "").await;
     }
+}
+
+/// Waits for a request whose target `is_redirect` accepts and returns that
+/// target (path and query), answering it at once. Other requests (a
+/// favicon) get a 404.
+pub async fn receive(
+    listener: TcpListener,
+    is_redirect: impl Fn(&str) -> bool,
+    succeeded: impl Fn(&str) -> bool,
+    pages: Pages<'_>,
+    cancel: &CancellationToken,
+    timeout: Duration,
+) -> AppResult<String> {
+    receive_on(
+        Loopback::from_listener(listener)?,
+        is_redirect,
+        succeeded,
+        pages,
+        cancel,
+        timeout,
+    )
+    .await
+}
+
+/// [`receive`] on every listener of a [`Loopback`].
+pub async fn receive_on(
+    loopback: Loopback,
+    is_redirect: impl Fn(&str) -> bool,
+    succeeded: impl Fn(&str) -> bool,
+    pages: Pages<'_>,
+    cancel: &CancellationToken,
+    timeout: Duration,
+) -> AppResult<String> {
+    let service = pages.service;
+    let (target, reply) = match wait_on(loopback, is_redirect, cancel, timeout).await {
+        Ok(received) => received,
+        Err(WaitError::Cancelled) => {
+            return Err(AppError::validation(format!(
+                "{service} sign-in was cancelled."
+            )))
+        }
+        Err(WaitError::TimedOut) => {
+            return Err(AppError::validation(format!(
+                "{service} sign-in timed out. Try again."
+            )))
+        }
+        Err(WaitError::Failed(error)) => return Err(error),
+    };
+    if succeeded(&target) {
+        let title = pages
+            .success_title
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("ReMa is connected to {service}"));
+        reply
+            .send(Page {
+                title: &title,
+                text: "You can close this tab and return to ReMa.",
+            })
+            .await;
+    } else {
+        reply
+            .send(Page {
+                title: &format!("{service} sign-in was not completed"),
+                text: "You can close this tab and try again in ReMa.",
+            })
+            .await;
+    }
+    Ok(target)
 }
 
 #[cfg(test)]
@@ -279,6 +353,35 @@ mod tests {
         assert!(page.contains("ReMa connected successfully."), "{page}");
         assert!(page.contains("You can close this tab and return to ReMa."));
         assert_eq!(waiting.await.unwrap().unwrap(), "/?code=c&state=s");
+    }
+
+    #[tokio::test]
+    async fn the_tab_gets_its_page_only_when_the_sign_in_has_ended() {
+        let loopback = Loopback::ipv4().await.unwrap();
+        let port = loopback.port();
+        let cancel = CancellationToken::new();
+        let tab = tokio::spawn(async move { get(("127.0.0.1", port), "/?code=c&state=s").await });
+        let (target, reply) = wait_on(
+            loopback,
+            |t| t.contains("code="),
+            &cancel,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        assert_eq!(target, "/?code=c&state=s");
+        // The listener closed with the redirect: nothing else gets in.
+        assert!(TcpStream::connect(("127.0.0.1", port)).await.is_err());
+        // The tab waits while ReMa exchanges the code …
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!tab.is_finished());
+        reply.send(NOT_CONNECTED).await;
+        // … and then says how it ended, without anything from the redirect.
+        let page = tab.await.unwrap();
+        assert!(page.contains("ReMa could not complete authorization."));
+        assert!(page.contains("Return to ReMa for details."));
+        assert!(page.contains("Cache-Control: no-store"));
+        assert!(!page.contains("code=c"));
     }
 
     #[tokio::test]

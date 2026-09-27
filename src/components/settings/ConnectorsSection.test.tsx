@@ -16,7 +16,7 @@ const mocks = vi.hoisted(() => ({
   disconnectConnector: vi.fn(),
   setBackgroundSettings: vi.fn(),
 }));
-const tasks = vi.hoisted(() => ({ listTasks: vi.fn() }));
+const tasks = vi.hoisted(() => ({ listTasks: vi.fn(), runTaskNow: vi.fn() }));
 const navigate = vi.fn<(view: View) => void>();
 
 vi.mock('../../services/connectorService', () => mocks);
@@ -42,6 +42,7 @@ const base = {
   lastSyncAt: null,
   message: null,
   detail: null,
+  errorCode: null,
 };
 
 function card(patch: Partial<ConnectorStatus> & Pick<ConnectorStatus, 'id'>): ConnectorStatus {
@@ -74,10 +75,12 @@ function card(patch: Partial<ConnectorStatus> & Pick<ConnectorStatus, 'id'>): Co
   } as ConnectorStatus;
 }
 
-function overview(connectors: ConnectorStatus[]): ConnectorsOverview {
+function overview(connectors: ConnectorStatus[], patch: Partial<ConnectorsOverview> = {}): ConnectorsOverview {
   return {
     connectors,
     background: { runInBackground: false, startAtLogin: false, trayAvailable: true },
+    mailProcessing: null,
+    ...patch,
   };
 }
 
@@ -213,5 +216,71 @@ describe('Settings → Connectors', () => {
     expect(login.checked).toBe(false);
     fireEvent.click(login);
     await waitFor(() => expect(mocks.setBackgroundSettings).toHaveBeenCalledWith(false, true));
+  });
+
+  it('reports a failed sign-in on the card, with Retry', async () => {
+    mocks.getConnectors.mockResolvedValue(
+      overview([
+        card({
+          id: 'outlook_mail',
+          state: 'error',
+          errorCode: 'PROVIDER_ADMIN_POLICY',
+          message:
+            'Your organization requires administrator approval before ReMa can access this Microsoft account.',
+          detail: 'access_denied: AADSTS90094',
+        }),
+      ]),
+    );
+    mocks.connectConnector.mockResolvedValue(disconnected);
+    render(<ConnectorsSection />);
+    expect(await screen.findByText('Connection failed.')).toBeTruthy();
+    expect(
+      screen.getByText(
+        'Your organization requires administrator approval before ReMa can access this Microsoft account.',
+      ),
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(mocks.connectConnector).toHaveBeenCalledWith('outlook_mail');
+    // OAuth internals only on demand.
+    expect(screen.queryByText('access_denied: AADSTS90094')).toBeNull();
+  });
+
+  it('says plainly where job mail is read: a cloud provider or this computer', async () => {
+    mocks.getConnectors.mockResolvedValue(
+      overview([gmailConnected], {
+        mailProcessing: { model: 'claude-sonnet-5', recipient: 'Anthropic', onDevice: false },
+      }),
+    );
+    const { unmount } = render(<ConnectorsSection />);
+    expect(
+      await screen.findByText(/Job-related email text is sent to Anthropic \(claude-sonnet-5\) to be read/),
+    ).toBeTruthy();
+    expect(screen.queryByText(/never leaves/)).toBeNull();
+    unmount();
+
+    mocks.getConnectors.mockResolvedValue(
+      overview([gmailConnected], {
+        mailProcessing: { model: 'qwen3-14b', recipient: 'this computer', onDevice: true },
+      }),
+    );
+    render(<ConnectorsSection />);
+    expect(
+      await screen.findByText(/read by qwen3-14b on this computer: mail leaves it only between ReMa and Google or Microsoft/),
+    ).toBeTruthy();
+  });
+
+  it('lists the account\'s capabilities and syncs through the built-in task only', async () => {
+    tasks.listTasks.mockResolvedValue([{ id: 7, builtin: 'job_mail_sync', enabled: true } as ScheduledTask]);
+    tasks.runTaskNow.mockResolvedValue(42);
+    mocks.getConnectors.mockResolvedValue(overview([gmailConnected, card({ id: 'google_calendar' })]));
+    render(<ConnectorsSection />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Gmail details' }));
+    const detail = screen.getByRole('dialog', { name: 'Gmail' });
+    const capabilities = within(detail).getByText('Google Calendar').closest('li')!;
+    expect(within(capabilities).getByText('Not added')).toBeTruthy();
+    expect(within(within(detail).getByText('Gmail', { selector: 'li span' }).closest('li')!).getByText('Connected')).toBeTruthy();
+    fireEvent.click(await within(detail).findByRole('button', { name: 'Sync now' }));
+    await waitFor(() => expect(tasks.runTaskNow).toHaveBeenCalledWith(7));
+    expect(await within(detail).findByText(/Job Mail & Interview Sync is running/)).toBeTruthy();
   });
 });

@@ -1,0 +1,79 @@
+name: Release
+
+# Packages ReMa for Linux, macOS and Windows.
+#
+# ReMa's own Google and Microsoft app registrations are public client
+# configuration (desktop apps are public OAuth clients; see
+# src-tauri/connectors.toml). This workflow takes them from the repository's
+# Actions variables (and the Google Desktop client secret, which Google does
+# not treat as confidential, from an Actions secret so logs mask it). When
+# connectors.toml does not hold them and a variable is missing, build.rs
+# fails the job: no release can ship with connectors that cannot sign in.
+
+on:
+  workflow_dispatch:
+  push:
+    tags: [ "v*" ]
+
+permissions:
+  contents: read
+
+jobs:
+  bundle:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+          - os: macos-14
+          - os: windows-latest
+    runs-on: ${{ matrix.os }}
+    env:
+      GOOGLE_DESKTOP_CLIENT_ID: ${{ vars.GOOGLE_DESKTOP_CLIENT_ID }}
+      GOOGLE_DESKTOP_CLIENT_SECRET: ${{ secrets.GOOGLE_DESKTOP_CLIENT_SECRET }}
+      MICROSOFT_PUBLIC_CLIENT_ID: ${{ vars.MICROSOFT_PUBLIC_CLIENT_ID }}
+      LINKEDIN_CLIENT_ID: ${{ vars.LINKEDIN_CLIENT_ID }}
+      LINKEDIN_APPROVED_SCOPES: ${{ vars.LINKEDIN_APPROVED_SCOPES }}
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - uses: pnpm/action-setup@v6
+    - uses: actions/setup-node@v7
+      with:
+        node-version: 22
+        cache: pnpm
+    - name: Install frontend dependencies
+      run: pnpm install --frozen-lockfile
+
+    - name: Install Tauri system dependencies
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          build-essential pkg-config libssl-dev libdbus-1-dev \
+          libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
+          libayatana-appindicator3-dev librsvg2-dev patchelf
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: src-tauri
+
+    # Fetches the bundled Codex and ant runtimes (checksums verified), builds
+    # the frontend and packages the app. build.rs checks the connector
+    # configuration first.
+    - name: Package ReMa
+      run: pnpm build:app
+
+    - name: Keep the packages
+      uses: actions/upload-artifact@v7
+      with:
+        name: rema-${{ matrix.os }}
+        path: |
+          src-tauri/target/release/bundle/**/*.deb
+          src-tauri/target/release/bundle/**/*.rpm
+          src-tauri/target/release/bundle/**/*.AppImage
+          src-tauri/target/release/bundle/**/*.dmg
+          src-tauri/target/release/bundle/**/*.msi
+          src-tauri/target/release/bundle/**/*.exe
+        if-no-files-found: error

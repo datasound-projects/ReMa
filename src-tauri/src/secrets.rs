@@ -31,6 +31,11 @@ pub enum Credential {
         refresh_token: Option<String>,
         expires_at: Option<i64>,
     },
+    /// A connected account's refresh token (Google, Microsoft). The access
+    /// tokens it yields are kept in memory only.
+    RefreshToken {
+        refresh_token: String,
+    },
 }
 
 impl Credential {
@@ -45,6 +50,7 @@ impl Credential {
             } => std::iter::once(access_token.as_str())
                 .chain(refresh_token.as_deref())
                 .collect(),
+            Self::RefreshToken { refresh_token } => vec![refresh_token.as_str()],
         }
     }
 }
@@ -58,6 +64,7 @@ impl fmt::Debug for Credential {
                 .debug_struct("Credential::OAuth")
                 .field("expires_at", expires_at)
                 .finish_non_exhaustive(),
+            Self::RefreshToken { .. } => f.write_str("Credential::RefreshToken(<redacted>)"),
         }
     }
 }
@@ -255,5 +262,16 @@ mod tests {
         let debug = format!("{oauth:?}");
         assert!(!debug.contains("at-secret") && !debug.contains("rt-secret"));
         assert_eq!(oauth.secret_values(), vec!["at-secret", "rt-secret"]);
+
+        let refresh = Credential::RefreshToken {
+            refresh_token: "rt-only".into(),
+        };
+        assert!(!format!("{refresh:?}").contains("rt-only"));
+        assert_eq!(refresh.secret_values(), vec!["rt-only"]);
+        let stored = serde_json::to_string(&refresh).unwrap();
+        assert_eq!(
+            stored,
+            r#"{"type":"refresh_token","refresh_token":"rt-only"}"#
+        );
     }
 }

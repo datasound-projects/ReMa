@@ -4,11 +4,13 @@ import { callBackend } from './ipc';
 export type {
   BackgroundSettings,
   Capability,
+  ConnectorErrorCode,
   ConnectorId,
   ConnectorKind,
   ConnectorState,
   ConnectorStatus,
   ConnectorsOverview,
+  MailProcessing,
   PermissionView,
   ProviderId,
 } from '../generated/bindings';

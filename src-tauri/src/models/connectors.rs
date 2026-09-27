@@ -185,16 +185,72 @@ pub enum Capability {
 impl Capability {
     pub fn label(self) -> &'static str {
         match self {
-            Self::MailRead => "Mail — Read",
+            Self::MailRead => "Mail — Read only",
             Self::CalendarRead => "Calendar — Read events",
             Self::CalendarWrite => "Calendar — Create and update events",
-            Self::FreeBusy => "Calendar — Availability",
+            Self::FreeBusy => "Availability — Read",
             Self::NetworkIdentity => "Identity",
             Self::NetworkProfile => "Your profile",
             Self::NetworkConnections => "Connection list (first-degree)",
         }
     }
 }
+
+/// Why connecting or checking a connector failed (Spec B §60). Each code
+/// comes with an actionable message; none carries a provider token or code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ConnectorErrorCode {
+    /// The user cancelled or declined the provider's consent.
+    UserCancelled,
+    /// The browser sign-in was not finished in time.
+    SignInTimedOut,
+    /// The default browser could not be opened.
+    BrowserUnavailable,
+    /// The provider rejected ReMa's return address.
+    RedirectMismatch,
+    /// The browser returned a sign-in ReMa did not start (CSRF protection).
+    InvalidState,
+    /// The provider did not turn the sign-in into access for ReMa.
+    TokenExchangeFailed,
+    /// The user did not grant a permission the connector needs.
+    ScopeNotGranted,
+    /// An organization's policy requires an administrator's approval.
+    ProviderAdminPolicy,
+    /// The provider API is not enabled for ReMa's registration.
+    ApiNotEnabled,
+    /// The account has no mailbox or calendar ReMa can use.
+    AccountNotSupported,
+    /// Access was revoked or expired; the user must reconnect.
+    ReauthRequired,
+    /// The provider could not be reached.
+    NetworkError,
+    /// The provider has not verified ReMa's app for this account.
+    OauthAppNotVerified,
+    /// ReMa's own app registration was rejected (fixed by a ReMa update).
+    ProviderConfigurationError,
+    /// The system keychain did not answer, so the stored sign-in could not
+    /// be read (the connection itself is unchanged).
+    CredentialStoreUnavailable,
+}
+
+text_enum!(ConnectorErrorCode {
+    UserCancelled => "USER_CANCELLED",
+    SignInTimedOut => "SIGN_IN_TIMED_OUT",
+    BrowserUnavailable => "BROWSER_UNAVAILABLE",
+    RedirectMismatch => "REDIRECT_MISMATCH",
+    InvalidState => "INVALID_STATE",
+    TokenExchangeFailed => "TOKEN_EXCHANGE_FAILED",
+    ScopeNotGranted => "SCOPE_NOT_GRANTED",
+    ProviderAdminPolicy => "PROVIDER_ADMIN_POLICY",
+    ApiNotEnabled => "API_NOT_ENABLED",
+    AccountNotSupported => "ACCOUNT_NOT_SUPPORTED",
+    ReauthRequired => "REAUTH_REQUIRED",
+    NetworkError => "NETWORK_ERROR",
+    OauthAppNotVerified => "OAUTH_APP_NOT_VERIFIED",
+    ProviderConfigurationError => "PROVIDER_CONFIGURATION_ERROR",
+    CredentialStoreUnavailable => "CREDENTIAL_STORE_UNAVAILABLE",
+});
 
 /// What a connector card shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -211,7 +267,8 @@ pub enum ConnectorState {
     PermissionMissing,
     /// A sync is running right now.
     Syncing,
-    /// The last sync failed (retryable).
+    /// Connecting failed, the connection check failed, or the last sync
+    /// failed (retryable; `error_code` tells which).
     Error,
     /// This build of ReMa has no sign-in configured for the provider.
     Unavailable,
@@ -249,6 +306,9 @@ pub struct ConnectorStatus {
     pub message: Option<String>,
     /// Technical details for "Show details" (no secrets).
     pub detail: Option<String>,
+    /// Why the last sign-in or connection check failed (none for a failed
+    /// sync or a working connector).
+    pub error_code: Option<ConnectorErrorCode>,
 }
 
 /// Explicit background execution options. Nothing runs once ReMa quits.
@@ -263,11 +323,28 @@ pub struct BackgroundSettings {
     pub tray_available: bool,
 }
 
+/// Where job-related email is read by a model (Spec B §64): the model of
+/// "Job Mail & Interview Sync", or the default model it would start with.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct MailProcessing {
+    /// The model, as ReMa names it.
+    pub model: String,
+    /// Who receives the text of job-related email: a provider ("OpenAI"),
+    /// a server's host name, or "this computer".
+    pub recipient: String,
+    /// The model runs on this computer: mail leaves it only between ReMa and
+    /// Google or Microsoft.
+    pub on_device: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectorsOverview {
     pub connectors: Vec<ConnectorStatus>,
     pub background: BackgroundSettings,
+    /// None until a model is connected.
+    pub mail_processing: Option<MailProcessing>,
 }
 
 /// Connectors changed (state, account, sync).

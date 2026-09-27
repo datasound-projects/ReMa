@@ -1,0 +1,35 @@
+# ReMa's own OAuth app registrations, compiled into every build.
+#
+# ReMa is a desktop app, so it is a *public* OAuth client: these identifiers
+# ship inside every copy of ReMa and are not secrets. That includes the
+# Google Desktop client secret — Google requires it at its token endpoint but
+# does not treat it as confidential for installed apps. Security comes from
+# PKCE (S256), `state` and the loopback redirect; users' tokens stay in their
+# system keychain. Users never see or enter any of this.
+#
+# Release builds FAIL when the Google or Microsoft values are missing, so a
+# release can never ship with "sign-in is not available in this build".
+# Debug builds without them show a developer diagnostic on the cards.
+#
+# An environment variable with the name in the comment overrides a value
+# (for example a CI release job that keeps them in repository variables).
+# Registration steps: docs/connectors/registration.md
+
+[google]
+# OAuth client of type "Desktop app" in ReMa's Google Cloud project.
+desktop_client_id = ""        # GOOGLE_DESKTOP_CLIENT_ID
+desktop_client_secret = ""    # GOOGLE_DESKTOP_CLIENT_SECRET
+
+[microsoft]
+# Application (client) ID of ReMa's Microsoft Entra registration: public
+# client ("Mobile and desktop applications", redirect http://localhost),
+# no client secret.
+public_client_id = ""         # MICROSOFT_PUBLIC_CLIENT_ID
+# "common": work, school and personal Microsoft accounts.
+tenant = "common"             # MICROSOFT_TENANT
+
+[linkedin]
+# Optional (Network Connect): a LinkedIn app with native PKCE enabled.
+client_id = ""                # LINKEDIN_CLIENT_ID
+# Restricted scopes LinkedIn approved for that app (only r_1st_connections).
+approved_scopes = ""          # LINKEDIN_APPROVED_SCOPES

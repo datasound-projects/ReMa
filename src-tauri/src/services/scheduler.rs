@@ -2112,7 +2112,7 @@ mod tests {
         state
             .vault
             .set(
-                &crate::connectors::tokens::vault_account(ProviderId::Google),
+                &crate::connectors::tokens::legacy_key(ProviderId::Google),
                 Credential::OAuth {
                     access_token: "g-access-token-secret".into(),
                     refresh_token: Some("g-refresh-token-secret".into()),
@@ -2226,5 +2226,110 @@ mod tests {
         ] {
             assert!(!stored.contains(secret), "{secret} found in run history");
         }
+    }
+
+    /// Spec B §65: a scheduled run never opens a sign-in. A revoked grant
+    /// fails the run as a connector problem and asks for a reconnect once.
+    #[tokio::test]
+    async fn a_scheduled_job_mail_sync_with_a_revoked_grant_asks_to_reconnect() {
+        use crate::{
+            connectors::{
+                google::GoogleEndpoints, microsoft::MicrosoftEndpoints, oauth::OAuthApp, Apps,
+            },
+            db::connectors::{self as connector_repo, AccountRecord, AccountStatus},
+            models::connectors::{ConnectorId, ConnectorState, ProviderId},
+            secrets::Credential,
+            test_support::MockServer,
+        };
+        let google = MockServer::start(|req| {
+            (req.target == "/token").then(|| {
+                (
+                    400,
+                    r#"{"error":"invalid_grant","error_description":"Token has been expired or revoked."}"#
+                        .into(),
+                )
+            })
+        })
+        .await;
+        let mut state = state(FakeLanguageModel::replying(&[])).await;
+        let base = google.base_url.clone();
+        state.connectors = crate::connectors::ConnectorsContext::new(
+            GoogleEndpoints::at(&base),
+            MicrosoftEndpoints::at(&base, &format!("{base}/graph/v1.0")),
+            Apps {
+                google: Some(OAuthApp {
+                    client_id: "client".into(),
+                    client_secret: Some("client-secret-value".into()),
+                }),
+                microsoft: None,
+                linkedin: None,
+            },
+        );
+        // Connected earlier; the access token has expired since.
+        state
+            .vault
+            .set(
+                &crate::connectors::tokens::legacy_key(ProviderId::Google),
+                Credential::OAuth {
+                    access_token: "g-old-access".into(),
+                    refresh_token: Some("g-revoked-refresh".into()),
+                    expires_at: Some(now_ms() - 60_000),
+                },
+            )
+            .await
+            .unwrap();
+        let now = now_ms();
+        state
+            .db
+            .call(|c| {
+                connector_repo::save_account(
+                    c,
+                    &AccountRecord {
+                        provider: ProviderId::Google,
+                        account_id: Some("g-1".into()),
+                        email: Some("ana@gmail.com".into()),
+                        display_name: None,
+                        granted_scopes: crate::connectors::google::scopes(&[ConnectorId::Gmail]),
+                        status: AccountStatus::Connected,
+                        status_reason: None,
+                        connected_at: now,
+                        updated_at: now,
+                    },
+                )?;
+                connector_repo::set_enabled(c, ConnectorId::Gmail, true, now)
+            })
+            .unwrap();
+        let task = tasks::create(
+            &state,
+            TaskInput {
+                kind: TaskKind::JobApplications {
+                    lookback_days: 30,
+                    sync_calendar: false,
+                },
+                prompt: String::new(),
+                ..every_4_hours(None)
+            },
+        )
+        .await
+        .unwrap();
+        let id = tasks::run_now(&state, task.id).unwrap();
+        wait_idle(&state, task.id).await;
+        let run = runs::get(&state, id).unwrap();
+        assert_eq!(run.status, ExecutionStatus::Failed);
+        assert_eq!(run.error_category, Some(RunErrorCategory::Connector));
+        assert!(run.error.unwrap().contains("Reconnect"));
+        // Exactly one refresh attempt, then the connector waits for the user.
+        assert_eq!(google.requests().len(), 1);
+        let gmail = crate::connectors::overview(&state)
+            .await
+            .unwrap()
+            .connectors
+            .into_iter()
+            .find(|c| c.id == ConnectorId::Gmail)
+            .unwrap();
+        assert_eq!(gmail.state, ConnectorState::ReauthRequired);
+        assert!(crate::connectors::tokens::grant(&state, ProviderId::Google)
+            .await
+            .is_none());
     }
 }
