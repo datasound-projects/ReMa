@@ -51,13 +51,14 @@ export const commands = {
 	 *  Application history is kept.
 	 */
 	disconnectConnector: (id: ConnectorId) => __TAURI_INVOKE<ConnectorsOverview>("disconnect_connector", { id }),
-	/**  "Sync now". */
-	syncConnector: (id: ConnectorId) => __TAURI_INVOKE<ConnectorsOverview>("sync_connector", { id }),
-	setConnectorBackgroundSync: (id: ConnectorId, enabled: boolean) => __TAURI_INVOKE<ConnectorsOverview>("set_connector_background_sync", { id, enabled }),
-	setConnectorPreferences: (preferences: ConnectorPreferences) => __TAURI_INVOKE<ConnectorsOverview>("set_connector_preferences", { preferences }),
 	/**  "Run ReMa in background" (system tray) and "Start ReMa at login". */
 	setBackgroundSettings: (runInBackground: boolean, startAtLogin: boolean) => __TAURI_INVOKE<ConnectorsOverview>("set_background_settings", { runInBackground, startAtLogin }),
 	getApplications: () => __TAURI_INVOKE<ApplicationsOverview>("get_applications"),
+	/**
+	 *  The in-app calendar: events of the connected calendars between `start`
+	 *  and `end` (epoch ms), read live, with ReMa's interviews marked.
+	 */
+	getCalendar: (start: number, end: number) => __TAURI_INVOKE<CalendarView>("get_calendar", { start, end }),
 	getApplication: (id: number) => __TAURI_INVOKE<ApplicationDetail>("get_application", { id }),
 	/**  A status change by the user (recorded on the timeline). */
 	setApplicationStatus: (id: number, status: ApplicationStatus, note: string | null) => __TAURI_INVOKE<ApplicationDetail>("set_application_status", { id, status, note }),
@@ -382,19 +383,40 @@ export type ApplicationDetail = {
 	correspondence: Correspondence[],
 };
 
-/**  One row of the application overview. */
+/**  One row of the Applications page: the application's current state. */
 export type ApplicationRow = {
 	id: number,
 	company: string,
 	role: string | null,
 	status: ApplicationStatus,
+	section: ApplicationSection,
+	/**
+	 *  The Status column, e.g. "Interview requested" (from the email that
+	 *  set the status).
+	 */
+	statusLabel: string,
 	/**  Received time of the latest email about this application. */
 	lastUpdateAt: number,
+	/**  The last column: latest update, requested action or rejection reason. */
+	latestUpdate: string,
 	nextAction: string | null,
-	/**  For upcoming interviews: when it starts (epoch ms). */
+	/**  Only when the rejection email states one. */
+	rejectionReason: string | null,
+	/**  For confirmed interviews: when the next one starts (epoch ms). */
 	interviewAt: number | null,
 	interviewTimezone: string | null,
+	meetingUrl: string | null,
+	/**  The confirmed interview overlaps existing events and was not added. */
+	calendarConflict: boolean,
+	/**  "google" / "microsoft": the mailbox of the latest email. */
+	mailProvider: string | null,
 };
+
+/**
+ *  The five sections of the Applications page, in page order. Every
+ *  application is in exactly one, derived from its current status.
+ */
+export type ApplicationSection = "interviews_confirmed" | "applications_confirmed" | "needs_action" | "in_progress" | "rejected";
 
 /**
  *  Where a job application stands. Stored as text and validated in Rust;
@@ -417,19 +439,11 @@ export type ApplicationStatus =
 export type ApplicationsChanged = null;
 
 export type ApplicationsOverview = {
-	summary: ApplicationsSummary,
+	/**  Every application, latest email first; each in one section. */
 	applications: ApplicationRow[],
+	tracking: TrackingStatus,
 	/**  Emails the classifier was not sure about (no status was changed). */
 	needsReview: Correspondence[],
-};
-
-/**  Dashboard counts ("3 application updates today, …"). */
-export type ApplicationsSummary = {
-	updatesToday: number,
-	interviewsScheduled: number,
-	actionRequired: number,
-	offers: number,
-	total: number,
 };
 
 export type ApprovalDecision = "allow" | 
@@ -485,6 +499,36 @@ export type BrowserStatus = {
 	loading: boolean,
 };
 
+/**
+ *  Tasks ReMa provides. Each exists at most once and runs only after the
+ *  user set it up and turned it on.
+ */
+export type BuiltinTask = 
+/**  "Job Mail & Interview Sync". */
+"job_mail_sync";
+
+/**  One entry of the in-app calendar. */
+export type CalendarEntry = {
+	/**  Unique in the view. */
+	key: string,
+	/**
+	 *  The calendar it is in; `None` for a confirmed interview that is in no
+	 *  calendar (a conflict, or no calendar connected).
+	 */
+	provider: ProviderId | null,
+	title: string,
+	startAt: number,
+	endAt: number,
+	allDay: boolean,
+	location: string | null,
+	/**  https only. */
+	meetingUrl: string | null,
+	/**  Opens the event in Google Calendar / Outlook on the web. */
+	webLink: string | null,
+	/**  Set for ReMa interviews. */
+	interview: InterviewLink | null,
+};
+
 export type CalendarItem = {
 	company: string,
 	role: string | null,
@@ -519,6 +563,17 @@ export type CalendarReport = {
 	items: CalendarItem[],
 };
 
+/**  A connected calendar. */
+export type CalendarSource = {
+	connector: ConnectorId,
+	provider: ProviderId,
+	/**  "Google Calendar" / "Outlook Calendar". */
+	name: string,
+	accountEmail: string | null,
+	/**  Could be read now (not waiting for a reconnect). */
+	ready: boolean,
+};
+
 /**  What ReMa did or proposes for an interview's calendar event. */
 export type CalendarState = "none" | 
 /**  Free; waiting for the user to add it. */
@@ -529,6 +584,15 @@ export type CalendarState = "none" |
 "declined" | 
 /**  The user deleted ReMa's event in the calendar. */
 "removed";
+
+export type CalendarView = {
+	/**  Connected calendar connectors (empty: no calendar connected). */
+	calendars: CalendarSource[],
+	/**  Events overlapping the requested range, by start. */
+	entries: CalendarEntry[],
+	/**  Calendars that could not be read, in words the user can act on. */
+	problems: string[],
+};
 
 /**  A permission a connector needs, mapped to provider scopes in Rust. */
 export type Capability = "mail_read" | "calendar_read" | "calendar_write" | "free_busy";
@@ -602,14 +666,6 @@ export type ConnectorId = "gmail" | "google_calendar" | "outlook_mail" | "outloo
 
 export type ConnectorKind = "mail" | "calendar";
 
-export type ConnectorPreferences = {
-	interviewMode: InterviewMode,
-	/**  Minutes between background syncs (5–1440). */
-	syncIntervalMinutes: number,
-	/**  Free time required before and after an interview (0–120 minutes). */
-	prepBufferMinutes: number,
-};
-
 /**  What a connector card shows. */
 export type ConnectorState = 
 /**  Not added (shows `+`). */
@@ -641,11 +697,12 @@ export type ConnectorStatus = {
 	accountEmail: string | null,
 	accountName: string | null,
 	permissions: PermissionView[],
-	/**  Mail connectors: synchronize while ReMa runs. */
-	backgroundSync: boolean | null,
 	lastSyncStartedAt: number | null,
+	/**
+	 *  The last successful use by "Job Mail & Interview Sync" (mail) or its
+	 *  calendar step (calendars).
+	 */
 	lastSyncAt: number | null,
-	nextSyncAt: number | null,
 	/**  A short user-readable explanation for the current state. */
 	message: string | null,
 	/**  Technical details for "Show details" (no secrets). */
@@ -657,7 +714,6 @@ export type ConnectorsChanged = null;
 
 export type ConnectorsOverview = {
 	connectors: ConnectorStatus[],
-	preferences: ConnectorPreferences,
 	background: BackgroundSettings,
 };
 
@@ -800,7 +856,7 @@ export type Education = {
 };
 
 /**  What a job-related email is about (the classifier's strict schema). */
-export type EmailCategory = "application_received" | "application_update" | "recruiter_message" | "interview_request" | "interview_confirmed" | "interview_rescheduled" | "interview_cancelled" | "assessment_request" | "action_required" | "rejection" | "offer" | "other_job_related" | "not_job_related";
+export type EmailCategory = "application_confirmed" | "application_update" | "needs_action" | "recruiter_message" | "interview_request" | "interview_confirmed" | "interview_rescheduled" | "interview_cancelled" | "assessment_request" | "rejection" | "offer" | "other_job_related" | "not_job_related";
 
 export type EmploymentType = "full_time" | "part_time" | "contract" | "freelance" | "temporary" | "internship";
 
@@ -938,12 +994,18 @@ export type Importance = "required" | "preferred";
 
 export type IntervalUnit = "minutes" | "hours";
 
-/**  What happens when an email confirms an interview. */
-export type InterviewMode = 
-/**  Propose the event; the user adds it (default). */
-"ask" | 
-/**  Add it when the confirmation is unambiguous and the time is free. */
-"auto";
+/**  The application a ReMa interview belongs to. */
+export type InterviewLink = {
+	applicationId: number,
+	interviewId: number,
+	company: string,
+	role: string | null,
+	/**  The event exists in a connected calendar. */
+	inCalendar: boolean,
+	/**  It overlaps other events and was not added. */
+	conflict: boolean,
+	cancelled: boolean,
+};
 
 export type InterviewView = {
 	id: number,
@@ -953,6 +1015,8 @@ export type InterviewView = {
 	startAt: number | null,
 	endAt: number | null,
 	timezone: string | null,
+	/**  "Sep 29 at 10:00 CEST": the time as the email states it. */
+	timeText: string | null,
 	location: string | null,
 	meetingUrl: string | null,
 	participants: string[],
@@ -1685,6 +1749,8 @@ export type ScheduledTask = {
 	id: number,
 	name: string,
 	kind: TaskKind,
+	/**  Set for ReMa's built-in tasks. */
+	builtin: BuiltinTask | null,
 	prompt: string,
 	useProfile: boolean,
 	model: ModelRef,
@@ -1868,19 +1934,20 @@ export type TaskKind =
 /**  Sends the prompt to the model and keeps its answer. */
 { type: "prompt" } | 
 /**
- *  The Job Application Mail Monitor: checks the connected mailboxes
- *  (Gmail, Outlook Mail) for job-application emails, keeps the
- *  application tracker up to date and handles confirmed interviews in
- *  the connected calendars (with conflict checks). The prompt adds the
- *  user's instructions.
+ *  "Job Mail & Interview Sync" (only as the built-in task): reads the
+ *  connected mailboxes (Gmail, Outlook Mail) for job-application emails,
+ *  keeps Applications up to date and adds confirmed interviews to the
+ *  connected calendar (with conflict checks). The prompt adds the user's
+ *  instructions.
  */
 { type: "job_applications"; 
 /**
- *  Days of email to check on every run (1–90). Each run also
- *  covers everything since the previous successful run.
+ *  Initial lookback: the first run reads the last N days (1–365);
+ *  later runs read only new mail. A longer lookback backfills the
+ *  newly included days once.
  */
 lookbackDays: number; 
-/**  Check calendars and handle confirmed interviews. */
+/**  Add confirmed interviews to the connected calendar. */
 syncCalendar: boolean };
 
 /**  Lifecycle of a task as shown to the user. */
@@ -1939,6 +2006,21 @@ export type ToolStatus =
 "denied" | 
 /**  A selected server could not be used for this answer. */
 "unavailable";
+
+/**
+ *  Whether mail is being tracked: only the built-in scheduled task "Job
+ *  Mail & Interview Sync" monitors mailboxes.
+ */
+export type TrackingStatus = {
+	/**  The built-in task, if it was set up. */
+	taskId: number | null,
+	/**  Set up and turned on. */
+	enabled: boolean,
+	/**  A mail connector (Gmail, Outlook Mail) is connected. */
+	mailConnected: boolean,
+	lastRunAt: number | null,
+	nextRunAt: number | null,
+};
 
 /**  Where a timeline entry came from. */
 export type UpdateSource = "gmail" | "outlook" | "google_calendar" | "outlook_calendar" | 

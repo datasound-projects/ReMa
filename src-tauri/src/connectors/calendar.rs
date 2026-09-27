@@ -23,6 +23,18 @@ pub struct CalendarEvent {
     /// Marked as free (does not block time).
     pub transparent: bool,
     pub interview_id: Option<i64>,
+    pub location: Option<String>,
+    /// A video meeting link (Google Meet, Teams, Zoom, …), https only.
+    pub meeting_url: Option<String>,
+    /// Opens the event in Google Calendar / Outlook on the web.
+    pub web_link: Option<String>,
+}
+
+/// An https link, or nothing (never another scheme from calendar data).
+pub fn https_link(value: Option<&str>) -> Option<String> {
+    let value = value?.trim();
+    let url = reqwest::Url::parse(value).ok()?;
+    (url.scheme() == "https").then(|| value.to_string())
 }
 
 /// A busy period from a free/busy query.
@@ -143,7 +155,21 @@ mod tests {
             all_day: false,
             transparent: false,
             interview_id: None,
+            location: None,
+            meeting_url: None,
+            web_link: None,
         }
+    }
+
+    #[test]
+    fn keeps_only_https_links() {
+        assert_eq!(
+            https_link(Some(" https://meet.google.com/abc ")).as_deref(),
+            Some("https://meet.google.com/abc")
+        );
+        assert_eq!(https_link(Some("javascript:alert(1)")), None);
+        assert_eq!(https_link(Some("http://zoom.us/j/1")), None);
+        assert_eq!(https_link(None), None);
     }
 
     #[test]

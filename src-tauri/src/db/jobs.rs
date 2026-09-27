@@ -206,6 +206,52 @@ pub fn pending_mail(conn: &Connection, provider: ProviderId) -> AppResult<Vec<Ma
     )
 }
 
+/// Relevant messages of every mailbox waiting for classification, oldest
+/// first: history is replayed in the order it happened.
+pub fn pending_mail_all(conn: &Connection) -> AppResult<Vec<MailRecord>> {
+    query_mail(
+        conn,
+        "WHERE status = 'pending' OR (status = 'failed' AND attempts < ?1)
+         ORDER BY received_at, provider, message_id",
+        [MAX_ATTEMPTS],
+    )
+}
+
+/// The same email already processed from another mailbox (the user's Gmail
+/// and Outlook both received it): same sender and subject, received within
+/// ten minutes.
+pub fn processed_twin(
+    conn: &Connection,
+    provider: ProviderId,
+    sender: &str,
+    subject: &str,
+    received_at: i64,
+) -> AppResult<Option<MailRecord>> {
+    Ok(query_mail(
+        conn,
+        "WHERE provider != ?1 AND lower(sender) = lower(?2) AND subject = ?3
+             AND abs(received_at - ?4) <= 600000 AND status IN ('processed', 'ambiguous')
+         ORDER BY abs(received_at - ?4) LIMIT 1",
+        params![provider.as_str(), sender, subject, received_at],
+    )?
+    .pop())
+}
+
+/// When a message was received, if ReMa has seen it.
+pub fn received_at(
+    conn: &Connection,
+    provider: ProviderId,
+    message_id: &str,
+) -> AppResult<Option<i64>> {
+    Ok(conn
+        .query_row(
+            "SELECT received_at FROM mail_messages WHERE provider = ?1 AND message_id = ?2",
+            params![provider.as_str(), message_id],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
 /// Job-related messages of an application (correspondence), newest first.
 pub fn mail_for_application(conn: &Connection, application_id: i64) -> AppResult<Vec<MailRecord>> {
     query_mail(
@@ -274,13 +320,55 @@ pub struct ApplicationRecord {
     pub last_update_at: i64,
     pub created_at: i64,
     pub updated_at: i64,
+    /// One line for the Applications table (from the email that set the
+    /// status).
+    pub latest_update: Option<String>,
+    /// Only when the rejection email states one.
+    pub rejection_reason: Option<String>,
+    /// The category of the email that set the current status.
+    pub status_category: Option<EmailCategory>,
+    /// Mailbox of the latest email.
+    pub mail_provider: Option<ProviderId>,
+    pub mail_account: Option<String>,
+    /// When the email (or user change) that set the status happened.
+    pub status_at: i64,
+}
+
+impl ApplicationRecord {
+    /// A new application (tests and the tracker fill in the rest).
+    pub fn new(company: &str, status: ApplicationStatus, now: i64) -> Self {
+        Self {
+            id: 0,
+            company: company.to_string(),
+            company_key: company.to_lowercase(),
+            role: None,
+            role_key: None,
+            reference: None,
+            sender_domain: None,
+            status,
+            requires_action: false,
+            next_action: None,
+            last_update_at: now,
+            created_at: now,
+            updated_at: now,
+            latest_update: None,
+            rejection_reason: None,
+            status_category: None,
+            mail_provider: None,
+            mail_account: None,
+            status_at: now,
+        }
+    }
 }
 
 const APP_COLUMNS: &str = "id, company, company_key, role, role_key, reference, sender_domain,
-    status, requires_action, next_action, last_update_at, created_at, updated_at";
+    status, requires_action, next_action, last_update_at, created_at, updated_at, latest_update,
+    rejection_reason, status_category, mail_provider, mail_account, status_at";
 
 fn app_from_row(row: &Row) -> rusqlite::Result<ApplicationRecord> {
     let status: String = row.get(7)?;
+    let category: Option<String> = row.get(15)?;
+    let provider: Option<String> = row.get(16)?;
     Ok(ApplicationRecord {
         id: row.get(0)?,
         company: row.get(1)?,
@@ -295,6 +383,12 @@ fn app_from_row(row: &Row) -> rusqlite::Result<ApplicationRecord> {
         last_update_at: row.get(10)?,
         created_at: row.get(11)?,
         updated_at: row.get(12)?,
+        latest_update: row.get(13)?,
+        rejection_reason: row.get(14)?,
+        status_category: category.as_deref().and_then(EmailCategory::parse),
+        mail_provider: provider.as_deref().and_then(ProviderId::parse),
+        mail_account: row.get(17)?,
+        status_at: row.get::<_, Option<i64>>(18)?.unwrap_or(row.get(10)?),
     })
 }
 
@@ -388,8 +482,10 @@ pub fn applications_with_status(
 pub fn insert_application(conn: &Connection, app: &ApplicationRecord) -> AppResult<i64> {
     conn.execute(
         "INSERT INTO job_applications (company, company_key, role, role_key, reference,
-             sender_domain, status, requires_action, next_action, last_update_at, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             sender_domain, status, requires_action, next_action, last_update_at, created_at,
+             updated_at, latest_update, rejection_reason, status_category, mail_provider,
+             mail_account, status_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         params![
             app.company,
             app.company_key,
@@ -403,6 +499,12 @@ pub fn insert_application(conn: &Connection, app: &ApplicationRecord) -> AppResu
             app.last_update_at,
             app.created_at,
             app.updated_at,
+            app.latest_update,
+            app.rejection_reason,
+            app.status_category.map(EmailCategory::as_str),
+            app.mail_provider.map(ProviderId::as_str),
+            app.mail_account,
+            app.status_at,
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -412,7 +514,9 @@ pub fn save_application(conn: &Connection, app: &ApplicationRecord) -> AppResult
     conn.execute(
         "UPDATE job_applications SET company = ?2, company_key = ?3, role = ?4, role_key = ?5,
              reference = ?6, sender_domain = ?7, status = ?8, requires_action = ?9,
-             next_action = ?10, last_update_at = ?11, updated_at = ?12
+             next_action = ?10, last_update_at = ?11, updated_at = ?12, latest_update = ?13,
+             rejection_reason = ?14, status_category = ?15, mail_provider = ?16,
+             mail_account = ?17, status_at = ?18
          WHERE id = ?1",
         params![
             app.id,
@@ -427,6 +531,12 @@ pub fn save_application(conn: &Connection, app: &ApplicationRecord) -> AppResult
             app.next_action,
             app.last_update_at,
             app.updated_at,
+            app.latest_update,
+            app.rejection_reason,
+            app.status_category.map(EmailCategory::as_str),
+            app.mail_provider.map(ProviderId::as_str),
+            app.mail_account,
+            app.status_at,
         ],
     )?;
     Ok(())
@@ -732,6 +842,21 @@ pub fn interviews_between(
     query_interviews(
         conn,
         "WHERE state = 'confirmed' AND start_at >= ?1 AND start_at < ?2 ORDER BY start_at",
+        params![from, to],
+    )
+}
+
+/// Confirmed or cancelled interviews overlapping `[from, to)` (the in-app
+/// calendar).
+pub fn interviews_overlapping(
+    conn: &Connection,
+    from: i64,
+    to: i64,
+) -> AppResult<Vec<InterviewRecord>> {
+    query_interviews(
+        conn,
+        "WHERE state IN ('confirmed', 'cancelled') AND start_at < ?2 AND end_at > ?1
+         ORDER BY start_at, id",
         params![from, to],
     )
 }

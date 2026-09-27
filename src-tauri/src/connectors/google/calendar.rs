@@ -7,7 +7,8 @@ use crate::{
     connectors::{
         api::ApiClient,
         calendar::{
-            rfc3339, BusyBlock, CalendarEvent, CalendarProvider, EventDraft, INTERVIEW_PROPERTY,
+            https_link, rfc3339, BusyBlock, CalendarEvent, CalendarProvider, EventDraft,
+            INTERVIEW_PROPERTY,
         },
     },
     error::{AppError, AppResult},
@@ -72,6 +73,21 @@ pub fn parse_event(value: &Value) -> Option<CalendarEvent> {
             .pointer(&format!("/extendedProperties/private/{INTERVIEW_PROPERTY}"))
             .and_then(Value::as_str)
             .and_then(|v| v.parse().ok()),
+        location: value
+            .get("location")
+            .and_then(Value::as_str)
+            .filter(|l| !l.trim().is_empty())
+            .map(str::to_string),
+        meeting_url: https_link(value.get("hangoutLink").and_then(Value::as_str)).or_else(|| {
+            value
+                .pointer("/conferenceData/entryPoints")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter(|e| e.get("entryPointType").and_then(Value::as_str) == Some("video"))
+                .find_map(|e| https_link(e.get("uri").and_then(Value::as_str)))
+        }),
+        web_link: https_link(value.get("htmlLink").and_then(Value::as_str)),
     })
 }
 

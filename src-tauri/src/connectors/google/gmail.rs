@@ -65,6 +65,15 @@ pub fn job_search_query(after_ms: i64) -> String {
     )
 }
 
+/// Gmail search for job-related mail received in `[after_ms, before_ms)`.
+pub fn job_range_query(after_ms: i64, before_ms: i64) -> String {
+    format!(
+        "{} before:{}",
+        job_search_query(after_ms),
+        before_ms.div_euclid(1000)
+    )
+}
+
 /// A Gmail search string from a [`MailQuery`] built by Rust.
 pub fn search_query(query: &MailQuery) -> String {
     let mut parts = Vec::new();
@@ -277,6 +286,25 @@ impl MailProvider for Gmail {
                 cursor: latest,
                 resynced: false,
             })
+        })
+    }
+
+    fn list_range<'a>(
+        &'a self,
+        after: i64,
+        before: i64,
+    ) -> BoxFuture<'a, AppResult<Vec<MailMessage>>> {
+        Box::pin(async move {
+            let refs = self
+                .list(&job_range_query(after, before), MAX_SEARCH_RESULTS)
+                .await?;
+            let mut messages = Vec::new();
+            for (id, _) in refs {
+                messages.push(self.metadata(&id).await?);
+            }
+            messages.retain(|m| m.received_at >= after && m.received_at < before);
+            messages.sort_by_key(|m| m.received_at);
+            Ok(messages)
         })
     }
 

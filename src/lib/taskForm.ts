@@ -13,17 +13,39 @@ export type TaskType = TaskKind['type'];
 export type RepeatKind = 'once' | 'daily' | 'weekdays' | 'weekly' | 'days' | 'interval';
 export type EndKind = 'never' | 'on_date' | 'after_runs';
 
-/** Lookback choices for job-application tasks, in days. */
-export const LOOKBACK_PRESETS = [1, 3, 7, 14, 30];
-export const MAX_LOOKBACK_DAYS = 90;
+/** What the built-in Job Mail & Interview Sync does, in one sentence. */
+export const JOB_MAIL_SYNC_DESCRIPTION =
+  'Tracks job-application emails, updates Applications, detects actions and confirmed interviews, and syncs ' +
+  'confirmed interviews with your calendar.';
+
+/** "Initial lookback: last N days" for Job Mail & Interview Sync. */
+export const DEFAULT_LOOKBACK_DAYS = 30;
+export const MAX_LOOKBACK_DAYS = 365;
+
+/**
+ * A mail task left from before Job Mail & Interview Sync existed. It stays
+ * paused and never runs: only the built-in task reads mail.
+ */
+export function isOldMailTask(task: ScheduledTask): boolean {
+  return task.kind.type === 'job_applications' && task.builtin !== 'job_mail_sync';
+}
+
+/**
+ * "Run now" is offered unless the task is running, it is Job Mail &
+ * Interview Sync while turned off (mail is read only while it is on), or it
+ * is an old mail task.
+ */
+export function canRunNow(task: ScheduledTask): boolean {
+  if (task.running || isOldMailTask(task)) return false;
+  return task.builtin !== 'job_mail_sync' || task.enabled;
+}
 
 /** Editable state of the task dialog. Dates/times are local `YYYY-MM-DD` / `HH:MM`. */
 export interface TaskForm {
   name: string;
   type: TaskType;
-  /** A preset number of days, or 'custom'. */
-  lookback: string;
-  customLookback: number;
+  /** Job Mail & Interview Sync: the first run reads the last N days. */
+  lookbackDays: number;
   syncCalendar: boolean;
   prompt: string;
   /** Prompt tasks: give the model the user's Profile. */
@@ -65,8 +87,7 @@ export function defaultForm(prompt: string, model: ModelRef | null, useProfile =
   return {
     name: '',
     type: 'prompt',
-    lookback: '7',
-    customLookback: 60,
+    lookbackDays: DEFAULT_LOOKBACK_DAYS,
     syncCalendar: true,
     prompt,
     useProfile,
@@ -84,14 +105,23 @@ export function defaultForm(prompt: string, model: ModelRef | null, useProfile =
   };
 }
 
+/** Setting up Job Mail & Interview Sync: hourly from now, last 30 days first. */
+export function jobMailSyncForm(model: ModelRef | null): TaskForm {
+  return {
+    ...defaultForm('', model),
+    type: 'job_applications',
+    repeat: 'interval',
+    intervalEvery: 1,
+    intervalUnit: 'hours',
+  };
+}
+
 export function formFromTask(task: ScheduledTask): TaskForm {
   const form = defaultForm(task.prompt, task.model, task.useProfile);
   form.name = task.name;
   if (task.kind.type === 'job_applications') {
-    const days = task.kind.lookbackDays;
     form.type = 'job_applications';
-    form.lookback = LOOKBACK_PRESETS.includes(days) ? String(days) : 'custom';
-    form.customLookback = days;
+    form.lookbackDays = task.kind.lookbackDays;
     form.syncCalendar = task.kind.syncCalendar;
   }
   form.startDate = task.startDate;
@@ -132,7 +162,7 @@ export function formFromTask(task: ScheduledTask): TaskForm {
 
 function toKind(form: TaskForm): TaskKind | string {
   if (form.type === 'prompt') return { type: 'prompt' };
-  const days = form.lookback === 'custom' ? form.customLookback : Number(form.lookback);
+  const days = form.lookbackDays;
   if (!Number.isInteger(days) || days < 1 || days > MAX_LOOKBACK_DAYS) {
     return `Choose a lookback of 1 to ${MAX_LOOKBACK_DAYS} days.`;
   }

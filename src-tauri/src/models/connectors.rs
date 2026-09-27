@@ -184,40 +184,14 @@ pub struct ConnectorStatus {
     pub account_email: Option<String>,
     pub account_name: Option<String>,
     pub permissions: Vec<PermissionView>,
-    /// Mail connectors: synchronize while ReMa runs.
-    pub background_sync: Option<bool>,
     pub last_sync_started_at: Option<i64>,
+    /// The last successful use by "Job Mail & Interview Sync" (mail) or its
+    /// calendar step (calendars).
     pub last_sync_at: Option<i64>,
-    pub next_sync_at: Option<i64>,
     /// A short user-readable explanation for the current state.
     pub message: Option<String>,
     /// Technical details for "Show details" (no secrets).
     pub detail: Option<String>,
-}
-
-/// What happens when an email confirms an interview.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "snake_case")]
-pub enum InterviewMode {
-    /// Propose the event; the user adds it (default).
-    Ask,
-    /// Add it when the confirmation is unambiguous and the time is free.
-    Auto,
-}
-
-text_enum!(InterviewMode {
-    Ask => "ask",
-    Auto => "auto",
-});
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct ConnectorPreferences {
-    pub interview_mode: InterviewMode,
-    /// Minutes between background syncs (5–1440).
-    pub sync_interval_minutes: u32,
-    /// Free time required before and after an interview (0–120 minutes).
-    pub prep_buffer_minutes: u32,
 }
 
 /// Explicit background execution options. Nothing runs once ReMa quits.
@@ -236,7 +210,6 @@ pub struct BackgroundSettings {
 #[serde(rename_all = "camelCase")]
 pub struct ConnectorsOverview {
     pub connectors: Vec<ConnectorStatus>,
-    pub preferences: ConnectorPreferences,
     pub background: BackgroundSettings,
 }
 

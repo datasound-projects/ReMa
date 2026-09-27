@@ -21,7 +21,8 @@ export function useScrollIntoFocus(ref: RefObject<HTMLElement | null>, focus: bo
     const tick = () => {
       if (stopped || performance.now() > deadline) return;
       const top = el.getBoundingClientRect().top;
-      if (Math.abs(top - last) > 1) {
+      // The first frame always scrolls: the page may already be settled.
+      if (Number.isNaN(last) || Math.abs(top - last) > 1) {
         el.scrollIntoView({ block: 'start' });
         stableFrames = 0;
       } else {

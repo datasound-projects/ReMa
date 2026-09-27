@@ -31,12 +31,10 @@ pub const APP_COMMANDS: &[&str] = &[
     "connect_connector",
     "cancel_connector_sign_in",
     "disconnect_connector",
-    "sync_connector",
-    "set_connector_background_sync",
-    "set_connector_preferences",
     "set_background_settings",
     // Applications tracker & notifications
     "get_applications",
+    "get_calendar",
     "get_application",
     "set_application_status",
     "add_interview_to_calendar",

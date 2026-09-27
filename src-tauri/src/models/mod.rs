@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod analytics;
 pub mod browser;
+pub mod calendar;
 pub mod chat;
 pub mod connectors;
 pub mod jobs;

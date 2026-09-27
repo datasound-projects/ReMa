@@ -1,16 +1,17 @@
 //! Keeps the connected calendar in step with confirmed interviews. Safe to
 //! run any number of times.
 //!
-//! Per confirmed, upcoming interview:
+//! Per confirmed, upcoming interview (never for a request to pick a time):
+//! - Without an event: the calendar is checked for the interview's
+//!   interval (plus the optional preparation buffer). A conflict is flagged
+//!   on the interview, the user is notified and nothing is written; the
+//!   application stays "Interview confirmed". Otherwise the event is created
+//!   ("Interview — Company — Role").
 //! - An event ReMa already manages is updated when the interview changes
 //!   (reschedule) — unless the new time conflicts, which is reported instead
 //!   of moved. Cancelled interviews keep their event, renamed "Cancelled: …"
 //!   and marked free. Events the user deleted are not recreated unless the
 //!   interview itself changed.
-//! - Without an event: the calendar is checked (with the preparation buffer).
-//!   A conflict is reported and nothing is written. Otherwise, in "Ask
-//!   before adding" mode the event is proposed to the user; in automatic mode
-//!   it is created when the confirmation was classified with high confidence.
 //! - Never twice: the stored event id, then the event's private interview
 //!   property, then the interview fingerprint (company, role, start and
 //!   conversation) are checked before anything is created.
@@ -19,22 +20,27 @@ use crate::{
     connectors::calendar::{find_conflicts, CalendarProvider, EventDraft},
     db::jobs::{self as repo, ApplicationRecord, InterviewRecord, InterviewState, TimelineRecord},
     error::{AppError, AppResult},
+    jobs::{
+        applications::interview_time,
+        extract::MAJOR_CONFIDENCE,
+        interviews::{calendar_zone, zone_of},
+    },
     models::{
-        connectors::{InterviewMode, ProviderId},
+        connectors::ProviderId,
         jobs::{CalendarItem, CalendarOutcome, CalendarState, ConflictingEvent, UpdateSource},
     },
     services::notifications::{self, Notice},
     state::AppState,
 };
 
-/// Automatic creation needs at least this classifier confidence.
-pub const AUTO_MIN_CONFIDENCE: f64 = 0.85;
+/// Automatic creation needs the confidence that confirmed the interview.
+pub const AUTO_MIN_CONFIDENCE: f64 = MAJOR_CONFIDENCE;
 
 /// How the calendar step runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CalendarPolicy {
-    pub mode: InterviewMode,
-    /// Preparation time required before and after (ms).
+    /// Preparation time required before and after (ms); 0 checks exactly
+    /// the interview's interval.
     pub buffer_ms: i64,
 }
 
@@ -70,21 +76,34 @@ pub fn event_draft(interview: &InterviewRecord, app: &ApplicationRecord) -> Opti
         lines.push("This interview was cancelled.".to_string());
         lines.push(String::new());
     }
-    if let Some(role) = &app.role {
-        lines.push(format!("Application: {role}"));
-    }
     lines.push(format!("Company: {}", app.company));
+    if let Some(role) = &app.role {
+        lines.push(format!("Role: {role}"));
+    }
+    lines.push(format!(
+        "Time: {}",
+        interview_time(start_at, interview.timezone.as_deref())
+    ));
     if let Some(kind) = &interview.interview_type {
         lines.push(format!("Interview type: {kind}"));
     }
     if !interview.participants.is_empty() {
-        lines.push(format!("Recruiter: {}", interview.participants.join(", ")));
+        lines.push(format!(
+            "Interviewer: {}",
+            interview.participants.join(", ")
+        ));
+    }
+    if let Some(location) = &interview.location {
+        lines.push(format!("Location: {location}"));
     }
     if let Some(url) = &interview.meeting_url {
         lines.push(format!("Meeting: {url}"));
     }
     lines.push(String::new());
-    lines.push("Source: ReMa job application tracker".into());
+    lines.push(format!(
+        "Source: ReMa Applications (application #{})",
+        app.id
+    ));
     Some(EventDraft {
         interview_id: interview.id,
         summary: if cancelled {
@@ -99,7 +118,7 @@ pub fn event_draft(interview: &InterviewRecord, app: &ApplicationRecord) -> Opti
             .or_else(|| interview.meeting_url.clone()),
         start_at,
         end_at,
-        timezone: interview.timezone.clone().unwrap_or_else(|| "UTC".into()),
+        timezone: calendar_zone(interview.timezone.as_deref()),
         cancelled,
     })
 }
@@ -121,20 +140,20 @@ fn item(
     }
 }
 
-/// "Thursday 14:00" in the interview's own time zone.
+/// "Thursday 29 Sep 10:00 CEST" in the interview's own time zone.
 pub fn when(start_at: i64, timezone: Option<&str>) -> String {
-    let tz = timezone
-        .and_then(|t| jiff::tz::TimeZone::get(t).ok())
-        .unwrap_or(jiff::tz::TimeZone::UTC);
-    jiff::Timestamp::from_millisecond(start_at)
-        .map(|t| t.to_zoned(tz).strftime("%A %d %b %H:%M").to_string())
-        .unwrap_or_default()
+    let tz = zone_of(timezone);
+    let day = jiff::Timestamp::from_millisecond(start_at)
+        .map(|t| t.to_zoned(tz).strftime("%A").to_string())
+        .unwrap_or_default();
+    format!(
+        "{day} {}",
+        interview_time(start_at, timezone).replace(" at ", " ")
+    )
 }
 
 fn describe_conflicts(conflicts: &[ConflictingEvent], timezone: Option<&str>) -> String {
-    let tz = timezone
-        .and_then(|t| jiff::tz::TimeZone::get(t).ok())
-        .unwrap_or(jiff::tz::TimeZone::UTC);
+    let tz = zone_of(timezone);
     let time = |ms: i64| {
         jiff::Timestamp::from_millisecond(ms)
             .map(|t| t.to_zoned(tz.clone()).strftime("%H:%M").to_string())
@@ -148,28 +167,39 @@ fn describe_conflicts(conflicts: &[ConflictingEvent], timezone: Option<&str>) ->
         .join(", ")
 }
 
-/// Existing events overlapping the interview (plus buffer).
+/// Existing events overlapping the interview (plus buffer) in every
+/// connected calendar: a meeting in Outlook blocks the time as much as one
+/// in Google Calendar. A calendar that cannot be read fails the check (the
+/// time is not known to be free).
 pub async fn conflicts_for(
-    api: &dyn CalendarProvider,
+    calendars: &[&dyn CalendarProvider],
     interview: &InterviewRecord,
     start_at: i64,
     end_at: i64,
     buffer_ms: i64,
 ) -> AppResult<Vec<ConflictingEvent>> {
-    let events = api
-        .list_events(start_at - buffer_ms, end_at + buffer_ms)
-        .await?;
-    Ok(
-        find_conflicts(&events, start_at, end_at, interview.id, buffer_ms)
-            .into_iter()
-            .filter(|e| Some(&e.id) != interview.calendar_event_id.as_ref())
-            .map(|e| ConflictingEvent {
-                title: e.title,
-                start_at: e.start_at.unwrap_or_default(),
-                end_at: e.end_at.unwrap_or_default(),
-            })
-            .collect(),
-    )
+    let mut conflicts = Vec::new();
+    for api in calendars {
+        let own_event = interview
+            .calendar_event_id
+            .as_ref()
+            .filter(|_| interview.calendar_provider == Some(api.provider()));
+        let events = api
+            .list_events(start_at - buffer_ms, end_at + buffer_ms)
+            .await?;
+        conflicts.extend(
+            find_conflicts(&events, start_at, end_at, interview.id, buffer_ms)
+                .into_iter()
+                .filter(|e| Some(&e.id) != own_event)
+                .map(|e| ConflictingEvent {
+                    title: e.title,
+                    start_at: e.start_at.unwrap_or_default(),
+                    end_at: e.end_at.unwrap_or_default(),
+                }),
+        );
+    }
+    conflicts.sort_by_key(|c| c.start_at);
+    Ok(conflicts)
 }
 
 fn save_with_history(
@@ -217,10 +247,13 @@ fn save_with_history(
     })
 }
 
-/// Synchronizes one interview with a calendar and records the result.
+/// Synchronizes one interview with a calendar (`api`, where its event is or
+/// goes) and records the result. Conflicts are looked up in every connected
+/// calendar (`calendars`, which includes `api`).
 pub async fn sync_interview(
     state: &AppState,
     api: &dyn CalendarProvider,
+    calendars: &[&dyn CalendarProvider],
     policy: CalendarPolicy,
     interview: &InterviewRecord,
     app: &ApplicationRecord,
@@ -267,10 +300,16 @@ pub async fn sync_interview(
     // Checked whenever an event may be written: a changed interview, or one
     // without an event yet (busy times can appear between runs).
     if !cancelled && (!unchanged || record.calendar_event_id.is_none()) {
-        result.conflicts =
-            conflicts_for(api, &record, draft.start_at, draft.end_at, policy.buffer_ms).await?;
+        result.conflicts = conflicts_for(
+            calendars,
+            &record,
+            draft.start_at,
+            draft.end_at,
+            policy.buffer_ms,
+        )
+        .await?;
     }
-    let when_text = when(draft.start_at, Some(&draft.timezone));
+    let when_text = when(draft.start_at, record.timezone.as_deref());
     let role = app.role.clone().unwrap_or_default();
     let heading = if role.is_empty() {
         app.company.clone()
@@ -305,7 +344,7 @@ pub async fn sync_interview(
                         title: "Interview rescheduled — conflict".into(),
                         body: format!(
                             "{heading}\n{when_text}\nConflict detected with: {}\nThe calendar event was not moved.",
-                            describe_conflicts(&result.conflicts, Some(&draft.timezone))
+                            describe_conflicts(&result.conflicts, record.timezone.as_deref())
                         ),
                         application_id: Some(app.id),
                         interview_id: Some(record.id),
@@ -364,7 +403,7 @@ pub async fn sync_interview(
                             title: "Interview confirmed — conflict".into(),
                             body: format!(
                                 "{heading}\n{when_text}\nConflict detected with: {}",
-                                describe_conflicts(&result.conflicts, Some(&draft.timezone))
+                                describe_conflicts(&result.conflicts, record.timezone.as_deref())
                             ),
                             application_id: Some(app.id),
                             interview_id: Some(record.id),
@@ -373,9 +412,7 @@ pub async fn sync_interview(
                     );
                     result.note = Some("Conflicts with existing events; nothing was added.".into());
                     (CalendarOutcome::Conflict, None, None)
-                } else if policy.mode == InterviewMode::Auto
-                    && record.confidence.unwrap_or(0.0) >= AUTO_MIN_CONFIDENCE
-                {
+                } else if record.confidence.unwrap_or(0.0) >= AUTO_MIN_CONFIDENCE {
                     record.calendar_event_id = Some(api.create_event(&draft).await?);
                     record.calendar_provider = Some(provider);
                     record.calendar_state = CalendarState::Created;
@@ -400,7 +437,7 @@ pub async fn sync_interview(
                         Some(format!("Interview added to {calendar}")),
                     )
                 } else {
-                    // Ask before adding (the default), or not confident enough.
+                    // Not confident enough to add it without the user.
                     let first_proposal =
                         record.calendar_state != CalendarState::Proposed || !unchanged;
                     record.calendar_state = CalendarState::Proposed;
@@ -443,11 +480,13 @@ pub async fn sync_interview(
     Ok(result)
 }
 
-/// The user adds a proposed (or conflicting) interview to the calendar.
-/// Conflicts are checked again; `allow_conflict` must confirm them.
+/// The user adds a proposed (or conflicting) interview to the calendar
+/// `api`. Conflicts are checked again in every connected calendar
+/// (`calendars`); `allow_conflict` must confirm them.
 pub async fn add_to_calendar(
     state: &AppState,
     api: &dyn CalendarProvider,
+    calendars: &[&dyn CalendarProvider],
     interview_id: i64,
     allow_conflict: bool,
     buffer_ms: i64,
@@ -471,14 +510,15 @@ pub async fn add_to_calendar(
     }
     let provider = api.provider();
     let calendar = calendar_name(provider);
-    let conflicts = conflicts_for(api, &record, draft.start_at, draft.end_at, buffer_ms).await?;
+    let conflicts =
+        conflicts_for(calendars, &record, draft.start_at, draft.end_at, buffer_ms).await?;
     if !conflicts.is_empty() && !allow_conflict {
         record.calendar_state = CalendarState::Conflict;
         record.conflicts = conflicts.clone();
         state.db.call(|c| repo::save_interview(c, &record))?;
         return Err(AppError::validation(format!(
             "This time conflicts with {}. Add it anyway?",
-            describe_conflicts(&conflicts, Some(&draft.timezone))
+            describe_conflicts(&conflicts, record.timezone.as_deref())
         )));
     }
     // Recover or reuse an existing event instead of creating a second one.

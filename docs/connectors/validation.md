@@ -8,6 +8,12 @@ sign-ins against Google and Microsoft were **not** performed; everything
 below ran against local stand-ins that follow the providers' documented
 request and response formats.
 
+> This report covers the connectors change. The later Job Mail & Interview
+> Sync change replaced per-connector background sync, **Sync now**, the ask
+> mode and the preparation buffer described below (see
+> [../applications/implementation.md](../applications/implementation.md));
+> its validation is in [../applications/validation.md](../applications/validation.md).
+
 ## 1. Automated checks
 
 Rust 1.94.1 and 1.98.1 (the CI's stable) gave the same results.

@@ -361,14 +361,22 @@ pub fn with_agents(
     Ok(system)
 }
 
-/// Appends the Profile Context to a system prompt when the user turned it
-/// on. Every provider receives the same text.
-pub fn with_profile(state: &AppState, mut system: String, use_profile: bool) -> AppResult<String> {
+/// Appends the Profile context to a system prompt when the user turned it
+/// on: rebuilt from the current Profile for every request, plus excerpts of
+/// documents only when `request` (the user's message) needs them. With
+/// Profile off nothing about the Profile is added. Every provider receives
+/// the same text.
+pub fn with_profile(
+    state: &AppState,
+    mut system: String,
+    use_profile: bool,
+    request: &str,
+) -> AppResult<String> {
     if use_profile {
         match profile_context::load(state)? {
             Some(context) => {
                 system.push_str("\n\n");
-                system.push_str(&context.prompt);
+                system.push_str(&context.prompt(request));
             }
             None => system.push_str(
                 "\n\nThe user turned on their ReMa Profile, but it is empty. If personal \
@@ -647,7 +655,13 @@ async fn search_then_answer(
             progress.step(ToolStatus::Completed, &retrieval_summary(&found), None);
             on_delta(&render::listings_table(&found));
             let system = with_agents(state, assessment_prompt(now_ms()), &conversation.agent_ids)?;
-            let system = with_profile(state, system, conversation.profile_context)?;
+            let latest = turns
+                .iter()
+                .rev()
+                .find(|t| t.role == MessageRole::User)
+                .map(|t| t.content.clone())
+                .unwrap_or_default();
+            let system = with_profile(state, system, conversation.profile_context, &latest)?;
             let request = assessment_request(
                 system,
                 turns,
@@ -951,7 +965,13 @@ async fn generate(
             system_prompt(now_ms(), hosted_search || web_tools),
             &conversation.agent_ids,
         )?;
-        let mut system = with_profile(state, system, conversation.profile_context)?;
+        let latest = turns
+            .iter()
+            .rev()
+            .find(|t| t.role == MessageRole::User)
+            .map(|t| t.content.as_str())
+            .unwrap_or_default();
+        let mut system = with_profile(state, system, conversation.profile_context, latest)?;
         if has_mcp {
             system.push_str(
                 "\n\nTools from the user's MCP servers are available. Use them when they help \
@@ -1150,7 +1170,10 @@ mod tests {
         assert!(on.conversation.profile_context);
         let system = system_of(1);
         assert!(system.contains("<user_profile>"), "{system}");
-        assert!(system.contains("Skills: Kubernetes"));
+        assert!(
+            system.contains("skills:\n- Kubernetes [custom]"),
+            "{system}"
+        );
         assert!(!system.contains("ana@example.com"));
 
         // Retrying keeps the conversation's choice; turning it off stops it.
@@ -1164,6 +1187,51 @@ mod tests {
             .unwrap();
         wait_until_done(&state, again.assistant_message.id).await;
         assert!(!system_of(3).contains("user_profile"));
+    }
+
+    #[tokio::test]
+    async fn the_next_message_uses_the_edited_profile() {
+        let (state, _, llm) = setup(FakeLanguageModel::replying(&["ok"])).await;
+        let save = |location: &str| {
+            let mut profile = crate::models::profile::Profile {
+                first_name: "Ana".into(),
+                ..Default::default()
+            };
+            profile
+                .custom_fields
+                .push(crate::models::profile::CustomField {
+                    label: "Preferred location".into(),
+                    kind: crate::models::profile::CustomFieldKind::Text,
+                    value: location.into(),
+                    document_id: None,
+                });
+            crate::services::profile::save(&state, profile).unwrap();
+        };
+        let system_of = |i: usize| {
+            llm.requests.lock().unwrap()[i]
+                .1
+                .system
+                .clone()
+                .unwrap_or_default()
+        };
+        save("Vienna");
+        let mut input = send(None, "Where should I apply?");
+        input.use_profile = true;
+        let first = send_message(&state, input).await.unwrap();
+        wait_until_done(&state, first.assistant_message.id).await;
+        assert!(system_of(0).contains("Preferred location: Vienna [custom]"));
+
+        save("Zurich, remote preferred");
+        let mut input = send(Some(first.conversation.id), "And now?");
+        input.use_profile = true;
+        let second = send_message(&state, input).await.unwrap();
+        wait_until_done(&state, second.assistant_message.id).await;
+        let system = system_of(1);
+        assert!(
+            system.contains("Preferred location: Zurich, remote preferred [custom]"),
+            "{system}"
+        );
+        assert!(!system.contains("Vienna"));
     }
 
     #[tokio::test]
@@ -1229,21 +1297,11 @@ mod tests {
             .call(|c| {
                 crate::db::jobs::insert_application(
                     c,
-                    &crate::db::jobs::ApplicationRecord {
-                        id: 0,
-                        company: "Acme".into(),
-                        company_key: "acme".into(),
-                        role: None,
-                        role_key: None,
-                        reference: None,
-                        sender_domain: None,
-                        status: crate::models::jobs::ApplicationStatus::InProcess,
-                        requires_action: false,
-                        next_action: None,
-                        last_update_at: now,
-                        created_at: now,
-                        updated_at: now,
-                    },
+                    &crate::db::jobs::ApplicationRecord::new(
+                        "Acme",
+                        crate::models::jobs::ApplicationStatus::InProcess,
+                        now,
+                    ),
                 )
             })
             .unwrap();
@@ -2033,13 +2091,16 @@ mod tests {
         let sent = send_message(&state, input).await.unwrap();
         wait_until_done(&state, sent.assistant_message.id).await;
         let system = llm.requests.lock().unwrap()[0].1.system.clone().unwrap();
-        assert!(system.contains("<source type=\"cv\" name=\"Ana CV\" primary=\"true\">"));
+        assert!(
+            system.contains("- [cv1] primary CV \"Ana CV\" (precedence 2)"),
+            "{system}"
+        );
         assert!(system.contains("Kubernetes platform lead"));
         assert!(
-            !system.contains("custom_profile"),
-            "no empty Custom Profile section"
+            !system.contains("[custom]"),
+            "no empty Custom Profile source"
         );
-        assert!(!system.contains("type=\"credentials\""));
+        assert!(!system.contains("[credentials]"));
 
         // Off again: nothing from the Profile.
         let mut off = send(Some(sent.conversation.id), "And now?");

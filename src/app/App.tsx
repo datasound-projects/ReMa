@@ -13,6 +13,7 @@ import { useSidebar } from '../hooks/useSidebar';
 import { AgentsPage } from '../pages/AgentsPage';
 import { ApplicationsPage } from '../pages/ApplicationsPage';
 import { ChatPage } from '../pages/ChatPage';
+import { PortfolioStudioPage } from '../pages/PortfolioStudioPage';
 import { ProfilePage } from '../pages/ProfilePage';
 import { ScheduledTasksPage } from '../pages/ScheduledTasksPage';
 import { SettingsPage } from '../pages/SettingsPage';
@@ -25,10 +26,15 @@ export function App() {
   // "Chat" in the sidebar returns to the conversation that was open last.
   const [lastConversationId, setLastConversationId] = useState<number | null>(null);
   // "Profile" returns to the part of the Profile that was open last
-  // (Documents & Credentials the first time).
+  // (Documents & Credentials the first time); "Portfolio Studio" to the CV
+  // that was open last.
   const [lastProfile, setLastProfile] = useState<View & { page: 'profile' }>({
     page: 'profile',
     section: 'documents',
+  });
+  const [lastPortfolio, setLastPortfolio] = useState<View & { page: 'portfolio' }>({
+    page: 'portfolio',
+    portfolioId: null,
   });
   const conversations = dataOr(useConversations().state, []);
   const sidebar = useSidebar();
@@ -37,12 +43,14 @@ export function App() {
     setView(next);
     if (next.page === 'chat') setLastConversationId(next.conversationId);
     if (next.page === 'profile') setLastProfile(next);
+    if (next.page === 'portfolio') setLastPortfolio(next);
   }, []);
   const navigation = useMemo(() => ({ view, navigate }), [view, navigate]);
 
   const selectPage = (page: PageId) => {
     if (page === 'chat') navigate({ page: 'chat', conversationId: lastConversationId });
     else if (page === 'profile') navigate(lastProfile);
+    else if (page === 'portfolio') navigate(lastPortfolio);
     else navigate({ page });
   };
 
@@ -94,12 +102,11 @@ export function App() {
         {view.page === 'chat' && (
           <ChatPage conversationId={view.conversationId} initialAgentIds={view.agentIds} />
         )}
-        {view.page === 'applications' && <ApplicationsPage applicationId={view.applicationId ?? null} />}
         {view.page === 'agents' && <AgentsPage />}
         {view.page === 'tasks' && <ScheduledTasksPage />}
-        {view.page === 'profile' && (
-          <ProfilePage section={view.section ?? 'documents'} portfolioId={view.portfolioId ?? null} />
-        )}
+        {view.page === 'profile' && <ProfilePage section={view.section ?? 'documents'} />}
+        {view.page === 'portfolio' && <PortfolioStudioPage portfolioId={view.portfolioId ?? null} />}
+        {view.page === 'applications' && <ApplicationsPage applicationId={view.applicationId ?? null} />}
         {view.page === 'settings' && <SettingsPage focus={view.focus} />}
       </AppShell>
       {/* Above the app, which loads underneath; plays once per launch. */}

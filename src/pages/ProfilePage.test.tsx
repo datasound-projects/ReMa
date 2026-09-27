@@ -68,10 +68,10 @@ const credential: ProfileCredential = {
 
 function renderProfile(section: 'documents' | 'custom' = 'documents') {
   const navigate = vi.fn<(view: View) => void>();
-  const view: View = { page: 'profile', section, portfolioId: null };
+  const view: View = { page: 'profile', section };
   const utils = render(
     <NavigationContext value={{ view, navigate }}>
-      <ProfilePage section={section} portfolioId={null} />
+      <ProfilePage section={section} />
     </NavigationContext>,
   );
   return { navigate, ...utils };
@@ -91,12 +91,18 @@ beforeEach(async () => {
 });
 
 describe('Profile', () => {
-  it('opens on Documents & Credentials with three independent options', async () => {
+  it('opens on Documents & Credentials; Portfolio Studio is no longer part of the Profile', async () => {
     renderProfile();
     const tabs = screen.getAllByRole('tab');
-    expect(tabs.map((t) => t.textContent)).toEqual(['Documents & Credentials', 'Custom Profile', 'Portfolio Studio']);
+    expect(tabs.map((t) => t.textContent)).toEqual(['Documents & Credentials', 'Custom Profile']);
     expect(tabs[0]?.getAttribute('aria-selected')).toBe('true');
-    expect(screen.getByText('Your career context for ReMa.')).toBeTruthy();
+    expect(screen.getByText(/Your career context for ReMa\./)).toBeTruthy();
+    // One rule for how Chat uses the Profile, stated on the page.
+    expect(
+      screen.getByText(/Custom Profile is treated as your current information and takes priority when it conflicts/),
+    ).toBeTruthy();
+    expect(screen.getByText(/Historical and professional source material/)).toBeTruthy();
+    expect(screen.queryByText('Portfolio Studio')).toBeNull();
     expect(await screen.findByText('Resume 2026')).toBeTruthy();
     expect(screen.getByText('Primary')).toBeTruthy();
   });
@@ -157,12 +163,13 @@ describe('Profile', () => {
   it('switching parts goes through navigation only', async () => {
     const { navigate } = renderProfile();
     fireEvent.click(screen.getByRole('tab', { name: 'Custom Profile' }));
-    expect(navigate).toHaveBeenCalledWith({ page: 'profile', section: 'custom', portfolioId: null });
+    expect(navigate).toHaveBeenCalledWith({ page: 'profile', section: 'custom' });
   });
 
   it('Custom Profile is optional and reads a CV only when asked', async () => {
     renderProfile('custom');
     expect(await screen.findByText(/Optional\. Fill in only what helps/)).toBeTruthy();
+    expect(screen.getByText(/Your current career context: goals, preferences and facts/)).toBeTruthy();
     expect(mocks.importProfileDocument).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: /Fill from a CV/ }));
     fireEvent.click(await screen.findByRole('menuitem', { name: /Resume 2026/ }));

@@ -26,6 +26,12 @@ export function formatDateTime(ms: number, now = new Date()): string {
   return `${(sameYear ? dayMonth : dayMonthYear).format(date)} ${clock}`;
 }
 
+/** "27 Sep", or "3 Jan 2027" in another year. */
+export function formatDate(ms: number, now = new Date()): string {
+  const date = new Date(ms);
+  return (date.getFullYear() === now.getFullYear() ? dayMonth : dayMonthYear).format(date);
+}
+
 /** A local `HH:MM` time in the user's clock format ("08:00" or "8:00 AM"). */
 export function formatClock(hhmm: string): string {
   const [hours = 0, minutes = 0] = hhmm.split(':').map(Number);
@@ -88,19 +94,24 @@ export function modelName(catalog: ModelCatalog | null, model: ModelRef): string
 }
 
 export const APPLICATION_STATUS_LABELS: Record<ApplicationStatus, string> = {
-  confirmed: 'Application received',
-  in_process: 'In process',
+  confirmed: 'Application confirmed',
+  in_process: 'In progress',
   needs_action: 'Action required',
-  upcoming_interview: 'Interview',
+  upcoming_interview: 'Interview confirmed',
   rejected: 'Rejected',
   offer: 'Offer',
 };
 
-/** "Job applications · 7 days · Calendar sync". */
+/** "Job Mail & Interview Sync · last 30 days · Calendar". */
 export function describeTaskKind(kind: TaskKind): string {
   if (kind.type === 'prompt') return 'Prompt';
-  const days = kind.lookbackDays === 1 ? '1 day' : `${kind.lookbackDays} days`;
-  return ['Job Application Mail Monitor', days, kind.syncCalendar && 'Calendar'].filter(Boolean).join(' · ');
+  return `Job Mail & Interview Sync · ${describeJobSettings(kind)}`;
+}
+
+/** "last 30 days · Calendar": the settings of Job Mail & Interview Sync. */
+export function describeJobSettings(kind: Extract<TaskKind, { type: 'job_applications' }>): string {
+  const days = kind.lookbackDays === 1 ? 'last day' : `last ${kind.lookbackDays} days`;
+  return kind.syncCalendar ? `${days} · Calendar` : days;
 }
 
 /** "14:30–15:30" in `timezone` (local time without one). */

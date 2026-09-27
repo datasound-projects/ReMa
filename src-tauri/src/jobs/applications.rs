@@ -10,7 +10,7 @@
 use rusqlite::Connection;
 
 use super::{
-    extract::{ClaimState, Extraction},
+    extract::{creates_application, ClaimState, Extraction},
     interviews::{InterviewCheck, VerifiedInterview},
 };
 use crate::{
@@ -19,7 +19,7 @@ use crate::{
     error::AppResult,
     models::{
         connectors::ProviderId,
-        jobs::{ApplicationStatus, UpdateSource},
+        jobs::{ApplicationStatus, CalendarState, EmailCategory, UpdateSource},
     },
 };
 
@@ -192,59 +192,108 @@ fn roles_compatible(a: &ApplicationRecord, role_key: Option<&str>) -> bool {
     }
 }
 
-/// Finds the application an email belongs to.
+/// Two different job ids are two different applications.
+fn references_conflict(a: &ApplicationRecord, reference: Option<&str>) -> bool {
+    matches!((a.reference.as_deref(), reference), (Some(x), Some(y)) if x != y)
+}
+
+const DAY_MS: i64 = 86_400_000;
+/// A new confirmation this long after the last news is a new application.
+const STALE_MS: i64 = 180 * DAY_MS;
+
+/// A fresh application confirmation for an application that was rejected,
+/// or went quiet for months, is a new application for the same job title.
+fn reapplication(app: &ApplicationRecord, meta: &MailMessage, extraction: &Extraction) -> bool {
+    extraction.category == EmailCategory::ApplicationConfirmed
+        && meta.received_at > app.last_update_at
+        && (app.status == ApplicationStatus::Rejected
+            || meta.received_at - app.last_update_at > STALE_MS)
+}
+
+/// Where an email belongs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Match {
+    Existing(Box<ApplicationRecord>),
+    /// No known application: a new one if the email shows one exists.
+    New,
+    /// Several applications fit and the email does not say which: nothing
+    /// is changed.
+    Ambiguous(String),
+}
+
+/// Finds the application an email belongs to. Deterministic: the mail
+/// thread, then the model's suggestion (if company, role and job id agree),
+/// then the job id, then company and role, then the company's own email
+/// domain. Never by company name alone when that company has several
+/// applications.
 pub fn find_application(
     conn: &Connection,
     meta: &MailMessage,
     extraction: &Extraction,
-) -> AppResult<Option<ApplicationRecord>> {
+) -> AppResult<Match> {
     // 1. Same mail thread / conversation.
     if let Some(id) = repo::application_for_thread(conn, meta.provider(), &meta.thread_id)? {
-        return Ok(Some(repo::get_application(conn, id)?));
+        return Ok(Match::Existing(Box::new(repo::get_application(conn, id)?)));
     }
     let company = company_key(&extraction.company);
     let role = extraction.role.as_deref().map(role_key);
+    let reference = extraction.reference.as_deref().and_then(reference_key);
+    let fits = |a: &ApplicationRecord| {
+        roles_compatible(a, role.as_deref()) && !references_conflict(a, reference.as_deref())
+    };
+    let domain = meta.sender_domain().filter(|d| !is_shared_domain(d));
 
-    // 2. The model's suggestion, if the company agrees.
+    // 2. The model's suggestion.
     if let Some(id) = extraction.existing_application_id {
         if let Ok(app) = repo::get_application(conn, id) {
-            if app.company_key == company {
-                return Ok(Some(app));
+            if app.company_key == company && fits(&app) && !reapplication(&app, meta, extraction) {
+                return Ok(Match::Existing(Box::new(app)));
             }
         }
     }
-    // 3. Same reference number.
-    if let Some(reference) = extraction.reference.as_deref().and_then(reference_key) {
-        if let Some(app) = repo::applications_by_reference(conn, &reference)?
+    // 3. Same job id at the same company.
+    if let Some(reference) = &reference {
+        if let Some(app) = repo::applications_by_reference(conn, reference)?
             .into_iter()
-            .next()
+            .find(|a| a.company_key == company || (domain.is_some() && a.sender_domain == domain))
         {
-            return Ok(Some(app));
+            return Ok(Match::Existing(Box::new(app)));
         }
     }
-    // 4. Same company and compatible role.
-    let same_company = repo::applications_by_company(conn, &company)?;
-    if let Some(app) = same_company
+    // 4. Same company (else the company's own domain) with a fitting role.
+    let mut candidates: Vec<ApplicationRecord> = repo::applications_by_company(conn, &company)?
+        .into_iter()
+        .filter(|a| fits(a))
+        .collect();
+    if candidates.is_empty() {
+        if let Some(domain) = &domain {
+            candidates = repo::applications_by_domain(conn, domain)?
+                .into_iter()
+                .filter(|a| fits(a))
+                .collect();
+        }
+    }
+    let exact: Vec<&ApplicationRecord> = candidates
         .iter()
-        .find(|a| role.is_some() && a.role_key == role)
-        .or_else(|| {
-            same_company
-                .iter()
-                .find(|a| roles_compatible(a, role.as_deref()))
-        })
-    {
-        return Ok(Some(app.clone()));
-    }
-    // 5. The company's own email domain and compatible role.
-    if let Some(domain) = meta.sender_domain().filter(|d| !is_shared_domain(d)) {
-        if let Some(app) = repo::applications_by_domain(conn, &domain)?
-            .into_iter()
-            .find(|a| roles_compatible(a, role.as_deref()))
-        {
-            return Ok(Some(app));
-        }
-    }
-    Ok(None)
+        .filter(|a| role.is_some() && a.role_key == role)
+        .collect();
+    let pick: Vec<&ApplicationRecord> = if exact.is_empty() {
+        candidates.iter().collect()
+    } else {
+        exact
+    };
+    let roles: std::collections::HashSet<Option<&str>> =
+        pick.iter().map(|a| a.role_key.as_deref()).collect();
+    Ok(match pick.first() {
+        None => Match::New,
+        Some(_) if role.is_none() && roles.len() > 1 => Match::Ambiguous(format!(
+            "{} applications at {} could match and the email names no role",
+            pick.len(),
+            extraction.company
+        )),
+        Some(app) if reapplication(app, meta, extraction) => Match::New,
+        Some(app) => Match::Existing(Box::new((*app).clone())),
+    })
 }
 
 /// What applying an email changed.
@@ -278,20 +327,23 @@ fn effective_status(
                 status = ApplicationStatus::InProcess;
             }
         }
+        // A request for a time is never a confirmed interview.
         (Some(ClaimState::Proposed), _) => {
             status = ApplicationStatus::NeedsAction;
             requires_action = true;
-            next_action = next_action.or_else(|| Some("Reply to confirm an interview time".into()));
+            next_action = next_action
+                .or_else(|| Some("Choose an interview slot from the proposed times.".into()));
         }
         (_, Some(InterviewCheck::Upcoming(_))) => {
             status = ApplicationStatus::UpcomingInterview;
             requires_action = false;
             next_action = None;
         }
+        // Date, time or time zone missing or unclear: not confirmed.
         (_, Some(InterviewCheck::NeedsReview(reason))) => {
             status = ApplicationStatus::NeedsAction;
             requires_action = true;
-            next_action = Some(format!("Check the interview details: {reason}"));
+            next_action = Some(format!("Check the interview details: {reason}."));
         }
         (_, Some(InterviewCheck::Past(_))) if status == ApplicationStatus::UpcomingInterview => {
             status = ApplicationStatus::InProcess;
@@ -300,14 +352,17 @@ fn effective_status(
     }
     if status == ApplicationStatus::NeedsAction {
         requires_action = true;
-        next_action = next_action.or_else(|| Some("Check the latest email".into()));
+        next_action = next_action.or_else(|| Some("Check the latest email.".into()));
     }
     (status, requires_action, next_action)
 }
 
 /// Stores one validated email: application, timeline, thread link and
-/// interview. An email that implies no status (other job-related mail) only
-/// adds to an application it clearly belongs to; `Ok(None)` otherwise.
+/// interview. Only the newest email sets the status (history replayed in
+/// any order ends in the latest state). An email that implies no status
+/// (other job-related mail, a recruiter's note) only adds to an application
+/// it clearly belongs to; `Ok(None)` when there is none or it is unclear
+/// which one.
 pub fn apply(
     conn: &Connection,
     meta: &MailMessage,
@@ -318,14 +373,28 @@ pub fn apply(
     let provider = meta.provider();
     let domain = meta.sender_domain().filter(|d| !is_shared_domain(d));
     let reference = extraction.reference.as_deref().and_then(reference_key);
-    let existing = find_application(conn, meta, extraction)?;
+    let existing = match find_application(conn, meta, extraction)? {
+        Match::Existing(app) => Some(*app),
+        Match::New => None,
+        Match::Ambiguous(_) => return Ok(None),
+    };
+    let account = (!meta.account_id.is_empty()).then(|| meta.account_id.clone());
 
-    let Some(implied) = extraction.status else {
+    let implied = extraction.status.filter(|_| {
+        // A recruiter's note without a decision never starts tracking.
+        existing.is_some() || creates_application(extraction.category)
+    });
+    let Some(implied) = implied else {
         // Timeline only, never a new application.
-        let Some(app) = existing else {
+        let Some(mut app) = existing else {
             return Ok(None);
         };
         repo::link_thread(conn, provider, &meta.thread_id, app.id)?;
+        if meta.received_at > app.last_update_at {
+            app.last_update_at = meta.received_at;
+            app.updated_at = now;
+            repo::save_application(conn, &app)?;
+        }
         repo::add_timeline(
             conn,
             &TimelineRecord {
@@ -354,6 +423,9 @@ pub fn apply(
         }));
     };
     let (status, requires_action, next_action) = effective_status(implied, extraction, check);
+    let rejection_reason = (status == ApplicationStatus::Rejected)
+        .then(|| extraction.rejection_reason.clone())
+        .flatten();
 
     let (application_id, created, previous, current, newest) = match existing {
         Some(mut app) => {
@@ -366,36 +438,42 @@ pub fn apply(
             app.reference = app.reference.or(reference);
             app.sender_domain = app.sender_domain.or(domain);
             // Only the newest email decides the status.
-            let newest = meta.received_at >= app.last_update_at;
+            let newest = meta.received_at >= app.status_at;
             if newest {
                 app.status = status;
                 app.requires_action = requires_action;
                 app.next_action = next_action;
+                app.status_at = meta.received_at;
+                app.status_category = Some(extraction.category);
+                app.latest_update = extraction.latest_update.clone();
+                app.rejection_reason = rejection_reason;
+            }
+            if meta.received_at >= app.last_update_at {
                 app.last_update_at = meta.received_at;
+                app.mail_provider = Some(provider);
+                app.mail_account = account.or(app.mail_account);
             }
             app.updated_at = now;
             repo::save_application(conn, &app)?;
             (app.id, false, Some(previous), app.status, newest)
         }
         None => {
-            let id = repo::insert_application(
-                conn,
-                &ApplicationRecord {
-                    id: 0,
-                    company: extraction.company.clone(),
-                    company_key: company_key(&extraction.company),
-                    role: extraction.role.clone(),
-                    role_key: extraction.role.as_deref().map(role_key),
-                    reference,
-                    sender_domain: domain,
-                    status,
-                    requires_action,
-                    next_action,
-                    last_update_at: meta.received_at,
-                    created_at: now,
-                    updated_at: now,
-                },
-            )?;
+            let mut app = ApplicationRecord::new(&extraction.company, status, meta.received_at);
+            app.company_key = company_key(&extraction.company);
+            app.role = extraction.role.clone();
+            app.role_key = extraction.role.as_deref().map(role_key);
+            app.reference = reference;
+            app.sender_domain = domain;
+            app.requires_action = requires_action;
+            app.next_action = next_action;
+            app.created_at = now;
+            app.updated_at = now;
+            app.latest_update = extraction.latest_update.clone();
+            app.rejection_reason = rejection_reason;
+            app.status_category = Some(extraction.category);
+            app.mail_provider = Some(provider);
+            app.mail_account = account;
+            let id = repo::insert_application(conn, &app)?;
             (id, true, None, status, true)
         }
     };
@@ -428,8 +506,10 @@ pub fn apply(
             created_at: now,
         },
     )?;
-    let interview_id = match &extraction.interview {
-        Some(claim) => apply_interview(
+    // Interviews follow the newest email only: an older confirmation read
+    // later never brings back an interview that was moved or cancelled.
+    let interview_id = match (&extraction.interview, newest) {
+        (Some(claim), true) => apply_interview(
             conn,
             application_id,
             meta,
@@ -438,7 +518,7 @@ pub fn apply(
             extraction.confidence,
             now,
         )?,
-        None => None,
+        _ => None,
     };
     Ok(Some(Applied {
         application_id,
@@ -451,6 +531,87 @@ pub fn apply(
         status_changed: newest && previous != Some(current),
         interview_id,
     }))
+}
+
+/// "Sep 29 at 10:00 CEST" in the interview's own time zone. An IANA zone
+/// shows its abbreviation on that date; a stated abbreviation or offset
+/// shows as stated.
+pub fn interview_time(start_at: i64, timezone: Option<&str>) -> String {
+    let tz = super::interviews::zone_of(timezone);
+    let Ok(zoned) = jiff::Timestamp::from_millisecond(start_at).map(|t| t.to_zoned(tz)) else {
+        return String::new();
+    };
+    let zone = match timezone {
+        Some(label) if label.contains('/') => {
+            let abbreviation = zoned.strftime("%Z").to_string();
+            if abbreviation.is_empty() || abbreviation.starts_with(['+', '-']) {
+                format!("UTC{}", zoned.strftime("%:z"))
+            } else {
+                abbreviation
+            }
+        }
+        Some(label) => label.to_string(),
+        None => "UTC".to_string(),
+    };
+    format!("{} {zone}", zoned.strftime("%b %-d at %H:%M"))
+}
+
+/// The Status column: what the email that set the status was about.
+pub fn status_label(app: &ApplicationRecord) -> String {
+    match app.status_category {
+        Some(category) if super::extract::status_for(category) == Some(app.status) => {
+            match category {
+                EmailCategory::ApplicationUpdate => "In review".into(),
+                EmailCategory::RecruiterMessage => "Recruiter follow-up".into(),
+                other => other.label().into(),
+            }
+        }
+        _ => app.status.label().into(),
+    }
+}
+
+/// The last column of the Applications table: the latest update, what the
+/// user is asked to do, or the rejection reason. Built from stored facts
+/// only; never invented.
+pub fn latest_update_text(app: &ApplicationRecord, interview: Option<&InterviewRecord>) -> String {
+    let stored = app.latest_update.clone();
+    match app.status {
+        ApplicationStatus::UpcomingInterview => {
+            match interview.and_then(|i| Some((i, i.start_at?))) {
+                Some((i, start)) => {
+                    let mut text = format!(
+                        "Interview confirmed for {}.",
+                        interview_time(start, i.timezone.as_deref())
+                    );
+                    if i.calendar_state == CalendarState::Conflict {
+                        text.push_str(" Calendar conflict: not added to your calendar.");
+                    }
+                    text
+                }
+                None => stored.unwrap_or_else(|| "Interview confirmed.".into()),
+            }
+        }
+        ApplicationStatus::Confirmed => {
+            "Application received successfully. No action required.".into()
+        }
+        ApplicationStatus::NeedsAction => app
+            .next_action
+            .clone()
+            .or(stored)
+            .unwrap_or_else(|| "Check the latest email.".into()),
+        ApplicationStatus::Offer => app
+            .next_action
+            .clone()
+            .or(stored)
+            .unwrap_or_else(|| "Offer received. Review and respond.".into()),
+        ApplicationStatus::InProcess => {
+            stored.unwrap_or_else(|| "Your application is in progress.".into())
+        }
+        ApplicationStatus::Rejected => app
+            .rejection_reason
+            .clone()
+            .unwrap_or_else(|| "No reason provided.".into()),
+    }
 }
 
 /// Identifies an interview: company, role, start and conversation.
@@ -654,9 +815,20 @@ pub fn settle_past_interviews(conn: &Connection, now: i64) -> AppResult<()> {
             .iter()
             .any(|i| i.state == InterviewState::Confirmed && i.end_at.is_some_and(|end| end > now));
         if !upcoming {
+            let last = repo::interviews_for_application(conn, app.id)?
+                .into_iter()
+                .filter(|i| i.state == InterviewState::Confirmed)
+                .filter_map(|i| Some((i.start_at?, i.timezone)))
+                .max_by_key(|(start, _)| *start);
             app.status = ApplicationStatus::InProcess;
             app.next_action = None;
             app.requires_action = false;
+            app.latest_update = last.map(|(start, tz)| {
+                format!(
+                    "Interview was scheduled for {}.",
+                    interview_time(start, tz.as_deref())
+                )
+            });
             app.updated_at = now;
             repo::save_application(conn, &app)?;
         }
@@ -667,7 +839,7 @@ pub fn settle_past_interviews(conn: &Connection, now: i64) -> AppResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{db::Database, jobs::extract::InterviewClaim, models::jobs::EmailCategory};
+    use crate::{db::Database, jobs::extract::InterviewClaim};
 
     fn meta(id: &str, thread: &str, from: &str, received_at: i64) -> MailMessage {
         MailMessage {
@@ -683,9 +855,9 @@ mod tests {
 
     fn category_for(status: ApplicationStatus) -> EmailCategory {
         match status {
-            ApplicationStatus::Confirmed => EmailCategory::ApplicationReceived,
+            ApplicationStatus::Confirmed => EmailCategory::ApplicationConfirmed,
             ApplicationStatus::InProcess => EmailCategory::ApplicationUpdate,
-            ApplicationStatus::NeedsAction => EmailCategory::ActionRequired,
+            ApplicationStatus::NeedsAction => EmailCategory::NeedsAction,
             ApplicationStatus::UpcomingInterview => EmailCategory::InterviewConfirmed,
             ApplicationStatus::Rejected => EmailCategory::Rejection,
             ApplicationStatus::Offer => EmailCategory::Offer,
@@ -703,6 +875,9 @@ mod tests {
             status: Some(status),
             requires_action: false,
             next_action: None,
+            latest_update: None,
+            rejection_reason: None,
+            rejection_quote: None,
             summary: None,
             existing_application_id: None,
             contacts: vec![],
@@ -860,7 +1035,7 @@ mod tests {
             assert_eq!(timeline[0].previous_status, Some(Confirmed));
             assert_eq!(
                 timeline[1].change,
-                "Application added: Application received"
+                "Application added: Application confirmed"
             );
             // The same email again adds nothing.
             applied(c, &meta("m2", "t1", "jobs@acme.io", 20), &reject, None, 3);

@@ -35,6 +35,7 @@ use crate::{
         },
         mail_monitor, providers,
         schedule::{self, Limits},
+        tasks,
     },
     state::AppState,
     time::now_ms,
@@ -356,6 +357,7 @@ async fn run_task(
                     assessment_prompt(started_at)
                 ),
                 task.use_profile,
+                &task.prompt,
             )?;
             let request = assessment_request(
                 system,
@@ -411,6 +413,7 @@ async fn run_task(
                         system_prompt(started_at, can_search_web(&endpoint))
                     ),
                     task.use_profile,
+                    &task.prompt,
                 )?),
                 turns: vec![Turn {
                     role: MessageRole::User,
@@ -444,6 +447,11 @@ async fn run_task(
             lookback_days,
             sync_calendar,
         } => {
+            // Only the built-in task reads mail; a mail task left from before
+            // it existed never runs.
+            if tasks::is_old_mail_task(task) {
+                return Err(AppError::validation(tasks::ONLY_BUILT_IN_READS_MAIL));
+            }
             let report = mail_monitor::run_task(
                 state,
                 RunModel {

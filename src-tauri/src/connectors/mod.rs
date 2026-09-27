@@ -36,7 +36,7 @@ use std::{
 };
 
 use serde_json::Value;
-use tokio::sync::Notify;
+
 use tokio_util::sync::CancellationToken;
 
 use self::{
@@ -48,8 +48,8 @@ use crate::{
     db::connectors::{self as repo, AccountRecord, AccountStatus, ConnectorRecord},
     error::{AppError, AppResult},
     models::connectors::{
-        Capability, ConnectorId, ConnectorKind, ConnectorPreferences, ConnectorState,
-        ConnectorStatus, ConnectorsOverview, PermissionView, ProviderId,
+        Capability, ConnectorId, ConnectorKind, ConnectorState, ConnectorStatus,
+        ConnectorsOverview, PermissionView, ProviderId,
     },
     oauth_loopback::Loopback,
     secrets::Credential,
@@ -96,8 +96,6 @@ pub struct ConnectorsContext {
     refresh_locks: Arc<[tokio::sync::Mutex<()>; 2]>,
     /// Running syncs (at most one per connector).
     pub(crate) syncs: Arc<Mutex<HashMap<ConnectorId, CancellationToken>>>,
-    /// Wakes the background sync worker.
-    pub(crate) wake: Arc<Notify>,
     pub(crate) shutdown: CancellationToken,
 }
 
@@ -112,7 +110,6 @@ impl ConnectorsContext {
             seq: Arc::default(),
             refresh_locks: Arc::new([tokio::sync::Mutex::new(()), tokio::sync::Mutex::new(())]),
             syncs: Arc::default(),
-            wake: Arc::default(),
             shutdown: CancellationToken::new(),
         }
     }
@@ -184,7 +181,7 @@ impl ConnectorsContext {
         self.syncs.lock().is_ok_and(|s| s.contains_key(&id))
     }
 
-    /// Stops the background worker and running syncs (app exit).
+    /// Stops running syncs (app exit).
     pub fn shutdown(&self) {
         self.shutdown.cancel();
         if let Ok(syncs) = self.syncs.lock() {
@@ -441,14 +438,15 @@ async fn finish_sign_in(
             if !record.enabled {
                 repo::set_enabled(&tx, *id, true, now)?;
             } else {
-                // Reconnected: clear the old error and sync soon.
-                repo::sync_finished(&tx, *id, now, None, Some(now))?;
+                // Reconnected: clear the old error. Connecting reads no
+                // mail (only "Job Mail & Interview Sync" does), so no sync
+                // is recorded either.
+                repo::clear_error(&tx, *id)?;
             }
         }
         tx.commit()?;
         Ok(())
     })?;
-    state.connectors.wake.notify_one();
     Ok(())
 }
 
@@ -476,38 +474,6 @@ pub async fn disconnect(state: &AppState, id: ConnectorId) -> AppResult<()> {
         tokens::revoke_connection(state, provider).await?;
         state.db.call(|c| repo::delete_account(c, provider))?;
     }
-    state.events.connectors_changed();
-    Ok(())
-}
-
-pub fn set_background_sync(state: &AppState, id: ConnectorId, on: bool) -> AppResult<()> {
-    if id.kind() != ConnectorKind::Mail {
-        return Err(AppError::validation(
-            "Background sync applies to mail connectors.",
-        ));
-    }
-    state.db.call(|c| {
-        repo::set_background_sync(c, id, on)?;
-        repo::schedule_sync(c, id, on.then(now_ms))
-    })?;
-    state.connectors.wake.notify_one();
-    state.events.connectors_changed();
-    Ok(())
-}
-
-pub fn set_preferences(state: &AppState, prefs: ConnectorPreferences) -> AppResult<()> {
-    if !(5..=1440).contains(&prefs.sync_interval_minutes) {
-        return Err(AppError::validation(
-            "Choose a sync interval between 5 minutes and 24 hours.",
-        ));
-    }
-    if prefs.prep_buffer_minutes > 120 {
-        return Err(AppError::validation(
-            "Choose a preparation buffer of at most 120 minutes.",
-        ));
-    }
-    state.db.call(|c| repo::save_preferences(c, &prefs))?;
-    state.connectors.wake.notify_one();
     state.events.connectors_changed();
     Ok(())
 }
@@ -558,14 +524,13 @@ pub async fn ready(state: &AppState, kind: ConnectorKind) -> Vec<ConnectorId> {
 
 /// Every connector with its state, for Settings.
 pub async fn overview(state: &AppState) -> AppResult<ConnectorsOverview> {
-    let (records, accounts, preferences) = state.db.call(|c| {
+    let (records, accounts) = state.db.call(|c| {
         Ok((
             repo::connectors(c)?,
             [
                 repo::account(c, ProviderId::Google)?,
                 repo::account(c, ProviderId::Microsoft)?,
             ],
-            repo::preferences(c)?,
         ))
     })?;
     let mut connectors = Vec::new();
@@ -591,7 +556,6 @@ pub async fn overview(state: &AppState) -> AppResult<ConnectorsOverview> {
     }
     Ok(ConnectorsOverview {
         connectors,
-        preferences,
         background: crate::services::background::settings(state)?,
     })
 }
@@ -693,14 +657,8 @@ pub fn status_of(
         account_email: connected_account.and_then(|a| a.email.clone()),
         account_name: connected_account.and_then(|a| a.display_name.clone()),
         permissions,
-        background_sync: (id.kind() == ConnectorKind::Mail).then_some(record.background_sync),
         last_sync_started_at: record.last_sync_started_at,
         last_sync_at: record.last_success_at,
-        next_sync_at: if record.enabled && record.background_sync {
-            record.next_sync_at
-        } else {
-            None
-        },
         message,
         detail,
     }

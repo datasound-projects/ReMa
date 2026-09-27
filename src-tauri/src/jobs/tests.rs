@@ -1,7 +1,10 @@
-//! Whole-run tests with a fake mailbox, calendar and model: incremental sync
-//! and deduplication, the prefilter (unrelated mail never reaches a model),
-//! classification with confidence, the tracker's audit trail, the interview
-//! calendar workflow (ask/auto, conflicts, reschedules, no duplicates) and
+//! Whole-run tests with a fake mailbox, calendar and model: the lookback
+//! (first run, incremental runs, a longer and a shorter lookback),
+//! deduplication (also across Gmail and Outlook), the prefilter (unrelated
+//! mail never reaches a model), classification with confidence, the
+//! tracker's current state and audit trail (chronological reconstruction,
+//! identity), the interview calendar workflow (automatic when free,
+//! conflicts, reschedules, cancellations, no duplicates) and
 //! prompt-injection resistance.
 
 use std::{
@@ -18,14 +21,10 @@ use crate::{
         calendar::{BusyBlock, CalendarEvent, EventDraft},
         mail::{MailQuery, SyncBatch},
     },
-    db::{
-        connectors as prefs_repo,
-        jobs::{self as repo, InterviewState},
-    },
+    db::jobs::{self as repo, InterviewState},
     events::RecordingEvents,
     llm::{BoxFuture, DeltaSink, FetchedModel, LanguageModel},
     models::{
-        connectors::ConnectorPreferences,
         jobs::{ApplicationStatus, CalendarState, UpdateSource},
         provider::{ConnectionMethod, ModelRef, ProviderKind},
     },
@@ -50,7 +49,11 @@ struct FakeMailbox {
     provider: ProviderId,
     messages: Mutex<Vec<MailMessage>>,
     full_reads: Mutex<Vec<String>>,
+    /// The cursor of every sync, and the `since` of first or recovery syncs.
     syncs: Mutex<Vec<Option<String>>>,
+    firsts: Mutex<Vec<i64>>,
+    /// Backfilled ranges.
+    ranges: Mutex<Vec<(i64, i64)>>,
 }
 
 impl FakeMailbox {
@@ -60,6 +63,8 @@ impl FakeMailbox {
             messages: Mutex::default(),
             full_reads: Mutex::default(),
             syncs: Mutex::default(),
+            firsts: Mutex::default(),
+            ranges: Mutex::default(),
         }
     }
 
@@ -110,20 +115,41 @@ impl MailProvider for FakeMailbox {
             let (delivered, resynced): (Vec<MailMessage>, bool) = match position {
                 Some(n) => (messages.iter().skip(n).map(Self::metadata).collect(), false),
                 // First sync, or an expired cursor: bounded by `since`.
-                None => (
-                    messages
-                        .iter()
-                        .filter(|m| m.received_at >= since)
-                        .map(Self::metadata)
-                        .collect(),
-                    cursor.is_some(),
-                ),
+                None => {
+                    self.firsts.lock().unwrap().push(since);
+                    (
+                        messages
+                            .iter()
+                            .filter(|m| m.received_at >= since)
+                            .map(Self::metadata)
+                            .collect(),
+                        cursor.is_some(),
+                    )
+                }
             };
             Ok(SyncBatch {
                 messages: delivered,
                 cursor: messages.len().to_string(),
                 resynced,
             })
+        })
+    }
+
+    fn list_range<'a>(
+        &'a self,
+        after: i64,
+        before: i64,
+    ) -> BoxFuture<'a, AppResult<Vec<MailMessage>>> {
+        Box::pin(async move {
+            self.ranges.lock().unwrap().push((after, before));
+            Ok(self
+                .messages
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|m| m.received_at >= after && m.received_at < before)
+                .map(Self::metadata)
+                .collect())
         })
     }
 
@@ -178,6 +204,9 @@ impl FakeCalendar {
                 all_day: false,
                 transparent: false,
                 interview_id: None,
+                location: None,
+                meeting_url: None,
+                web_link: None,
             },
             None,
         ));
@@ -205,6 +234,9 @@ impl FakeCalendar {
             all_day: false,
             transparent: draft.cancelled,
             interview_id: Some(draft.interview_id),
+            location: draft.location.clone(),
+            meeting_url: None,
+            web_link: None,
         }
     }
 }
@@ -404,6 +436,7 @@ struct World {
     gmail: FakeMailbox,
     outlook: FakeMailbox,
     calendar: FakeCalendar,
+    outlook_calendar: FakeCalendar,
 }
 
 fn endpoint() -> Endpoint {
@@ -434,27 +467,19 @@ impl World {
             gmail: FakeMailbox::new(ProviderId::Google),
             outlook: FakeMailbox::new(ProviderId::Microsoft),
             calendar: FakeCalendar::new(ProviderId::Google),
+            outlook_calendar: FakeCalendar::new(ProviderId::Microsoft),
         }
     }
 
-    fn set_mode(&self, mode: InterviewMode, buffer_minutes: u32) {
-        self.state
-            .db
-            .call(|c| {
-                prefs_repo::save_preferences(
-                    c,
-                    &ConnectorPreferences {
-                        interview_mode: mode,
-                        sync_interval_minutes: 15,
-                        prep_buffer_minutes: buffer_minutes,
-                    },
-                )
-            })
-            .unwrap();
+    fn config(&self) -> RunConfig {
+        RunConfig::new("Track my applications.", true)
     }
 
-    fn config(&self) -> RunConfig {
-        RunConfig::load(&self.state, "Track my applications.", true).unwrap()
+    /// Requires free time around interviews.
+    fn config_with_buffer(&self, minutes: i64) -> RunConfig {
+        let mut config = self.config();
+        config.policy.buffer_ms = minutes * 60_000;
+        config
     }
 
     async fn run_with(
@@ -480,7 +505,9 @@ impl World {
                         connector: *connector,
                         provider: *mailbox,
                         account_id: "account-1".into(),
-                        since: window_start(now, 7, None),
+                        since: now - 7 * DAY_MS,
+                        backfill: None,
+                        covered_from: now - 7 * DAY_MS,
                     })
                     .collect(),
                 calendars: vec![&self.calendar],
@@ -653,7 +680,7 @@ fn seed(world: &World, globex_confidence: f64) {
     }
     m.answer_for(
         "Your application: Backend Engineer",
-        answer("application_received", 0.95, "Acme", "Backend Engineer"),
+        answer("application_confirmed", 0.95, "Acme", "Backend Engineer"),
     );
     m.answer_for(CONFIRM_SUBJECT, globex_confirmation(globex_confidence));
     m.answer_for(
@@ -692,18 +719,32 @@ fn seed(world: &World, globex_confidence: f64) {
 // ── Sync, prefilter, classification, tracker ────────────────────────
 
 #[test]
-fn window_covers_the_lookback_and_the_time_since_the_last_success() {
+fn the_lookback_reads_n_days_first_then_only_changes() {
     let now = now();
-    assert_eq!(window_start(now, 7, None), now - 7 * DAY_MS);
-    assert_eq!(window_start(now, 7, Some(now - HOUR)), now - 7 * DAY_MS);
+    let days = |n: i64| now - n * DAY_MS;
+    // First run: the last N days.
+    let first = reading_plan(now, 30, false, None, None);
     assert_eq!(
-        window_start(now, 7, Some(now - 20 * DAY_MS)),
-        now - 20 * DAY_MS
+        (first.since, first.backfill, first.covered_from),
+        (days(30), None, days(30))
     );
+    // Later runs: incremental; a recovery starts at the last success…
+    let later = reading_plan(now, 30, true, Some(now - HOUR), Some(days(30)));
+    assert_eq!((later.since, later.backfill), (now - HOUR, None));
+    // …but never before the boundary.
     assert_eq!(
-        window_start(now, 7, Some(now - 400 * DAY_MS)),
-        now - MAX_WINDOW_DAYS * DAY_MS
+        reading_plan(now, 30, true, Some(days(80)), Some(days(30))).since,
+        days(30)
     );
+    // A longer lookback backfills the newly included range once.
+    let longer = reading_plan(now, 60, true, Some(now - HOUR), Some(days(30)));
+    assert_eq!(longer.backfill, Some((days(60), days(30))));
+    assert_eq!(longer.covered_from, days(60));
+    let after = reading_plan(now, 60, true, Some(now - HOUR), Some(days(60)));
+    assert_eq!(after.backfill, None, "only once");
+    // A shorter one reads nothing old and keeps what was covered.
+    let shorter = reading_plan(now, 14, true, Some(now - HOUR), Some(days(60)));
+    assert_eq!((shorter.backfill, shorter.covered_from), (None, days(60)));
 }
 
 #[tokio::test]
@@ -808,7 +849,7 @@ async fn syncs_are_incremental_and_never_process_a_message_twice() {
         .state
         .db
         .call(|c| {
-            prefs_repo::save_cursor(
+            connector_repo::save_cursor(
                 c,
                 ProviderId::Google,
                 "account-1",
@@ -878,29 +919,54 @@ async fn a_follow_up_in_a_known_thread_skips_triage_and_is_audited() {
         .db
         .call(|c| tracker::detail(c, id, now()))
         .unwrap();
-    let entry = &detail.timeline[0];
-    assert_eq!(entry.change, "Application changed to Interview");
+    let entry = detail
+        .timeline
+        .iter()
+        .find(|e| e.category == Some(EmailCategory::InterviewConfirmed))
+        .unwrap();
+    assert_eq!(entry.change, "Application changed to Interview confirmed");
     assert_eq!(entry.source, UpdateSource::Gmail);
     assert_eq!(entry.confidence, Some(0.98));
     assert_eq!(entry.previous_status, Some(ApplicationStatus::Confirmed));
-    assert_eq!(entry.category, Some(EmailCategory::InterviewConfirmed));
-    assert_eq!(detail.timeline.len(), 2);
+    // The confirmation, the calendar event it led to, and the application.
+    assert_eq!(detail.timeline.len(), 3);
+    assert_eq!(
+        detail.timeline[0].change,
+        "Interview added to Google Calendar"
+    );
+    assert_eq!(detail.timeline[0].source, UpdateSource::GoogleCalendar);
     assert_eq!(detail.correspondence.len(), 2);
 }
 
 #[tokio::test]
-async fn each_category_maps_to_the_right_status() {
+async fn each_category_maps_to_the_right_status_and_section() {
+    use crate::models::jobs::ApplicationSection as S;
     let cases = [
-        ("application_received", ApplicationStatus::Confirmed),
-        ("application_update", ApplicationStatus::InProcess),
-        ("recruiter_message", ApplicationStatus::InProcess),
-        ("assessment_request", ApplicationStatus::NeedsAction),
-        ("action_required", ApplicationStatus::NeedsAction),
-        ("rejection", ApplicationStatus::Rejected),
-        ("offer", ApplicationStatus::Offer),
+        (
+            "application_confirmed",
+            ApplicationStatus::Confirmed,
+            S::ApplicationsConfirmed,
+        ),
+        (
+            "application_update",
+            ApplicationStatus::InProcess,
+            S::InProgress,
+        ),
+        (
+            "assessment_request",
+            ApplicationStatus::NeedsAction,
+            S::NeedsAction,
+        ),
+        (
+            "needs_action",
+            ApplicationStatus::NeedsAction,
+            S::NeedsAction,
+        ),
+        ("rejection", ApplicationStatus::Rejected, S::Rejected),
+        ("offer", ApplicationStatus::Offer, S::NeedsAction),
     ];
     let world = World::new();
-    for (i, (category, _)) in cases.iter().enumerate() {
+    for (i, (category, ..)) in cases.iter().enumerate() {
         let subject = format!("Your application update {i}");
         world.gmail.add(
             &format!("c{i}"),
@@ -916,12 +982,39 @@ async fn each_category_maps_to_the_right_status() {
             answer(category, 0.9, &format!("Company{i}"), "Engineer"),
         );
     }
+    // A recruiter's note about an unknown application starts no tracking.
+    world.gmail.add(
+        "r1",
+        "rt1",
+        "Recruiter <sam@agency.io>",
+        "Quick hello",
+        now() - HOUR,
+        "Hi, I saw your profile and would love to chat about your application journey.",
+    );
+    world.model.relevant("r1");
+    world.model.answer_for(
+        "Quick hello",
+        answer("recruiter_message", 0.9, "Agency", "Engineer"),
+    );
     world.run(now()).await;
-    for (i, (category, status)) in cases.iter().enumerate() {
+    let overview = world
+        .state
+        .db
+        .call(|c| tracker::overview(c, now()))
+        .unwrap();
+    for (i, (category, status, section)) in cases.iter().enumerate() {
         assert_eq!(world.status(&format!("Company{i}")), *status, "{category}");
+        let row = overview
+            .applications
+            .iter()
+            .find(|r| r.company == format!("Company{i}"))
+            .unwrap();
+        assert_eq!(row.section, *section, "{category}");
     }
+    assert_eq!(overview.applications.len(), cases.len(), "no Agency row");
     let titles = world.notification_titles();
     assert!(titles.iter().any(|t| t == "Action required"));
+    assert!(titles.iter().any(|t| t == "Offer received"));
     assert!(titles.iter().any(|t| t == "Application update detected"));
 }
 
@@ -1165,7 +1258,6 @@ async fn a_valid_answer_from_a_manipulative_email_is_still_bounded() {
             }),
         ),
     );
-    world.set_mode(InterviewMode::Auto, 0);
     world.run(now()).await;
     let interview = &world.interviews("Shady")[0];
     assert_eq!(interview.state, InterviewState::NeedsReview);
@@ -1178,23 +1270,42 @@ async fn a_valid_answer_from_a_manipulative_email_is_still_bounded() {
 // ── Interviews and the calendar ─────────────────────────────────────
 
 #[tokio::test]
-async fn ask_mode_proposes_confirmed_interviews_and_the_user_adds_them() {
+async fn confirmed_interviews_are_added_to_a_free_calendar() {
     let world = World::new();
     seed(&world, 0.97);
     let report = world.run(now()).await;
 
     let calendar = report.calendar.as_ref().unwrap();
-    assert_eq!(calendar.created, 0, "ask before adding is the default");
-    assert!(calendar
-        .items
-        .iter()
-        .any(|i| i.company == "Globex" && i.outcome == CalendarOutcome::Proposed));
-    assert!(world.calendar.interview_events().is_empty());
+    assert_eq!(calendar.created, 1, "only the confirmed interview");
     let globex = world.interviews("Globex")[0].clone();
-    assert_eq!(globex.calendar_state, CalendarState::Proposed);
-    assert!(world
-        .notification_titles()
-        .contains(&"Interview confirmed".to_string()));
+    assert_eq!(globex.calendar_state, CalendarState::Created);
+    let events = world.calendar.interview_events();
+    assert_eq!(events.len(), 1);
+    let (event, draft) = &events[0];
+    assert_eq!(event.title, "Interview — Globex — Data Engineer");
+    assert_eq!(draft.start_at, at("2026-09-24T12:00:00Z"));
+    assert_eq!(draft.timezone, "Europe/Vienna");
+    for line in [
+        "Company: Globex",
+        "Role: Data Engineer",
+        "Time: Sep 24 at 14:00 CEST",
+        "Meeting: https://meet.example.com/globex-1",
+        "Source: ReMa Applications (application #",
+    ] {
+        assert!(
+            draft.description.contains(line),
+            "{line} in {}",
+            draft.description
+        );
+    }
+    assert!(
+        !draft.description.contains("Hi Ana"),
+        "no email content in events"
+    );
+    // The interview request (Umbrella) and the unverified one (Hooli) are not added.
+    assert!(events
+        .iter()
+        .all(|(e, _)| !e.title.contains("Umbrella") && !e.title.contains("Hooli")));
     assert!(world
         .events
         .shown
@@ -1202,34 +1313,25 @@ async fn ask_mode_proposes_confirmed_interviews_and_the_user_adds_them() {
         .unwrap()
         .iter()
         .any(|(title, body)| title == "Interview confirmed"
-            && body.contains("No calendar conflicts")));
+            && body.contains("No calendar conflicts — added to Google Calendar")));
 
-    // The user adds it.
-    let record =
-        calendar_sync::add_to_calendar(&world.state, &world.calendar, globex.id, false, 0, now())
-            .await
-            .unwrap();
-    assert_eq!(record.calendar_state, CalendarState::Created);
-    let events = world.calendar.interview_events();
-    assert_eq!(events.len(), 1);
-    let (event, draft) = &events[0];
-    assert_eq!(event.title, "Interview — Globex — Data Engineer");
-    assert_eq!(draft.start_at, at("2026-09-24T12:00:00Z"));
-    assert_eq!(draft.timezone, "Europe/Vienna");
-    assert!(draft
-        .description
-        .contains("Meeting: https://meet.example.com/globex-1"));
-    assert!(
-        !draft.description.contains("Hi Ana"),
-        "no email content in events"
-    );
-
-    // Later runs and a second click change nothing.
+    // Later runs and a manual "Add to calendar" change nothing.
     let writes = world.calendar.writes();
-    world.run(now() + HOUR).await;
-    calendar_sync::add_to_calendar(&world.state, &world.calendar, globex.id, false, 0, now())
-        .await
-        .unwrap();
+    for hour in 1..=2 {
+        world.run(now() + hour * HOUR).await;
+    }
+    assert_eq!(world.calendar.writes(), writes);
+    calendar_sync::add_to_calendar(
+        &world.state,
+        &world.calendar,
+        &[&world.calendar],
+        globex.id,
+        false,
+        0,
+        now(),
+    )
+    .await
+    .unwrap();
     assert_eq!(world.calendar.interview_events().len(), 1);
     assert_eq!(
         world.calendar.writes(),
@@ -1263,47 +1365,30 @@ async fn declined_interviews_are_not_proposed_again() {
 }
 
 #[tokio::test]
-async fn auto_mode_adds_confident_confirmations_when_the_time_is_free() {
+async fn an_unclear_confirmation_changes_nothing() {
     let world = World::new();
-    world.set_mode(InterviewMode::Auto, 0);
-    seed(&world, 0.97);
-    let report = world.run(now()).await;
-    assert_eq!(report.calendar.unwrap().created, 1);
-    assert_eq!(world.calendar.interview_events().len(), 1);
-    assert!(world
-        .events
-        .shown
-        .lock()
-        .unwrap()
-        .iter()
-        .any(|(_, body)| body.contains("added to Google Calendar")));
-
-    // Repeated runs: no duplicate, no writes.
-    let writes = world.calendar.writes();
-    for hour in 1..=2 {
-        world.run(now() + hour * HOUR).await;
-    }
-    assert_eq!(world.calendar.writes(), writes);
-    assert_eq!(world.calendar.interview_events().len(), 1);
-}
-
-#[tokio::test]
-async fn auto_mode_asks_when_the_confirmation_is_not_confident() {
-    let world = World::new();
-    world.set_mode(InterviewMode::Auto, 0);
     seed(&world, 0.7);
     world.run(now()).await;
     assert!(world.calendar.interview_events().is_empty());
+    assert!(
+        world
+            .state
+            .db
+            .call(|c| repo::all_applications(c))
+            .unwrap()
+            .iter()
+            .all(|a| a.company != "Globex"),
+        "no state is invented from an unclear email"
+    );
     assert_eq!(
-        world.interviews("Globex")[0].calendar_state,
-        CalendarState::Proposed
+        world.mail(ProviderId::Google, "m3").status,
+        MailStatus::Ambiguous
     );
 }
 
 #[tokio::test]
 async fn conflicts_block_creation_until_the_user_confirms() {
     let world = World::new();
-    world.set_mode(InterviewMode::Auto, 0);
     seed(&world, 0.97);
     // Busy 14:30–15:30 Vienna (12:30–13:30 UTC).
     world.calendar.add_busy(
@@ -1326,22 +1411,36 @@ async fn conflicts_block_creation_until_the_user_confirms() {
             && body.contains("Conflict detected with: Dentist")));
 
     // "Add to calendar" asks first; "Add anyway" adds it.
-    let error =
-        calendar_sync::add_to_calendar(&world.state, &world.calendar, globex.id, false, 0, now())
-            .await
-            .unwrap_err();
+    let error = calendar_sync::add_to_calendar(
+        &world.state,
+        &world.calendar,
+        &[&world.calendar],
+        globex.id,
+        false,
+        0,
+        now(),
+    )
+    .await
+    .unwrap_err();
     assert!(error.to_string().contains("Dentist"));
     assert!(world.calendar.interview_events().is_empty());
-    calendar_sync::add_to_calendar(&world.state, &world.calendar, globex.id, true, 0, now())
-        .await
-        .unwrap();
+    calendar_sync::add_to_calendar(
+        &world.state,
+        &world.calendar,
+        &[&world.calendar],
+        globex.id,
+        true,
+        0,
+        now(),
+    )
+    .await
+    .unwrap();
     assert_eq!(world.calendar.interview_events().len(), 1);
 }
 
 #[tokio::test]
 async fn the_preparation_buffer_counts_as_busy_time() {
     let world = World::new();
-    world.set_mode(InterviewMode::Auto, 30);
     seed(&world, 0.97);
     // Ends 20 minutes before the interview.
     world.calendar.add_busy(
@@ -1350,7 +1449,15 @@ async fn the_preparation_buffer_counts_as_busy_time() {
         at("2026-09-24T11:00:00Z"),
         at("2026-09-24T11:40:00Z"),
     );
-    world.run(now()).await;
+    world
+        .run_with(
+            now(),
+            world.config_with_buffer(30),
+            &[(&world.gmail, ConnectorId::Gmail)],
+            true,
+        )
+        .await
+        .unwrap();
     assert!(world.calendar.interview_events().is_empty());
     assert_eq!(
         world.interviews("Globex")[0].calendar_state,
@@ -1361,7 +1468,6 @@ async fn the_preparation_buffer_counts_as_busy_time() {
 #[tokio::test]
 async fn reschedules_update_the_same_event_and_cancellations_mark_it() {
     let world = World::new();
-    world.set_mode(InterviewMode::Auto, 0);
     seed(&world, 0.97);
     world.run(now()).await;
     let event_id = world.calendar.interview_events()[0].0.id.clone();
@@ -1506,7 +1612,6 @@ async fn reschedules_update_the_same_event_and_cancellations_mark_it() {
 #[tokio::test]
 async fn a_repeated_confirmation_is_the_same_interview() {
     let world = World::new();
-    world.set_mode(InterviewMode::Auto, 0);
     seed(&world, 0.97);
     world.run(now()).await;
     world.gmail.add(
@@ -1528,7 +1633,6 @@ async fn a_repeated_confirmation_is_the_same_interview() {
 #[tokio::test]
 async fn a_lost_event_id_never_creates_a_duplicate() {
     let world = World::new();
-    world.set_mode(InterviewMode::Auto, 0);
     seed(&world, 0.97);
     world.run(now()).await;
     // A crash between creating the event and saving its id.
@@ -1552,7 +1656,6 @@ async fn a_lost_event_id_never_creates_a_duplicate() {
 #[tokio::test]
 async fn events_deleted_by_the_user_are_not_recreated() {
     let world = World::new();
-    world.set_mode(InterviewMode::Auto, 0);
     seed(&world, 0.97);
     world.run(now()).await;
     world
@@ -1574,7 +1677,6 @@ async fn events_deleted_by_the_user_are_not_recreated() {
 #[tokio::test]
 async fn the_calendar_is_untouched_when_calendar_sync_is_off() {
     let world = World::new();
-    world.set_mode(InterviewMode::Auto, 0);
     seed(&world, 0.97);
     let config = RunConfig {
         calendar: false,
@@ -1605,4 +1707,780 @@ async fn notifications_are_not_repeated() {
     // Re-processing the calendar step does not repeat proposals.
     assert_eq!(world.notification_titles().len(), count);
     assert_eq!(world.events.shown.lock().unwrap().len(), count);
+}
+
+// ── Job Mail & Interview Sync: lookback, history, identity, text ─────
+
+impl World {
+    /// A run like the built-in task: each mailbox's stored cursor and
+    /// coverage decide what is read for a lookback of `days`.
+    async fn run_task(
+        &self,
+        now: i64,
+        days: u32,
+        mailboxes: &[(&FakeMailbox, ConnectorId)],
+        calendars: Vec<&dyn CalendarProvider>,
+    ) -> JobRunReport {
+        let plans: Vec<ReadingPlan> = mailboxes
+            .iter()
+            .map(|(mailbox, _)| {
+                let provider = mailbox.provider;
+                let (cursor, covered) = self
+                    .state
+                    .db
+                    .call(|c| {
+                        Ok((
+                            connector_repo::cursor(c, provider, "account-1", MAIL_RESOURCE)?,
+                            connector_repo::cursor(c, provider, "account-1", COVERAGE_RESOURCE)?
+                                .and_then(|v| v.parse::<i64>().ok()),
+                        ))
+                    })
+                    .unwrap();
+                reading_plan(now, days, cursor.is_some(), None, covered)
+            })
+            .collect();
+        let (endpoint, model) = (endpoint(), model_ref());
+        run(
+            &self.state,
+            Some(RunModel {
+                endpoint: &endpoint,
+                model: &model,
+                max_output_tokens: None,
+            }),
+            Sources {
+                mail: mailboxes
+                    .iter()
+                    .zip(&plans)
+                    .map(|((mailbox, connector), plan)| MailSource {
+                        connector: *connector,
+                        provider: *mailbox,
+                        account_id: "account-1".into(),
+                        since: plan.since,
+                        backfill: plan.backfill,
+                        covered_from: plan.covered_from,
+                    })
+                    .collect(),
+                calendars,
+            },
+            self.config(),
+            &CancellationToken::new(),
+            now,
+        )
+        .await
+        .unwrap()
+    }
+
+    /// An email in a mailbox, relevant, and the model's answer for it.
+    #[allow(clippy::too_many_arguments)]
+    fn email(
+        &self,
+        mailbox: &FakeMailbox,
+        id: &str,
+        thread: &str,
+        from: &str,
+        subject: &str,
+        received_at: i64,
+        body: &str,
+        answer: Value,
+    ) {
+        mailbox.add(id, thread, from, subject, received_at, body);
+        self.model.relevant(id);
+        self.model.answer_for(subject, answer);
+    }
+
+    fn rows(&self) -> Vec<crate::models::jobs::ApplicationRow> {
+        self.state
+            .db
+            .call(|c| tracker::overview(c, now()))
+            .unwrap()
+            .applications
+    }
+
+    fn row(&self, company: &str, role: &str) -> crate::models::jobs::ApplicationRow {
+        self.rows()
+            .into_iter()
+            .find(|r| r.company == company && r.role.as_deref() == Some(role))
+            .unwrap_or_else(|| panic!("{company} — {role} has a row"))
+    }
+}
+
+fn with(mut value: Value, fields: Value) -> Value {
+    for (key, field) in fields.as_object().unwrap() {
+        value[key] = field.clone();
+    }
+    value
+}
+
+/// Sep 29 10:00 CEST, with a Google Meet link; no end time stated.
+const CONFIRMED_BODY: &str =
+    "Your interview is confirmed for Tuesday, September 29 at 10:00 CEST. \
+    Google Meet: https://meet.google.com/abc-defg-hij";
+
+fn confirmed_answer(company: &str, role: &str) -> Value {
+    with_interview(
+        answer("interview_confirmed", 0.95, company, role),
+        json!({
+            "state": "confirmed", "date": "2026-09-29", "start_time": "10:00", "end_time": null,
+            "duration_minutes": null, "timezone": "CEST", "timezone_quote": "CEST",
+            "datetime_quote": "Tuesday, September 29 at 10:00",
+            "meeting_url": "https://meet.google.com/abc-defg-hij", "participants": []
+        }),
+    )
+}
+
+#[tokio::test]
+async fn history_is_replayed_into_one_current_row() {
+    let world = World::new();
+    let anthropic = "Anthropic Recruiting <jobs@anthropic.com>";
+    // Sep 2 confirmed, Sep 10 slots requested, Sep 12 interview confirmed.
+    world.email(
+        &world.gmail,
+        "h1",
+        "th",
+        anthropic,
+        "Thank you for applying",
+        at("2026-09-02T09:00:00Z"),
+        "We received your application for Forward Deployed Engineer.",
+        answer(
+            "application_confirmed",
+            0.97,
+            "Anthropic",
+            "Forward Deployed Engineer",
+        ),
+    );
+    world.email(
+        &world.gmail,
+        "h2",
+        "th",
+        anthropic,
+        "Next steps: interview",
+        at("2026-09-10T09:00:00Z"),
+        "Please select one of these interview slots: Tuesday 10:00 or Wednesday 14:00.",
+        with_interview(
+            answer(
+                "interview_request",
+                0.95,
+                "Anthropic",
+                "Forward Deployed Engineer",
+            ),
+            json!({ "state": "proposed", "participants": [], "proposed_slots": [] }),
+        ),
+    );
+    world.email(
+        &world.gmail,
+        "h3",
+        "th",
+        anthropic,
+        "Interview confirmed",
+        at("2026-09-12T09:00:00Z"),
+        CONFIRMED_BODY,
+        confirmed_answer("Anthropic", "Forward Deployed Engineer"),
+    );
+    world
+        .run_task(
+            now(),
+            30,
+            &[(&world.gmail, ConnectorId::Gmail)],
+            vec![&world.calendar],
+        )
+        .await;
+
+    let rows = world.rows();
+    assert_eq!(rows.len(), 1, "one application, not one row per email");
+    let row = &rows[0];
+    assert_eq!(
+        row.section,
+        crate::models::jobs::ApplicationSection::InterviewsConfirmed
+    );
+    assert_eq!(row.status_label, "Interview confirmed");
+    assert_eq!(
+        row.latest_update,
+        "Interview confirmed for Sep 29 at 10:00 CEST."
+    );
+    assert_eq!(row.last_update_at, at("2026-09-12T09:00:00Z"));
+    assert_eq!(
+        row.meeting_url.as_deref(),
+        Some("https://meet.google.com/abc-defg-hij")
+    );
+    // Duration optional: an hour is reserved in the calendar.
+    let (event, draft) = &world.calendar.interview_events()[0];
+    assert_eq!(
+        event.title,
+        "Interview — Anthropic — Forward Deployed Engineer"
+    );
+    assert_eq!(draft.start_at, at("2026-09-29T08:00:00Z"));
+    assert_eq!(draft.end_at - draft.start_at, HOUR);
+    assert!(draft
+        .description
+        .contains("Meeting: https://meet.google.com/abc-defg-hij"));
+
+    // A later explicit rejection moves the row to Rejected.
+    world.email(
+        &world.gmail,
+        "h4",
+        "th",
+        anthropic,
+        "Your application",
+        at("2026-09-21T09:00:00Z"),
+        "Unfortunately, the position was filled with another candidate.",
+        with(
+            answer("rejection", 0.95, "Anthropic", "Forward Deployed Engineer"),
+            json!({
+                "rejection_reason": "Position was filled with another candidate.",
+                "rejection_quote": "the position was filled with another candidate"
+            }),
+        ),
+    );
+    world
+        .run_task(
+            at("2026-09-21T10:00:00Z"),
+            30,
+            &[(&world.gmail, ConnectorId::Gmail)],
+            vec![&world.calendar],
+        )
+        .await;
+    let rows = world.rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].section,
+        crate::models::jobs::ApplicationSection::Rejected
+    );
+    assert_eq!(
+        rows[0].latest_update,
+        "Position was filled with another candidate."
+    );
+}
+
+#[tokio::test]
+async fn an_older_email_read_later_never_overrides_the_newer_state() {
+    let world = World::new();
+    let from = "Initrode HR <hr@initrode.com>";
+    world.email(
+        &world.gmail,
+        "o2",
+        "to",
+        from,
+        "Assessment",
+        now() - 5 * DAY_MS,
+        "Please complete the coding assessment by Friday.",
+        with(
+            answer("assessment_request", 0.9, "Initrode", "Backend Engineer"),
+            json!({ "next_action": "Complete the coding assessment by Friday." }),
+        ),
+    );
+    world.email(
+        &world.gmail,
+        "o1",
+        "to",
+        from,
+        "Application received",
+        now() - 20 * DAY_MS,
+        "Thank you for applying. We received your application.",
+        answer(
+            "application_confirmed",
+            0.95,
+            "Initrode",
+            "Backend Engineer",
+        ),
+    );
+    // Lookback 14: only the assessment request.
+    world
+        .run_task(now(), 14, &[(&world.gmail, ConnectorId::Gmail)], vec![])
+        .await;
+    assert!(world
+        .gmail
+        .full_reads
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|r| r != "o1"));
+    let row = world.row("Initrode", "Backend Engineer");
+    assert_eq!(
+        row.section,
+        crate::models::jobs::ApplicationSection::NeedsAction
+    );
+    // Lookback 30 backfills the older confirmation: history, not state.
+    world
+        .run_task(
+            now() + HOUR,
+            30,
+            &[(&world.gmail, ConnectorId::Gmail)],
+            vec![],
+        )
+        .await;
+    assert!(world.gmail.read_in_full("o1"));
+    let row = world.row("Initrode", "Backend Engineer");
+    assert_eq!(
+        row.section,
+        crate::models::jobs::ApplicationSection::NeedsAction
+    );
+    assert_eq!(
+        row.latest_update,
+        "Complete the coding assessment by Friday."
+    );
+    assert_eq!(row.last_update_at, now() - 5 * DAY_MS);
+    let id = world.app("Initrode").id;
+    let timeline = world.state.db.call(|c| repo::timeline(c, id)).unwrap();
+    assert_eq!(timeline.len(), 2);
+    assert!(timeline[1].change.contains("older email; status unchanged"));
+}
+
+#[tokio::test]
+async fn the_lookback_bootstraps_then_syncs_incrementally_and_backfills_once() {
+    let world = World::new();
+    let add = |id: &str, company: &str, days: i64| {
+        world.email(
+            &world.gmail,
+            id,
+            &format!("t-{id}"),
+            &format!("Talent <jobs@{}.com>", company.to_lowercase()),
+            &format!("Application received: {company}"),
+            now() - days * DAY_MS,
+            "Thank you for applying. We received your application.",
+            answer("application_confirmed", 0.95, company, "Engineer"),
+        );
+    };
+    add("l1", "Recent", 3);
+    add("l2", "Older", 20);
+    add("l3", "Ancient", 50);
+    let gmail = [(&world.gmail, ConnectorId::Gmail)];
+
+    // First run: the last 14 days.
+    world.run_task(now(), 14, &gmail, vec![]).await;
+    assert_eq!(*world.gmail.firsts.lock().unwrap(), [now() - 14 * DAY_MS]);
+    assert_eq!(world.rows().len(), 1);
+
+    // Later: only new mail, from the cursor.
+    add("l4", "Newer", 0);
+    world
+        .gmail
+        .messages
+        .lock()
+        .unwrap()
+        .last_mut()
+        .unwrap()
+        .received_at = now() + HOUR;
+    world.run_task(now() + 2 * HOUR, 14, &gmail, vec![]).await;
+    assert_eq!(
+        world.gmail.firsts.lock().unwrap().len(),
+        1,
+        "no second full read"
+    );
+    assert!(
+        world.gmail.syncs.lock().unwrap()[1].is_some(),
+        "the cursor was used"
+    );
+    assert_eq!(world.rows().len(), 2);
+    assert!(world.gmail.ranges.lock().unwrap().is_empty());
+
+    // 14 → 30 days: the newly included days are read once.
+    world.run_task(now() + 3 * HOUR, 30, &gmail, vec![]).await;
+    let ranges = world.gmail.ranges.lock().unwrap().clone();
+    assert_eq!(ranges.len(), 1);
+    assert_eq!(ranges[0].1, now() - 14 * DAY_MS);
+    assert!(world.rows().iter().any(|r| r.company == "Older"));
+    assert!(
+        world.rows().iter().all(|r| r.company != "Ancient"),
+        "never beyond N days"
+    );
+    world.run_task(now() + 4 * HOUR, 30, &gmail, vec![]).await;
+    assert_eq!(world.gmail.ranges.lock().unwrap().len(), 1, "only once");
+
+    // 30 → 7 days: nothing old is read and nothing is deleted.
+    world.run_task(now() + 5 * HOUR, 7, &gmail, vec![]).await;
+    assert_eq!(world.gmail.ranges.lock().unwrap().len(), 1);
+    assert_eq!(world.rows().len(), 3, "Older stays tracked");
+}
+
+#[tokio::test]
+async fn applications_are_told_apart_by_role_and_job_id() {
+    let world = World::new();
+    let microsoft = "Microsoft Careers <careers@microsoft.com>";
+    world.email(
+        &world.gmail,
+        "i1",
+        "ms-1",
+        microsoft,
+        "Application received: AI Engineer",
+        now() - 4 * DAY_MS,
+        "Thank you for applying to AI Engineer.",
+        answer("application_confirmed", 0.95, "Microsoft", "AI Engineer"),
+    );
+    world.email(
+        &world.gmail,
+        "i2",
+        "ms-2",
+        microsoft,
+        "Application received: Data Scientist",
+        now() - 3 * DAY_MS,
+        "Thank you for applying to Data Scientist.",
+        answer("application_confirmed", 0.95, "Microsoft", "Data Scientist"),
+    );
+    // No role, a new thread: which of the two is unclear.
+    world.email(
+        &world.gmail,
+        "i3",
+        "ms-3",
+        microsoft,
+        "Your application: next steps",
+        now() - 2 * DAY_MS,
+        "Regarding your application, please send us your university transcript.",
+        with(
+            answer("needs_action", 0.9, "Microsoft", "x"),
+            json!({ "role": null, "next_action": "Send your university transcript." }),
+        ),
+    );
+    // Same title, different job ids.
+    let contoso = "Contoso Jobs <jobs@contoso.com>";
+    world.email(
+        &world.gmail,
+        "i4",
+        "c-1",
+        contoso,
+        "Application received R-100",
+        now() - 2 * DAY_MS,
+        "Thank you for applying (job R-100).",
+        with(
+            answer("application_confirmed", 0.95, "Contoso", "Data Engineer"),
+            json!({ "reference": "R-100" }),
+        ),
+    );
+    world.email(
+        &world.gmail,
+        "i5",
+        "c-2",
+        contoso,
+        "Application received R-200",
+        now() - DAY_MS,
+        "Thank you for applying (job R-200).",
+        with(
+            answer("application_confirmed", 0.95, "Contoso", "Data Engineer"),
+            json!({ "reference": "R-200" }),
+        ),
+    );
+    let report = world
+        .run_task(now(), 30, &[(&world.gmail, ConnectorId::Gmail)], vec![])
+        .await;
+    let rows = world.rows();
+    let microsoft_rows: Vec<_> = rows.iter().filter(|r| r.company == "Microsoft").collect();
+    assert_eq!(
+        microsoft_rows.len(),
+        2,
+        "AI Engineer and Data Scientist stay separate"
+    );
+    assert!(microsoft_rows
+        .iter()
+        .all(|r| r.section == crate::models::jobs::ApplicationSection::ApplicationsConfirmed));
+    assert_eq!(
+        world.mail(ProviderId::Google, "i3").status,
+        MailStatus::Ambiguous
+    );
+    assert!(report.issues.iter().any(|i| i.contains("could match")));
+    assert_eq!(rows.iter().filter(|r| r.company == "Contoso").count(), 2);
+}
+
+#[tokio::test]
+async fn the_same_email_in_gmail_and_outlook_is_processed_once() {
+    let world = World::new();
+    let from = "Hooli Jobs <jobs@hooli.com>";
+    let body = "Thank you for applying. We received your application for SRE.";
+    world.email(
+        &world.gmail,
+        "d1",
+        "g-thread",
+        from,
+        "Application received: SRE",
+        now() - DAY_MS,
+        body,
+        answer("application_confirmed", 0.95, "Hooli", "SRE"),
+    );
+    world.outlook.add(
+        "AAMk-d1",
+        "o-conv",
+        from,
+        "Application received: SRE",
+        now() - DAY_MS + 60_000,
+        body,
+    );
+    world.model.relevant("AAMk-d1");
+    world
+        .run_task(
+            now(),
+            30,
+            &[
+                (&world.gmail, ConnectorId::Gmail),
+                (&world.outlook, ConnectorId::OutlookMail),
+            ],
+            vec![],
+        )
+        .await;
+    assert_eq!(world.rows().len(), 1);
+    assert!(
+        !world.outlook.read_in_full("AAMk-d1"),
+        "no second model call"
+    );
+    let copy = world.mail(ProviderId::Microsoft, "AAMk-d1");
+    assert_eq!(copy.status, MailStatus::Processed);
+    assert_eq!(copy.application_id, Some(world.app("Hooli").id));
+    let id = world.app("Hooli").id;
+    assert_eq!(
+        world
+            .state
+            .db
+            .call(|c| repo::timeline(c, id))
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn rejection_reasons_are_only_what_the_email_says() {
+    let world = World::new();
+    world.email(
+        &world.gmail,
+        "r1",
+        "r-1",
+        "Globex HR <hr@globex.com>",
+        "Your Globex application",
+        now() - DAY_MS,
+        "Thank you for your interest. Unfortunately, the position was filled with another candidate.",
+        with(
+            answer("rejection", 0.95, "Globex", "Analyst"),
+            json!({
+                "rejection_reason": "Position was filled with another candidate.",
+                "rejection_quote": "the position was filled with another candidate"
+            }),
+        ),
+    );
+    // The model offers a reason the email does not contain.
+    world.email(
+        &world.gmail,
+        "r2",
+        "r-2",
+        "Initech HR <hr@initech.com>",
+        "Your Initech application",
+        now() - DAY_MS,
+        "We have decided not to move forward with your application.",
+        with(
+            answer("rejection", 0.95, "Initech", "Analyst"),
+            json!({
+                "rejection_reason": "Not enough experience with Kubernetes.",
+                "rejection_quote": "not enough experience with Kubernetes"
+            }),
+        ),
+    );
+    world
+        .run_task(now(), 30, &[(&world.gmail, ConnectorId::Gmail)], vec![])
+        .await;
+    assert_eq!(
+        world.row("Globex", "Analyst").latest_update,
+        "Position was filled with another candidate."
+    );
+    let initech = world.row("Initech", "Analyst");
+    assert_eq!(initech.latest_update, "No reason provided.");
+    assert_eq!(initech.rejection_reason, None);
+}
+
+#[tokio::test]
+async fn latest_update_texts_are_concise_and_from_the_email() {
+    let world = World::new();
+    world.email(
+        &world.gmail,
+        "u1",
+        "u-1",
+        "Acme Careers <jobs@acme.com>",
+        "We received your application",
+        now() - 3 * DAY_MS,
+        "Thank you for applying.",
+        answer("application_confirmed", 0.95, "Acme", "Engineer"),
+    );
+    world.email(
+        &world.gmail,
+        "u2",
+        "u-2",
+        "Umbrella <people@umbrella.com>",
+        "Interview invitation: pick a time",
+        now() - 2 * DAY_MS,
+        "We would like to invite you to an interview. Please choose between Tuesday 10:00 and Wednesday 14:00.",
+        with_interview(
+            answer("interview_request", 0.9, "Umbrella", "Engineer"),
+            json!({ "state": "proposed", "participants": [], "proposed_slots": [] }),
+        ),
+    );
+    world.email(
+        &world.gmail,
+        "u3",
+        "u-3",
+        "Stark Talent <talent@stark.com>",
+        "Your application status",
+        now() - DAY_MS,
+        "Our recruiting team is reviewing your application.",
+        with(
+            answer("application_update", 0.9, "Stark", "Engineer"),
+            json!({ "latest_update": "Recruiting team is reviewing your application." }),
+        ),
+    );
+    world
+        .run_task(
+            now(),
+            30,
+            &[(&world.gmail, ConnectorId::Gmail)],
+            vec![&world.calendar],
+        )
+        .await;
+    assert_eq!(
+        world.row("Acme", "Engineer").latest_update,
+        "Application received successfully. No action required."
+    );
+    let umbrella = world.row("Umbrella", "Engineer");
+    assert_eq!(
+        umbrella.latest_update,
+        "Choose an interview slot from the proposed times."
+    );
+    assert_eq!(umbrella.status_label, "Interview requested");
+    assert!(
+        world.calendar.interview_events().is_empty(),
+        "a request adds nothing"
+    );
+    let stark = world.row("Stark", "Engineer");
+    assert_eq!(
+        stark.section,
+        crate::models::jobs::ApplicationSection::InProgress
+    );
+    assert_eq!(
+        stark.latest_update,
+        "Recruiting team is reviewing your application."
+    );
+    // Sorted by the latest email first.
+    let order: Vec<String> = world.rows().into_iter().map(|r| r.company).collect();
+    assert_eq!(order, ["Stark", "Umbrella", "Acme"]);
+}
+
+#[tokio::test]
+async fn outlook_calendar_gets_the_interview_like_google_calendar() {
+    let world = World::new();
+    world.email(
+        &world.outlook,
+        "AAMk-1",
+        "conv-a",
+        "Anthropic Recruiting <jobs@anthropic.com>",
+        "Interview confirmed",
+        now() - DAY_MS,
+        CONFIRMED_BODY,
+        confirmed_answer("Anthropic", "Forward Deployed Engineer"),
+    );
+    world
+        .run_task(
+            now(),
+            30,
+            &[(&world.outlook, ConnectorId::OutlookMail)],
+            vec![&world.outlook_calendar],
+        )
+        .await;
+    let events = world.outlook_calendar.interview_events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].0.title,
+        "Interview — Anthropic — Forward Deployed Engineer"
+    );
+    let interview = &world.interviews("Anthropic")[0];
+    assert_eq!(interview.calendar_provider, Some(ProviderId::Microsoft));
+    assert_eq!(interview.calendar_state, CalendarState::Created);
+
+    // A conflict flags the interview and adds nothing.
+    let world = World::new();
+    world.outlook_calendar.add_busy(
+        "busy",
+        "Board meeting",
+        at("2026-09-29T07:30:00Z"),
+        at("2026-09-29T09:00:00Z"),
+    );
+    world.email(
+        &world.outlook,
+        "AAMk-2",
+        "conv-b",
+        "Anthropic Recruiting <jobs@anthropic.com>",
+        "Interview confirmed",
+        now() - DAY_MS,
+        CONFIRMED_BODY,
+        confirmed_answer("Anthropic", "Forward Deployed Engineer"),
+    );
+    world
+        .run_task(
+            now(),
+            30,
+            &[(&world.outlook, ConnectorId::OutlookMail)],
+            vec![&world.outlook_calendar],
+        )
+        .await;
+    assert!(world.outlook_calendar.interview_events().is_empty());
+    let row = world.row("Anthropic", "Forward Deployed Engineer");
+    assert_eq!(
+        row.section,
+        crate::models::jobs::ApplicationSection::InterviewsConfirmed
+    );
+    assert!(row.calendar_conflict);
+    assert!(row
+        .latest_update
+        .ends_with("Calendar conflict: not added to your calendar."));
+    assert!(world
+        .notification_titles()
+        .contains(&"Interview confirmed — conflict".to_string()));
+}
+
+#[tokio::test]
+async fn a_meeting_in_the_other_calendar_blocks_the_interview_too() {
+    let world = World::new();
+    // The Gmail interview goes to Google Calendar, which is free at that
+    // time; Outlook Calendar is not.
+    world.outlook_calendar.add_busy(
+        "busy",
+        "Board meeting",
+        at("2026-09-29T07:30:00Z"),
+        at("2026-09-29T09:00:00Z"),
+    );
+    world.email(
+        &world.gmail,
+        "g-1",
+        "t-1",
+        "Anthropic Recruiting <jobs@anthropic.com>",
+        "Interview confirmed",
+        now() - DAY_MS,
+        CONFIRMED_BODY,
+        confirmed_answer("Anthropic", "Forward Deployed Engineer"),
+    );
+    world
+        .run_task(
+            now(),
+            30,
+            &[(&world.gmail, ConnectorId::Gmail)],
+            vec![&world.calendar, &world.outlook_calendar],
+        )
+        .await;
+    assert!(
+        world.calendar.interview_events().is_empty(),
+        "not added to Google Calendar"
+    );
+    assert!(world.outlook_calendar.interview_events().is_empty());
+    let row = world.row("Anthropic", "Forward Deployed Engineer");
+    assert!(row.calendar_conflict);
+    let interview = &world.interviews("Anthropic")[0];
+    assert_eq!(interview.calendar_state, CalendarState::Conflict);
+    assert_eq!(interview.conflicts[0].title, "Board meeting");
+
+    // Adding it by hand asks first, for the same reason.
+    let error = calendar_sync::add_to_calendar(
+        &world.state,
+        &world.calendar,
+        &[&world.calendar, &world.outlook_calendar],
+        interview.id,
+        false,
+        0,
+        now(),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("Board meeting"), "{error}");
+    assert!(world.calendar.interview_events().is_empty());
 }

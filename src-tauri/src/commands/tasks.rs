@@ -36,7 +36,7 @@ pub async fn set_task_enabled(
     id: i64,
     enabled: bool,
 ) -> AppResult<ScheduledTask> {
-    tasks::set_enabled(&state, id, enabled)
+    tasks::set_enabled_checked(&state, id, enabled).await
 }
 
 #[tauri::command]

@@ -4,9 +4,8 @@
 use rusqlite::{params, Connection, OptionalExtension, Row};
 
 use crate::{
-    db::providers as settings,
     error::AppResult,
-    models::connectors::{ConnectorId, ConnectorPreferences, InterviewMode, ProviderId},
+    models::connectors::{ConnectorId, ProviderId},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,13 +120,11 @@ pub fn delete_account(conn: &Connection, provider: ProviderId) -> AppResult<()> 
 pub struct ConnectorRecord {
     pub id: ConnectorId,
     pub enabled: bool,
-    pub background_sync: bool,
     pub last_sync_started_at: Option<i64>,
     pub last_sync_completed_at: Option<i64>,
     pub last_success_at: Option<i64>,
     pub last_error: Option<String>,
     pub last_error_detail: Option<String>,
-    pub next_sync_at: Option<i64>,
 }
 
 fn connector_from_row(row: &Row) -> rusqlite::Result<ConnectorRecord> {
@@ -135,18 +132,18 @@ fn connector_from_row(row: &Row) -> rusqlite::Result<ConnectorRecord> {
     Ok(ConnectorRecord {
         id: ConnectorId::parse(&id).unwrap_or(ConnectorId::Gmail),
         enabled: row.get(1)?,
-        background_sync: row.get(2)?,
-        last_sync_started_at: row.get(3)?,
-        last_sync_completed_at: row.get(4)?,
-        last_success_at: row.get(5)?,
-        last_error: row.get(6)?,
-        last_error_detail: row.get(7)?,
-        next_sync_at: row.get(8)?,
+        last_sync_started_at: row.get(2)?,
+        last_sync_completed_at: row.get(3)?,
+        last_success_at: row.get(4)?,
+        last_error: row.get(5)?,
+        last_error_detail: row.get(6)?,
     })
 }
 
-const CONNECTOR_COLUMNS: &str = "id, enabled, background_sync, last_sync_started_at,
-    last_sync_completed_at, last_success_at, last_error, last_error_detail, next_sync_at";
+// Mail is read only by the built-in task "Job Mail & Interview Sync"; the
+// `background_sync` and `next_sync_at` columns are no longer used.
+const CONNECTOR_COLUMNS: &str = "id, enabled, last_sync_started_at, last_sync_completed_at,
+    last_success_at, last_error, last_error_detail";
 
 pub fn connector(conn: &Connection, id: ConnectorId) -> AppResult<ConnectorRecord> {
     Ok(conn.query_row(
@@ -166,19 +163,10 @@ pub fn connectors(conn: &Connection) -> AppResult<Vec<ConnectorRecord>> {
 pub fn set_enabled(conn: &Connection, id: ConnectorId, enabled: bool, now: i64) -> AppResult<()> {
     conn.execute(
         "UPDATE connectors SET enabled = ?2, updated_at = ?3,
-             next_sync_at = CASE WHEN ?2 = 1 THEN ?3 ELSE NULL END,
              last_error = CASE WHEN ?2 = 1 THEN last_error ELSE NULL END,
              last_error_detail = CASE WHEN ?2 = 1 THEN last_error_detail ELSE NULL END
          WHERE id = ?1",
         params![id.as_str(), enabled, now],
-    )?;
-    Ok(())
-}
-
-pub fn set_background_sync(conn: &Connection, id: ConnectorId, on: bool) -> AppResult<()> {
-    conn.execute(
-        "UPDATE connectors SET background_sync = ?2 WHERE id = ?1",
-        params![id.as_str(), on],
     )?;
     Ok(())
 }
@@ -191,34 +179,29 @@ pub fn sync_started(conn: &Connection, id: ConnectorId, now: i64) -> AppResult<(
     Ok(())
 }
 
-/// Records the end of a sync and when the next one is due.
+/// Records the end of a sync (a task run that used this connector).
 pub fn sync_finished(
     conn: &Connection,
     id: ConnectorId,
     now: i64,
     error: Option<(&str, &str)>,
-    next_sync_at: Option<i64>,
 ) -> AppResult<()> {
     conn.execute(
         "UPDATE connectors SET last_sync_completed_at = ?2,
              last_success_at = CASE WHEN ?3 IS NULL THEN ?2 ELSE last_success_at END,
-             last_error = ?3, last_error_detail = ?4, next_sync_at = ?5
+             last_error = ?3, last_error_detail = ?4
          WHERE id = ?1",
-        params![
-            id.as_str(),
-            now,
-            error.map(|e| e.0),
-            error.map(|e| e.1),
-            next_sync_at
-        ],
+        params![id.as_str(), now, error.map(|e| e.0), error.map(|e| e.1)],
     )?;
     Ok(())
 }
 
-pub fn schedule_sync(conn: &Connection, id: ConnectorId, at: Option<i64>) -> AppResult<()> {
+/// Forgets the last error (after a reconnect) without claiming a sync: the
+/// last success is where reading resumes if a sync position expires.
+pub fn clear_error(conn: &Connection, id: ConnectorId) -> AppResult<()> {
     conn.execute(
-        "UPDATE connectors SET next_sync_at = ?2 WHERE id = ?1",
-        params![id.as_str(), at],
+        "UPDATE connectors SET last_error = NULL, last_error_detail = NULL WHERE id = ?1",
+        [id.as_str()],
     )?;
     Ok(())
 }
@@ -226,8 +209,7 @@ pub fn schedule_sync(conn: &Connection, id: ConnectorId, at: Option<i64>) -> App
 pub fn clear_sync_state(conn: &Connection, id: ConnectorId) -> AppResult<()> {
     conn.execute(
         "UPDATE connectors SET last_sync_started_at = NULL, last_sync_completed_at = NULL,
-             last_success_at = NULL, last_error = NULL, last_error_detail = NULL,
-             next_sync_at = NULL
+             last_success_at = NULL, last_error = NULL, last_error_detail = NULL
          WHERE id = ?1",
         [id.as_str()],
     )?;
@@ -277,44 +259,6 @@ pub fn delete_cursors(conn: &Connection, provider: ProviderId, prefix: &str) -> 
     Ok(())
 }
 
-// ── Preferences ─────────────────────────────────────────────────────
-
-const KEY_INTERVIEW_MODE: &str = "connectors.interview_mode";
-const KEY_SYNC_INTERVAL: &str = "connectors.sync_interval_minutes";
-const KEY_PREP_BUFFER: &str = "connectors.prep_buffer_minutes";
-pub const DEFAULT_SYNC_INTERVAL: u32 = 15;
-
-pub fn preferences(conn: &Connection) -> AppResult<ConnectorPreferences> {
-    let number = |key: &str, default: u32| -> AppResult<u32> {
-        Ok(settings::get_setting(conn, key)?
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(default))
-    };
-    Ok(ConnectorPreferences {
-        interview_mode: settings::get_setting(conn, KEY_INTERVIEW_MODE)?
-            .as_deref()
-            .and_then(InterviewMode::parse)
-            .unwrap_or(InterviewMode::Ask),
-        sync_interval_minutes: number(KEY_SYNC_INTERVAL, DEFAULT_SYNC_INTERVAL)?,
-        prep_buffer_minutes: number(KEY_PREP_BUFFER, 0)?,
-    })
-}
-
-pub fn save_preferences(conn: &Connection, prefs: &ConnectorPreferences) -> AppResult<()> {
-    settings::set_setting(conn, KEY_INTERVIEW_MODE, prefs.interview_mode.as_str())?;
-    settings::set_setting(
-        conn,
-        KEY_SYNC_INTERVAL,
-        &prefs.sync_interval_minutes.to_string(),
-    )?;
-    settings::set_setting(
-        conn,
-        KEY_PREP_BUFFER,
-        &prefs.prep_buffer_minutes.to_string(),
-    )?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -342,8 +286,8 @@ mod tests {
             assert!(!connector(c, ConnectorId::Gmail)?.enabled);
             set_enabled(c, ConnectorId::Gmail, true, 5)?;
             let gmail = connector(c, ConnectorId::Gmail)?;
-            assert!(gmail.enabled && gmail.background_sync);
-            assert_eq!(gmail.next_sync_at, Some(5), "a new connector syncs at once");
+            assert!(gmail.enabled);
+            assert_eq!(gmail.last_sync_started_at, None, "connecting reads no mail");
 
             save_cursor(c, ProviderId::Google, "sub-1", "mail:inbox", "123", 1)?;
             save_cursor(c, ProviderId::Google, "sub-1", "mail:inbox", "456", 2)?;
@@ -353,10 +297,6 @@ mod tests {
             );
             delete_account(c, ProviderId::Google)?;
             assert!(cursor(c, ProviderId::Google, "sub-1", "mail:inbox")?.is_none());
-
-            let prefs = preferences(c)?;
-            assert_eq!(prefs.interview_mode, InterviewMode::Ask, "ask by default");
-            assert_eq!(prefs.sync_interval_minutes, DEFAULT_SYNC_INTERVAL);
             Ok(())
         })
         .unwrap();

@@ -76,7 +76,7 @@ export function PortfolioStudio({ openId, onOpen, profileAvailable }: PortfolioS
               Your CVs
             </h2>
             <p className="section__description">
-              Build polished CVs from scratch and export them as PDF. Uploaded files are never changed.
+              Separate from the CV files in your Profile; those are never changed.
             </p>
           </div>
           <div className="section__actions">

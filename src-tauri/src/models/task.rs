@@ -58,19 +58,39 @@ pub enum EndCondition {
 pub enum TaskKind {
     /// Sends the prompt to the model and keeps its answer.
     Prompt,
-    /// The Job Application Mail Monitor: checks the connected mailboxes
-    /// (Gmail, Outlook Mail) for job-application emails, keeps the
-    /// application tracker up to date and handles confirmed interviews in
-    /// the connected calendars (with conflict checks). The prompt adds the
-    /// user's instructions.
+    /// "Job Mail & Interview Sync" (only as the built-in task): reads the
+    /// connected mailboxes (Gmail, Outlook Mail) for job-application emails,
+    /// keeps Applications up to date and adds confirmed interviews to the
+    /// connected calendar (with conflict checks). The prompt adds the user's
+    /// instructions.
     #[serde(rename_all = "camelCase")]
     JobApplications {
-        /// Days of email to check on every run (1–90). Each run also
-        /// covers everything since the previous successful run.
+        /// Initial lookback: the first run reads the last N days (1–365);
+        /// later runs read only new mail. A longer lookback backfills the
+        /// newly included days once.
         lookback_days: u32,
-        /// Check calendars and handle confirmed interviews.
+        /// Add confirmed interviews to the connected calendar.
         sync_calendar: bool,
     },
+}
+
+/// Tasks ReMa provides. Each exists at most once and runs only after the
+/// user set it up and turned it on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum BuiltinTask {
+    /// "Job Mail & Interview Sync".
+    JobMailSync,
+}
+
+text_enum!(BuiltinTask { JobMailSync => "job_mail_sync" });
+
+impl BuiltinTask {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::JobMailSync => "Job Mail & Interview Sync",
+        }
+    }
 }
 
 /// Lifecycle of a task as shown to the user.
@@ -135,6 +155,8 @@ pub struct ScheduledTask {
     pub id: i64,
     pub name: String,
     pub kind: TaskKind,
+    /// Set for ReMa's built-in tasks.
+    pub builtin: Option<BuiltinTask>,
     pub prompt: String,
     pub use_profile: bool,
     pub model: ModelRef,

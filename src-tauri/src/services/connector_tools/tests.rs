@@ -111,7 +111,7 @@ async fn setup(connect_gmail: bool) -> Option<Setup> {
         state
             .db
             .call(|c| {
-                connector_repo::save_account(
+                crate::db::connectors::save_account(
                     c,
                     &AccountRecord {
                         provider: ProviderId::Google,
@@ -125,7 +125,7 @@ async fn setup(connect_gmail: bool) -> Option<Setup> {
                         updated_at: now,
                     },
                 )?;
-                connector_repo::set_enabled(c, ConnectorId::Gmail, true, now)
+                crate::db::connectors::set_enabled(c, ConnectorId::Gmail, true, now)
             })
             .unwrap();
     }
@@ -158,19 +158,10 @@ fn seed_application(state: &AppState) -> i64 {
             repo::insert_application(
                 c,
                 &repo::ApplicationRecord {
-                    id: 0,
-                    company: "Acme".into(),
-                    company_key: "acme".into(),
                     role: Some("Data Engineer".into()),
                     role_key: Some("data engineer".into()),
-                    reference: None,
                     sender_domain: Some("acme.io".into()),
-                    status: ApplicationStatus::InProcess,
-                    requires_action: false,
-                    next_action: None,
-                    last_update_at: now,
-                    created_at: now,
-                    updated_at: now,
+                    ..repo::ApplicationRecord::new("Acme", ApplicationStatus::InProcess, now)
                 },
             )
         })
@@ -377,4 +368,52 @@ async fn changes_wait_for_approval_every_time() {
         .unwrap();
     assert_eq!(detail.timeline[0].source, UpdateSource::Assistant);
     assert_eq!(detail.timeline[0].change, "Application changed to Rejected");
+}
+
+#[tokio::test]
+async fn chat_reads_the_same_application_state_by_section() {
+    let setup = setup(true).await.unwrap();
+    let in_progress = seed_application(&setup.state);
+    let now = now_ms();
+    let action = setup
+        .state
+        .db
+        .call(|c| {
+            repo::insert_application(
+                c,
+                &repo::ApplicationRecord {
+                    role: Some("AI Engineer".into()),
+                    next_action: Some("Choose an interview slot from the proposed times.".into()),
+                    ..repo::ApplicationRecord::new("SAP", ApplicationStatus::NeedsAction, now)
+                },
+            )
+        })
+        .unwrap();
+    let output = setup
+        .tools
+        .execute(&call(
+            "c1",
+            APPLICATIONS_FIND_MATCH,
+            json!({ "section": "needs_action" }),
+        ))
+        .await;
+    assert!(!output.is_error, "{}", output.content);
+    assert!(output
+        .content
+        .contains(&format!("\"application_id\": {action}")));
+    assert!(output
+        .content
+        .contains("\"latest_update\": \"Choose an interview slot from the proposed times.\""));
+    assert!(!output
+        .content
+        .contains(&format!("\"application_id\": {in_progress}")));
+    let bad = setup
+        .tools
+        .execute(&call(
+            "c2",
+            APPLICATIONS_FIND_MATCH,
+            json!({ "section": "maybe" }),
+        ))
+        .await;
+    assert!(bad.is_error, "sections are validated");
 }

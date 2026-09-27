@@ -29,15 +29,18 @@ Restricted scopes require, before the app can leave *Testing* for all users
 
 | Requirement | ReMa |
 |---|---|
-| Use Google user data only to provide or improve user-facing features prominent in the app | Gmail data is used only for the Applications tracker, notifications, interview calendar handling and the user's own chat questions about applications. |
+| Use Google user data only to provide or improve user-facing features prominent in the app | Gmail data is used only for the Applications tracker, notifications, interview calendar handling and the user's own chat questions about applications. Mail is read only while the user has turned on the built-in task "Job Mail & Interview Sync", starting with the lookback the user chose (default 30 days); connecting an account reads nothing. |
 | No transfer to third parties except as necessary for those features, with user consent, for security, or by law | There is no ReMa server. Only job-related email text is sent, from the user's computer, to the **model provider the user configured** to classify it or answer the user's question. Unrelated mail is filtered deterministically and never read in full or sent. |
 | No use for advertising; no sale | None. |
 | No human reading, except with consent, for security, legal reasons or on aggregated anonymized data | No ReMa staff can access user data (nothing leaves the device except to the user's chosen model provider). |
 | No use to develop, improve or train generalized AI/ML models | ReMa does not train models. Provider requests are inference only; users choose the provider (its own data terms apply; API providers do not train on API data by default). |
 
 **Privacy policy** must state: what Gmail and Calendar data is accessed
-(metadata of recent mail, full text of job-related mail, calendar events and
-free/busy), that it is processed and stored locally, that job-related email
+(metadata of mail within the lookback the user chose and of new mail while
+"Job Mail & Interview Sync" is on, full text of job-related mail, calendar
+events and free/busy, and calendar events shown in ReMa's calendar panel,
+which are read when shown and not stored), that it is processed and stored
+locally, that job-related email
 text is sent to the user's chosen AI provider for classification, how to
 disconnect and revoke access, and the Limited Use statement: *"ReMa's use and
 transfer of information received from Google APIs will adhere to the Google
@@ -58,6 +61,8 @@ API Services User Data Policy, including the Limited Use requirements."*
 | Sync cursors (Gmail `historyId`, Graph `deltaLink`) | SQLite `sync_cursors` | until the mail connector is disconnected |
 | Filtered (unrelated) mail | SQLite `mail_messages`: id, thread, date, sender **domain** only | kept to avoid re-reading |
 | Job-related mail | SQLite: sender, subject, link, category, confidence, validated extraction; **no body** | with the application |
+| How far back each mailbox was read (`mail:covered_from`) | SQLite `sync_cursors` | until the mail connector is disconnected |
+| Calendar events in the calendar panel | not stored: read from the provider for the week shown | — |
 | Applications, timeline, interviews | SQLite | kept after disconnect (the user's own records) |
 
 Never stored or sent: tokens, authorization codes, PKCE verifiers, client

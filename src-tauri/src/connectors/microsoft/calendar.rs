@@ -9,7 +9,9 @@ use serde_json::{json, Value};
 use crate::{
     connectors::{
         api::ApiClient,
-        calendar::{BusyBlock, CalendarEvent, CalendarProvider, EventDraft, INTERVIEW_PROPERTY},
+        calendar::{
+            https_link, BusyBlock, CalendarEvent, CalendarProvider, EventDraft, INTERVIEW_PROPERTY,
+        },
     },
     error::{AppError, AppResult},
     llm::BoxFuture,
@@ -21,7 +23,8 @@ pub fn property_id() -> String {
     format!("String {{7a1d7b58-5f1b-4a3c-9f0e-2a7c4e9d1b63}} Name {INTERVIEW_PROPERTY}")
 }
 
-const SELECT: &str = "id,subject,start,end,showAs,isAllDay,isCancelled";
+const SELECT: &str =
+    "id,subject,start,end,showAs,isAllDay,isCancelled,location,onlineMeeting,onlineMeetingUrl,webLink";
 
 /// Graph `dateTimeTimeZone` in UTC.
 fn graph_time(millis: i64) -> Value {
@@ -78,6 +81,18 @@ pub fn parse_event(value: &Value) -> Option<CalendarEvent> {
                     .is_some_and(|id| id.eq_ignore_ascii_case(&property))
             })
             .and_then(|p| p.get("value")?.as_str()?.parse().ok()),
+        location: value
+            .pointer("/location/displayName")
+            .and_then(Value::as_str)
+            .filter(|l| !l.trim().is_empty())
+            .map(str::to_string),
+        meeting_url: https_link(
+            value
+                .pointer("/onlineMeeting/joinUrl")
+                .and_then(Value::as_str),
+        )
+        .or_else(|| https_link(value.get("onlineMeetingUrl").and_then(Value::as_str))),
+        web_link: https_link(value.get("webLink").and_then(Value::as_str)),
     })
 }
 

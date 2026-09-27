@@ -57,6 +57,12 @@
   min-width: 0;
 }
 
+.profile-panel__description {
+  margin-bottom: calc(-1 * var(--space-4));
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
 .profile-intro {
   display: flex;
   align-items: center;

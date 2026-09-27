@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import '../test/dom';
 
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { NavigationContext, type View } from '../app/navigation';
@@ -31,45 +31,63 @@ vi.mock('../services/systemService', () => ({ openExternalUrl: vi.fn(() => Promi
 const DAY = 86_400_000;
 const start = Date.now() + 3 * DAY;
 
-const globex: ApplicationRow = {
+function row(patch: Partial<ApplicationRow> & Pick<ApplicationRow, 'id' | 'company'>): ApplicationRow {
+  return {
+    role: 'Engineer',
+    status: 'in_process',
+    section: 'in_progress',
+    statusLabel: 'In review',
+    lastUpdateAt: Date.now() - DAY,
+    latestUpdate: 'Recruiting team is reviewing your application.',
+    nextAction: null,
+    rejectionReason: null,
+    interviewAt: null,
+    interviewTimezone: null,
+    meetingUrl: null,
+    calendarConflict: false,
+    mailProvider: 'google',
+    ...patch,
+  };
+}
+
+const globex = row({
   id: 7,
   company: 'Globex',
   role: 'Data Engineer',
   status: 'upcoming_interview',
+  section: 'interviews_confirmed',
+  statusLabel: 'Interview confirmed',
   lastUpdateAt: Date.now() - 3_600_000,
-  nextAction: null,
+  latestUpdate: 'Interview confirmed for Sep 29 at 10:00 CEST.',
   interviewAt: start,
-  interviewTimezone: 'Europe/Vienna',
-};
+  interviewTimezone: 'CEST',
+  meetingUrl: 'https://meet.google.com/abc-defg-hij',
+});
 
 const overview: ApplicationsOverview = {
-  summary: { updatesToday: 2, interviewsScheduled: 1, actionRequired: 1, offers: 0, total: 2 },
   applications: [
     globex,
-    {
+    row({
       id: 8,
       company: 'Umbrella',
-      role: null,
       status: 'needs_action',
+      section: 'needs_action',
+      statusLabel: 'Interview requested',
       lastUpdateAt: Date.now() - 7_200_000,
-      nextAction: 'Reply to confirm an interview time',
-      interviewAt: null,
-      interviewTimezone: null,
-    },
+      latestUpdate: 'Choose an interview slot from the proposed times.',
+    }),
+    row({ id: 9, company: 'Stark', lastUpdateAt: Date.now() - 2 * DAY }),
+    row({
+      id: 10,
+      company: 'Initech',
+      status: 'rejected',
+      section: 'rejected',
+      statusLabel: 'Rejected',
+      latestUpdate: 'No reason provided.',
+    }),
   ],
-  needsReview: [
-    {
-      provider: 'google',
-      messageId: 'a1',
-      subject: 'Quick question',
-      sender: 'Globex <talent@globex.com>',
-      receivedAt: Date.now() - 600_000,
-      category: 'rejection',
-      confidence: 0.3,
-      webLink: 'https://mail.google.com/mail/#all/a1',
-      status: 'ambiguous',
-    },
-  ],
+  tracking: { taskId: 1, enabled: true, mailConnected: true, lastRunAt: Date.now() - 600_000, nextRunAt: null },
+  needsReview: [],
 };
 
 function interview(patch: Partial<InterviewView>): InterviewView {
@@ -80,6 +98,7 @@ function interview(patch: Partial<InterviewView>): InterviewView {
     startAt: start,
     endAt: start + 3_600_000,
     timezone: 'Europe/Vienna',
+    timeText: 'Sep 29 at 10:00 CEST',
     location: null,
     meetingUrl: 'https://meet.example.com/globex-1',
     participants: [],
@@ -101,7 +120,7 @@ function detail(i: InterviewView): ApplicationDetail {
       {
         id: 2,
         source: 'gmail',
-        change: 'Application changed to Interview',
+        change: 'Application changed to Interview confirmed',
         status: 'upcoming_interview',
         previousStatus: 'confirmed',
         category: 'interview_confirmed',
@@ -130,25 +149,80 @@ beforeEach(() => {
 });
 
 describe('Applications', () => {
-  it('summarizes applications and lists emails that need review', async () => {
+  it('shows exactly five sections, each application in one, with the required columns', async () => {
     const navigate = show({ page: 'applications' });
     expect(await screen.findByText('Globex')).toBeTruthy();
-    expect(screen.getByText('Interviews scheduled')).toBeTruthy();
-    expect(screen.getByText('Reply to confirm an interview time')).toBeTruthy();
-    expect(screen.getByText('Quick question')).toBeTruthy();
-    expect(screen.getByText(/Confidence 30%/)).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Globex' }));
+    const sections = screen.getAllByRole('region');
+    expect(sections.map((s) => s.getAttribute('aria-label'))).toEqual([
+      'Interviews Confirmed',
+      'Applications Confirmed',
+      'Needs Your Action',
+      'Applications In Progress',
+      'Rejected',
+    ]);
+    const [interviews, confirmed, action, progress, rejected] = sections as [
+      HTMLElement,
+      HTMLElement,
+      HTMLElement,
+      HTMLElement,
+      HTMLElement,
+    ];
+    expect(within(interviews).getByText('Globex')).toBeTruthy();
+    expect(within(interviews).getByText('Interview confirmed for Sep 29 at 10:00 CEST.')).toBeTruthy();
+    expect(within(confirmed).getByText('No confirmed applications waiting for news.')).toBeTruthy();
+    expect(within(action).getByText('Choose an interview slot from the proposed times.')).toBeTruthy();
+    expect(within(progress).getByText('Stark')).toBeTruthy();
+    expect(within(rejected).getByText('No reason provided.')).toBeTruthy();
+    expect(screen.getAllByText('Globex')).toHaveLength(1);
+    const headers = within(interviews)
+      .getAllByRole('columnheader')
+      .map((h) => h.textContent);
+    expect(headers).toEqual(['Date (latest msg)', 'Company', 'Role', 'Status', 'Interview']);
+    expect(within(rejected).getByRole('columnheader', { name: 'Rejection reason' })).toBeTruthy();
+    fireEvent.click(within(interviews).getByRole('button', { name: 'Globex' }));
     expect(navigate).toHaveBeenCalledWith({ page: 'applications', applicationId: 7 });
+  });
+
+  it('collapses and expands each section on its own', async () => {
+    show({ page: 'applications' });
+    const toggle = await screen.findByRole('button', { name: /Rejected/ });
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(screen.queryByText('No reason provided.')).toBeNull();
+    expect(screen.getByText('Globex')).toBeTruthy();
+    fireEvent.click(toggle);
+    expect(screen.getByText('No reason provided.')).toBeTruthy();
+  });
+
+  it('opens meeting links directly', async () => {
+    const { openExternalUrl } = await import('../services/systemService');
+    show({ page: 'applications' });
+    fireEvent.click(await screen.findByRole('button', { name: 'Meeting link' }));
+    expect(openExternalUrl).toHaveBeenCalledWith('https://meet.google.com/abc-defg-hij');
+  });
+
+  it('says when mail is not tracked, without scanning anything', async () => {
+    mocks.getApplications.mockResolvedValue({
+      ...overview,
+      applications: [],
+      tracking: { taskId: null, enabled: false, mailConnected: true, lastRunAt: null, nextRunAt: null },
+    });
+    const navigate = show({ page: 'applications' });
+    expect(await screen.findByText(/ReMa is not reading your mail/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Scheduled Tasks' }));
+    expect(navigate).toHaveBeenCalledWith({ page: 'tasks' });
+    expect(screen.getAllByRole('region')).toHaveLength(5);
   });
 
   it('shows where each change came from', async () => {
     mocks.getApplication.mockResolvedValue(detail(interview({})));
     show({ page: 'applications', applicationId: 7 });
-    expect(await screen.findByText('Application changed to Interview')).toBeTruthy();
+    expect(await screen.findByText('Application changed to Interview confirmed')).toBeTruthy();
     expect(screen.getByText(/Source: Gmail message · Confidence: 98%/)).toBeTruthy();
   });
 
-  it('asks before adding a confirmed interview, and can decline', async () => {
+  it('can still add a confirmed interview by hand, or decline it', async () => {
     mocks.getApplication.mockResolvedValue(detail(interview({})));
     mocks.addInterviewToCalendar.mockResolvedValue(detail(interview({ calendarState: 'created' })));
     mocks.declineInterviewCalendar.mockResolvedValue(detail(interview({ calendarState: 'declined' })));

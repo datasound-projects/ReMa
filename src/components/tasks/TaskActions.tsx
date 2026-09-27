@@ -1,5 +1,6 @@
 import { useState } from 'react';
 
+import { canRunNow, isOldMailTask } from '../../lib/taskForm';
 import { toApiError } from '../../services/ipc';
 import {
   deleteTask,
@@ -28,13 +29,13 @@ export function TaskActions({ task, onEdit, onDeleted, onError }: TaskActionsPro
   };
 
   const items: MenuItem[] = [
-    { label: 'Run now', disabled: task.running, onSelect: () => attempt(() => runTaskNow(task.id)) },
+    { label: 'Run now', disabled: !canRunNow(task), onSelect: () => attempt(() => runTaskNow(task.id)) },
     { label: 'Edit', onSelect: onEdit },
     task.enabled
       ? { label: 'Pause', onSelect: () => attempt(() => setTaskEnabled(task.id, false)) }
       : {
           label: 'Resume',
-          disabled: task.status === 'completed',
+          disabled: task.status === 'completed' || isOldMailTask(task),
           onSelect: () => attempt(() => setTaskEnabled(task.id, true)),
         },
     { label: 'Delete', danger: true, onSelect: () => setConfirming(true) },

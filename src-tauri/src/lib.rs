@@ -60,7 +60,6 @@ use crate::{
     db::Database,
     events::TauriEvents,
     llm::ProviderLanguageModel,
-    models::connectors::ConnectorKind,
     secrets::{KeyringStore, SecretVault},
     services::{
         background, chat::Generations, mail_monitor, scheduler, scheduler::SchedulerHandle,
@@ -197,11 +196,18 @@ fn show_main_window(app: &AppHandle) {
     }
 }
 
-/// The tray menu: Open ReMa, Sync now, Quit ReMa. Hidden unless "Run ReMa in
+/// The tray menu: Open ReMa, Run Job Mail & Interview Sync (only when the
+/// user turned that task on), Quit ReMa. Hidden unless "Run ReMa in
 /// background" is on.
 fn create_tray(app: &App) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "Open ReMa", true, None::<&str>)?;
-    let sync = MenuItem::with_id(app, "sync", "Sync now", true, None::<&str>)?;
+    let sync = MenuItem::with_id(
+        app,
+        "sync",
+        "Run Job Mail & Interview Sync",
+        true,
+        None::<&str>,
+    )?;
     let quit = MenuItem::with_id(app, "quit", "Quit ReMa", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&open, &sync, &quit])?;
     let mut builder = TrayIconBuilder::with_id(TRAY_ID)
@@ -212,12 +218,7 @@ fn create_tray(app: &App) -> tauri::Result<()> {
             "open" => show_main_window(app),
             "sync" => {
                 if let Some(state) = app.try_state::<AppState>() {
-                    let state = state.inner().clone();
-                    tauri::async_runtime::spawn(async move {
-                        for id in connectors::ready(&state, ConnectorKind::Mail).await {
-                            let _ = mail_monitor::spawn_sync(&state, id);
-                        }
-                    });
+                    let _ = services::tasks::run_job_mail_sync_now(state.inner());
                 }
             }
             "quit" => app.exit(0),

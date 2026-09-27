@@ -1,24 +1,40 @@
-import { commands, type ApplicationDetail, type ApplicationStatus, type ApplicationsOverview } from '../generated/bindings';
+import {
+  commands,
+  type ApplicationDetail,
+  type ApplicationStatus,
+  type ApplicationsOverview,
+  type CalendarView,
+} from '../generated/bindings';
 import { callBackend } from './ipc';
 
 export type {
   ApplicationDetail,
   ApplicationRow,
+  ApplicationSection,
   ApplicationStatus,
   ApplicationsOverview,
-  ApplicationsSummary,
+  CalendarEntry,
+  CalendarSource,
   CalendarState,
+  CalendarView,
   Correspondence,
   EmailCategory,
   InterviewView,
   NotificationItem,
   ProposedSlot,
+  InterviewLink,
   TimelineEntry,
+  TrackingStatus,
   UpdateSource,
 } from '../generated/bindings';
 
 export function getApplications(): Promise<ApplicationsOverview> {
   return callBackend(() => commands.getApplications());
+}
+
+/** The in-app calendar: connected calendars' events (read live) with ReMa's interviews. */
+export function getCalendar(start: number, end: number): Promise<CalendarView> {
+  return callBackend(() => commands.getCalendar(start, end));
 }
 
 export function getApplication(id: number): Promise<ApplicationDetail> {

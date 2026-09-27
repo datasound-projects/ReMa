@@ -381,3 +381,114 @@
     display: none;
   }
 }
+
+/* ── Built-in task (Job Mail & Interview Sync) ─────────── */
+
+.builtin-card {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.builtin-card__icon {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  border-radius: var(--radius-md);
+  background: var(--color-brand-subtle);
+  color: var(--color-accent);
+}
+
+.builtin-card__body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.builtin-card__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.builtin-card__title {
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+}
+
+.builtin-card__description {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+.builtin-card__meta {
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
+}
+
+.builtin-card__actions {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.tasks__own-heading {
+  margin-top: var(--space-2);
+}
+
+@container (max-width: 640px) {
+  .builtin-card {
+    flex-wrap: wrap;
+  }
+
+  .builtin-card__actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+}
+
+.builtin-intro {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+.builtin-intro__icon {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  color: var(--color-accent);
+}
+
+.source-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--text-sm);
+}
+
+.source-list li {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.source-list__account {
+  color: var(--color-text-tertiary);
+}

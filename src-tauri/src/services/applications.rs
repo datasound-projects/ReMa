@@ -3,20 +3,39 @@
 
 use crate::{
     connectors::{self, sync},
-    db::{connectors as connector_repo, jobs as repo},
+    db::jobs as repo,
     error::{AppError, AppResult},
     jobs::{calendar_sync, tracker},
     models::{
         connectors::{ConnectorId, ConnectorKind},
-        jobs::{ApplicationDetail, ApplicationStatus, ApplicationsOverview, UpdateSource},
+        jobs::{
+            ApplicationDetail, ApplicationStatus, ApplicationsOverview, TrackingStatus,
+            UpdateSource,
+        },
     },
     state::AppState,
     time::now_ms,
 };
 
+/// Every application in its current section, and whether mail is being
+/// tracked (only by "Job Mail & Interview Sync").
 pub fn overview(state: &AppState) -> AppResult<ApplicationsOverview> {
     let now = now_ms();
-    state.db.call(|c| tracker::overview(c, now))
+    let mut overview = state.db.call(|c| tracker::overview(c, now))?;
+    let task = crate::services::tasks::job_mail_sync(state)?;
+    let mail_connected = state.db.call(|c| {
+        Ok(crate::db::connectors::connectors(c)?
+            .iter()
+            .any(|r| r.enabled && r.id.kind() == ConnectorKind::Mail))
+    })?;
+    overview.tracking = TrackingStatus {
+        task_id: task.as_ref().map(|t| t.id),
+        enabled: task.as_ref().is_some_and(|t| t.enabled),
+        mail_connected,
+        last_run_at: task.as_ref().and_then(|t| t.last_run_at),
+        next_run_at: task.as_ref().and_then(|t| t.next_run_at),
+    };
+    Ok(overview)
 }
 
 pub fn detail(state: &AppState, id: i64) -> AppResult<ApplicationDetail> {
@@ -69,18 +88,24 @@ pub async fn add_interview_to_calendar(
 ) -> AppResult<ApplicationDetail> {
     let interview = state.db.call(|c| repo::get_interview(c, interview_id))?;
     let calendar = calendar_for(state, &interview).await?;
-    let buffer_ms = i64::from(
-        state
-            .db
-            .call(|c| connector_repo::preferences(c))?
-            .prep_buffer_minutes,
-    ) * 60_000;
+    // Conflicts are checked in the other connected calendar too.
+    let mut others = Vec::new();
+    for id in connectors::ready(state, ConnectorKind::Calendar).await {
+        if id.provider() != calendar.provider() {
+            others.push(sync::calendar_client(state, id).await?);
+        }
+    }
+    let calendars: Vec<&dyn connectors::calendar::CalendarProvider> =
+        std::iter::once(calendar.as_ref())
+            .chain(others.iter().map(|c| c.as_ref()))
+            .collect();
     let record = calendar_sync::add_to_calendar(
         state,
         calendar.as_ref(),
+        &calendars,
         interview_id,
         allow_conflict,
-        buffer_ms,
+        0,
         now_ms(),
     )
     .await;

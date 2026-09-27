@@ -7,7 +7,7 @@ use crate::{
     models::{
         jobs::JobRunReport,
         provider::ModelRef,
-        task::{ExecutionStatus, ExecutionTrigger, Schedule, TaskExecution, TaskKind},
+        task::{BuiltinTask, ExecutionStatus, ExecutionTrigger, Schedule, TaskExecution, TaskKind},
     },
 };
 
@@ -17,6 +17,7 @@ pub struct TaskRow {
     pub id: i64,
     pub name: String,
     pub kind: TaskKind,
+    pub builtin: Option<BuiltinTask>,
     pub prompt: String,
     pub use_profile: bool,
     pub model: ModelRef,
@@ -37,7 +38,7 @@ pub struct TaskRow {
 
 const TASK_COLUMNS: &str = "id, name, prompt, provider_id, model_id, schedule, timezone, start_at,
     end_at, max_runs, run_count, enabled, status, last_run_at, next_run_at, created_at, updated_at,
-    kind, use_profile";
+    kind, use_profile, builtin";
 
 const EXECUTION_COLUMNS: &str = "id, task_id, trigger, scheduled_for, started_at, finished_at,
     status, provider_id, model_id, result, error, report";
@@ -46,7 +47,9 @@ fn task_from_row(row: &Row) -> rusqlite::Result<TaskRow> {
     let schedule: String = row.get(5)?;
     let status: String = row.get(12)?;
     let kind: String = row.get(17)?;
+    let builtin: Option<String> = row.get(19)?;
     Ok(TaskRow {
+        builtin: builtin.as_deref().and_then(BuiltinTask::parse),
         id: row.get(0)?,
         name: row.get(1)?,
         kind: serde_json::from_str(&kind).map_err(|e| {
@@ -108,8 +111,9 @@ pub fn insert(conn: &Connection, task: &TaskRow) -> AppResult<i64> {
     conn.execute(
         "INSERT INTO scheduled_tasks (name, prompt, provider_id, model_id, schedule, timezone,
              start_at, end_at, max_runs, run_count, enabled, status, last_run_at, next_run_at,
-             created_at, updated_at, kind, use_profile)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+             created_at, updated_at, kind, use_profile, builtin)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
+             ?19)",
         params![
             task.name,
             task.prompt,
@@ -133,6 +137,7 @@ pub fn insert(conn: &Connection, task: &TaskRow) -> AppResult<i64> {
             task.updated_at,
             to_json(&task.kind)?,
             task.use_profile,
+            task.builtin.map(BuiltinTask::as_str),
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -194,6 +199,17 @@ pub fn list(conn: &Connection) -> AppResult<Vec<TaskRow>> {
     ))?;
     let rows = stmt.query_map([], task_from_row)?;
     Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// The built-in task, if the user set it up.
+pub fn builtin(conn: &Connection, which: BuiltinTask) -> AppResult<Option<TaskRow>> {
+    Ok(conn
+        .query_row(
+            &format!("SELECT {TASK_COLUMNS} FROM scheduled_tasks WHERE builtin = ?1"),
+            [which.as_str()],
+            task_from_row,
+        )
+        .optional()?)
 }
 
 pub fn delete(conn: &Connection, id: i64) -> AppResult<()> {
@@ -368,6 +384,7 @@ mod tests {
             id: 0,
             name: "Jobs".into(),
             kind: TaskKind::Prompt,
+            builtin: None,
             prompt: "Find jobs".into(),
             use_profile: true,
             model: ModelRef {

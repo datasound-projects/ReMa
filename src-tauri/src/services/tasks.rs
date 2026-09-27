@@ -11,7 +11,8 @@ use crate::{
     models::{
         connectors::ConnectorKind,
         task::{
-            EndCondition, Schedule, ScheduledTask, TaskExecution, TaskInput, TaskKind, TaskStatus,
+            BuiltinTask, EndCondition, Schedule, ScheduledTask, TaskExecution, TaskInput, TaskKind,
+            TaskStatus,
         },
     },
     services::{
@@ -25,8 +26,9 @@ use crate::{
 
 const MAX_PROMPT_CHARS: usize = 20_000;
 const MAX_NAME_CHARS: usize = 120;
-const MAX_LOOKBACK_DAYS: u32 = 90;
-const JOB_TASK_NAME: &str = "Job Application Mail Monitor";
+const MAX_LOOKBACK_DAYS: u32 = crate::jobs::MAX_LOOKBACK_DAYS;
+/// "Initial lookback: last N days" when the user does not change it.
+pub const DEFAULT_LOOKBACK_DAYS: u32 = 30;
 const MAX_RUNS_LIMIT: u32 = 100_000;
 /// A start time up to this far in the past still counts as "now".
 const START_GRACE_MS: i64 = 60_000;
@@ -75,7 +77,8 @@ fn parse_input(conn: &rusqlite::Connection, input: &TaskInput) -> AppResult<Defi
         return Err(AppError::validation("The prompt is too long."));
     }
     let name = match input.name.trim() {
-        "" if kind != TaskKind::Prompt => JOB_TASK_NAME.to_string(),
+        // The built-in task keeps its name.
+        _ if kind != TaskKind::Prompt => BuiltinTask::JobMailSync.name().to_string(),
         "" => make_title(prompt),
         name if name.chars().count() > MAX_NAME_CHARS => {
             return Err(AppError::validation("The name is too long."))
@@ -153,36 +156,43 @@ fn no_future_runs() -> AppError {
     AppError::validation("This schedule has no upcoming runs. Check the start and end dates.")
 }
 
-/// A mail monitor task needs a connected mailbox (and a calendar, when it
-/// handles interviews).
+/// "Job Mail & Interview Sync" needs a connected mailbox. A calendar is
+/// optional: without one, confirmed interviews are tracked but not added.
 async fn require_tools(state: &AppState, kind: TaskKind) -> AppResult<()> {
-    if let TaskKind::JobApplications { sync_calendar, .. } = kind {
-        if connectors::ready(state, ConnectorKind::Mail)
+    if matches!(kind, TaskKind::JobApplications { .. })
+        && connectors::ready(state, ConnectorKind::Mail)
             .await
             .is_empty()
-        {
-            return Err(AppError::configuration(
-                "Connect Gmail or Outlook Mail in Settings → Connectors first.",
-            ));
-        }
-        if sync_calendar
-            && connectors::ready(state, ConnectorKind::Calendar)
-                .await
-                .is_empty()
-        {
-            return Err(AppError::configuration(
-                "Connect Google Calendar or Outlook Calendar in Settings → Connectors, or turn \
-                 off calendar sync for this task.",
-            ));
-        }
+    {
+        return Err(AppError::configuration(
+            "Connect Gmail or Outlook Mail in Settings → Connectors first.",
+        ));
     }
     Ok(())
 }
 
+/// Which built-in task a definition is (mail tracking exists only as
+/// "Job Mail & Interview Sync").
+fn builtin_of(kind: TaskKind) -> Option<BuiltinTask> {
+    matches!(kind, TaskKind::JobApplications { .. }).then_some(BuiltinTask::JobMailSync)
+}
+
+/// Creates a task. "Job Mail & Interview Sync" is created once, when the
+/// user sets it up; it starts turned on because setting it up is the
+/// user's explicit choice.
 pub async fn create(state: &AppState, input: TaskInput) -> AppResult<ScheduledTask> {
     require_tools(state, input.kind).await?;
     let now = now_ms();
+    let builtin = builtin_of(input.kind);
     let id = state.db.call(|conn| {
+        if let Some(which) = builtin {
+            if repo::builtin(conn, which)?.is_some() {
+                return Err(AppError::validation(format!(
+                    "{} is already set up. Change its settings instead.",
+                    which.name()
+                )));
+            }
+        }
         let definition = parse_input(conn, &input)?;
         let next_run_at = first_run(&definition, now)?.ok_or_else(no_future_runs)?;
         repo::insert(
@@ -191,6 +201,7 @@ pub async fn create(state: &AppState, input: TaskInput) -> AppResult<ScheduledTa
                 id: 0,
                 name: definition.name,
                 kind: definition.kind,
+                builtin,
                 use_profile: definition.use_profile,
                 prompt: definition.prompt,
                 model: input.model.clone(),
@@ -221,6 +232,11 @@ pub async fn update(state: &AppState, id: i64, input: TaskInput) -> AppResult<Sc
     let now = now_ms();
     state.db.call(|conn| {
         let mut task = repo::get(conn, id)?;
+        if task.builtin != builtin_of(input.kind) {
+            return Err(AppError::validation(
+                "A task cannot change between a prompt and Job Mail & Interview Sync.",
+            ));
+        }
         let definition = parse_input(conn, &input)?;
         let timing_changed = task.schedule != definition.schedule
             || task.timezone != definition.timezone
@@ -249,6 +265,57 @@ pub async fn update(state: &AppState, id: i64, input: TaskInput) -> AppResult<Sc
     state.scheduler.wake();
     state.events.tasks_changed();
     get(state, id)
+}
+
+/// Why a mail task other than the built-in one (left from before it
+/// existed) never runs.
+pub const ONLY_BUILT_IN_READS_MAIL: &str =
+    "Only Job Mail & Interview Sync reads mail. Delete this \
+     task and set up Job Mail & Interview Sync in Scheduled Tasks.";
+
+pub fn is_old_mail_task(task: &TaskRow) -> bool {
+    matches!(task.kind, TaskKind::JobApplications { .. })
+        && task.builtin != Some(BuiltinTask::JobMailSync)
+}
+
+/// Turns a task on or off. "Job Mail & Interview Sync" can be turned on
+/// only with a connected mailbox.
+pub async fn set_enabled_checked(
+    state: &AppState,
+    id: i64,
+    enabled: bool,
+) -> AppResult<ScheduledTask> {
+    if enabled {
+        let task = state.db.call(|c| repo::get(c, id))?;
+        if is_old_mail_task(&task) {
+            return Err(AppError::validation(ONLY_BUILT_IN_READS_MAIL));
+        }
+        require_tools(state, task.kind).await?;
+    }
+    set_enabled(state, id, enabled)
+}
+
+/// Runs "Job Mail & Interview Sync" now if the user turned it on (the tray
+/// menu's action). Does nothing otherwise.
+pub fn run_job_mail_sync_now(state: &AppState) -> AppResult<()> {
+    match state
+        .db
+        .call(|c| repo::builtin(c, BuiltinTask::JobMailSync))?
+    {
+        Some(task) if task.enabled => run_now(state, task.id),
+        _ => Ok(()),
+    }
+}
+
+/// The built-in "Job Mail & Interview Sync", if set up.
+pub fn job_mail_sync(state: &AppState) -> AppResult<Option<ScheduledTask>> {
+    match state
+        .db
+        .call(|c| repo::builtin(c, BuiltinTask::JobMailSync))?
+    {
+        Some(row) => Ok(Some(to_view(state, row)?)),
+        None => Ok(None),
+    }
 }
 
 /// Pausing keeps the task; resuming continues from the next upcoming run.
@@ -290,6 +357,15 @@ pub fn delete(state: &AppState, id: i64) -> AppResult<()> {
 /// Starts a run immediately. Does not change the schedule or run count.
 pub fn run_now(state: &AppState, id: i64) -> AppResult<()> {
     let task = state.db.call(|c| repo::get(c, id))?;
+    // Mail is read only by the built-in task while it is on, by hand too.
+    if is_old_mail_task(&task) {
+        return Err(AppError::validation(ONLY_BUILT_IN_READS_MAIL));
+    }
+    if task.builtin == Some(BuiltinTask::JobMailSync) && !task.enabled {
+        return Err(AppError::validation(
+            "Turn on Job Mail & Interview Sync first: ReMa reads your mail only while it is on.",
+        ));
+    }
     scheduler::spawn_run(
         state,
         task,
@@ -338,6 +414,7 @@ fn to_view(state: &AppState, row: TaskRow) -> AppResult<ScheduledTask> {
         running: state.scheduler.is_running(row.id),
         name: row.name,
         kind: row.kind,
+        builtin: row.builtin,
         prompt: row.prompt,
         use_profile: row.use_profile,
         model: row.model,
@@ -539,6 +616,183 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(rescheduled.run_count, 0);
+    }
+
+    /// Gmail connected (a token in the vault, granted scopes).
+    async fn connect_gmail(state: &AppState) {
+        use crate::{
+            db::connectors::{self as connector_repo, AccountRecord, AccountStatus},
+            models::connectors::{ConnectorId, ProviderId},
+            secrets::Credential,
+        };
+        state
+            .vault
+            .set(
+                &crate::connectors::tokens::vault_account(ProviderId::Google),
+                Credential::OAuth {
+                    access_token: "at".into(),
+                    refresh_token: Some("rt".into()),
+                    expires_at: Some(now_ms() + 3_600_000),
+                },
+            )
+            .await
+            .unwrap();
+        let now = now_ms();
+        state
+            .db
+            .call(|c| {
+                connector_repo::save_account(
+                    c,
+                    &AccountRecord {
+                        provider: ProviderId::Google,
+                        account_id: Some("g-1".into()),
+                        email: Some("ana@gmail.com".into()),
+                        display_name: None,
+                        granted_scopes: crate::connectors::google::scopes(&[ConnectorId::Gmail]),
+                        status: AccountStatus::Connected,
+                        status_reason: None,
+                        connected_at: now,
+                        updated_at: now,
+                    },
+                )?;
+                connector_repo::set_enabled(c, ConnectorId::Gmail, true, now)
+            })
+            .unwrap();
+    }
+
+    fn mail_task(lookback_days: u32) -> TaskInput {
+        TaskInput {
+            name: "anything".into(),
+            kind: TaskKind::JobApplications {
+                lookback_days,
+                sync_calendar: true,
+            },
+            prompt: String::new(),
+            ..input(Schedule::Daily { every: 1 }, EndCondition::Never)
+        }
+    }
+
+    #[tokio::test]
+    async fn job_mail_sync_is_a_single_built_in_task_that_needs_a_mailbox() {
+        let state = state().await;
+        // Nothing is set up: nothing runs, and "Run now" from the tray is a no-op.
+        assert!(job_mail_sync(&state).unwrap().is_none());
+        run_job_mail_sync_now(&state).unwrap();
+        assert!(list(&state).unwrap().is_empty());
+
+        // A mailbox is required.
+        let error = create(&state, mail_task(30)).await.unwrap_err();
+        assert!(error.to_string().contains("Connect Gmail or Outlook Mail"));
+
+        connect_gmail(&state).await;
+        let task = create(&state, mail_task(30)).await.unwrap();
+        assert_eq!(task.builtin, Some(BuiltinTask::JobMailSync));
+        assert_eq!(task.name, "Job Mail & Interview Sync", "the name is fixed");
+        assert!(task.enabled, "set up means turned on");
+        assert!(!task.use_profile, "mail tracking never sends the Profile");
+        assert!(matches!(
+            task.kind,
+            TaskKind::JobApplications {
+                lookback_days: 30,
+                ..
+            }
+        ));
+
+        // Once only.
+        assert!(create(&state, mail_task(14)).await.is_err());
+        // Lookback bounds.
+        assert!(update(&state, task.id, mail_task(0)).await.is_err());
+        assert!(update(&state, task.id, mail_task(400)).await.is_err());
+        let longer = update(&state, task.id, mail_task(60)).await.unwrap();
+        assert!(matches!(
+            longer.kind,
+            TaskKind::JobApplications {
+                lookback_days: 60,
+                ..
+            }
+        ));
+        // It stays what it is.
+        let mut prompt = input(Schedule::Daily { every: 1 }, EndCondition::Never);
+        prompt.name = "x".into();
+        assert!(update(&state, task.id, prompt).await.is_err());
+
+        // Turned off: no scheduled runs and the tray action does nothing.
+        let off = set_enabled_checked(&state, task.id, false).await.unwrap();
+        assert_eq!(off.next_run_at, None);
+        run_job_mail_sync_now(&state).unwrap();
+        assert!(!state.scheduler.is_running(task.id));
+    }
+
+    #[tokio::test]
+    async fn a_mail_task_other_than_the_built_in_one_never_runs() {
+        let state = state().await;
+        connect_gmail(&state).await;
+        // A mail task left from before the built-in one existed (the
+        // migration keeps it, paused).
+        let task = create(&state, mail_task(30)).await.unwrap();
+        state
+            .db
+            .call(|c| {
+                c.execute(
+                    "UPDATE scheduled_tasks SET builtin = NULL, enabled = 0 WHERE id = ?1",
+                    [task.id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let error = set_enabled_checked(&state, task.id, true)
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), ONLY_BUILT_IN_READS_MAIL);
+        assert_eq!(
+            run_now(&state, task.id).unwrap_err().to_string(),
+            ONLY_BUILT_IN_READS_MAIL
+        );
+        assert!(job_mail_sync(&state).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn turning_job_mail_sync_on_needs_a_connected_mailbox() {
+        let state = state().await;
+        connect_gmail(&state).await;
+        let task = create(&state, mail_task(30)).await.unwrap();
+        set_enabled_checked(&state, task.id, false).await.unwrap();
+        // Paused: not even "Run now" reads mail.
+        let error = run_now(&state, task.id).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("Turn on Job Mail & Interview Sync"));
+        crate::connectors::disconnect(&state, crate::models::connectors::ConnectorId::Gmail)
+            .await
+            .unwrap();
+        let error = set_enabled_checked(&state, task.id, true)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("Connect Gmail or Outlook Mail"));
+        // A run while no mailbox is connected fails with the same advice and
+        // reads nothing.
+        let error = crate::services::mail_monitor::run_task(
+            &state,
+            crate::jobs::RunModel {
+                endpoint: &crate::llm::Endpoint {
+                    kind: ProviderKind::Anthropic,
+                    name: "Anthropic".into(),
+                    connection: crate::models::provider::ConnectionMethod::ApiKey,
+                    base_url: "http://localhost".into(),
+                    credential: None,
+                },
+                model: &task.model,
+                max_output_tokens: None,
+            },
+            "",
+            30,
+            true,
+            &tokio_util::sync::CancellationToken::new(),
+            now_ms(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("Connect Gmail or Outlook Mail"));
     }
 
     #[tokio::test]

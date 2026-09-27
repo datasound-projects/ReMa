@@ -1,21 +1,27 @@
-//! Job-application intelligence, provider-independent:
+//! Job-application intelligence, provider-independent. It runs only as the
+//! built-in scheduled task "Job Mail & Interview Sync" (never merely because
+//! a mailbox is connected):
 //!
 //! ```text
-//! mail connector (Gmail / Outlook) — incremental sync since the cursor
+//! mail connector (Gmail / Outlook) — first run: the last N days;
+//!                   later: incremental changes since the cursor;
+//!                   a longer lookback: the newly included range, once
 //!        ↓
-//! dedupe            — messages seen before are skipped
+//! dedupe            — messages seen before (and the same email in both
+//!                     mailboxes) are skipped
 //!        ↓
 //! prefilter         — deterministic signals; most mail never reaches a model
 //!        ↓
 //! triage            — headers-only relevance check (candidates only)
 //!        ↓
-//! classification    — one relevant email at a time, strict JSON, validated
+//! classification    — oldest first, one relevant email at a time, strict
+//!                     JSON, validated; unclear results change nothing
 //!        ↓
-//! tracker           — matched application, status, audit timeline
+//! tracker           — matched application, newest status, audit timeline
 //!        ↓
 //! interviews        — verified against the email; proposed slots checked
 //!        ↓
-//! calendar          — conflicts; propose or (auto mode) add; reschedules
+//! calendar          — confirmed interviews: conflicts, create, reschedule
 //!        ↓
 //! notifications and the run report (built from stored state)
 //! ```
@@ -48,7 +54,7 @@ use crate::{
     error::{AppError, AppResult},
     llm::{ChatRequest, Endpoint, Finish},
     models::{
-        connectors::{ConnectorId, InterviewMode, ProviderId},
+        connectors::{ConnectorId, ProviderId},
         jobs::{CalendarOutcome, CalendarReport, EmailCategory, JobRunReport, ProposedSlot},
         provider::ModelRef,
     },
@@ -60,14 +66,15 @@ use interviews::InterviewCheck;
 use prefilter::{Signals, Verdict};
 
 pub const DAY_MS: i64 = 86_400_000;
-/// Never look further back than this, however long ReMa was closed.
-pub const MAX_WINDOW_DAYS: i64 = 90;
-/// Emails classified per run; the rest wait for the next run.
-pub const MAX_EXTRACTIONS_PER_RUN: usize = 25;
-/// Below this confidence an email changes nothing (it is listed for review).
-pub const MIN_CONFIDENCE: f64 = 0.5;
+/// Longest lookback a user can choose (days).
+pub const MAX_LOOKBACK_DAYS: u32 = 365;
+/// Emails classified per run; the rest wait for the next run (oldest first,
+/// so the history stays in order).
+pub const MAX_EXTRACTIONS_PER_RUN: usize = 100;
 /// The sync cursor resource for a mailbox's inbox.
 pub const MAIL_RESOURCE: &str = "mail:inbox";
+/// How far back a mailbox has been read (epoch ms, stored like a cursor).
+pub const COVERAGE_RESOURCE: &str = "mail:covered_from";
 
 /// What the run needs to talk to its model.
 pub struct RunModel<'a> {
@@ -76,13 +83,17 @@ pub struct RunModel<'a> {
     pub max_output_tokens: Option<u32>,
 }
 
-/// One connected mailbox.
+/// One connected mailbox and what to read from it.
 pub struct MailSource<'a> {
     pub connector: ConnectorId,
     pub provider: &'a dyn MailProvider,
     pub account_id: String,
     /// Where a first or recovery sync starts (epoch ms).
     pub since: i64,
+    /// A range before what was read so far, read once (the lookback grew).
+    pub backfill: Option<(i64, i64)>,
+    /// How far back the mailbox is read once this run succeeds.
+    pub covered_from: i64,
 }
 
 /// The connectors a run may use.
@@ -92,7 +103,7 @@ pub struct Sources<'a> {
     pub calendars: Vec<&'a dyn CalendarProvider>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct RunConfig {
     /// The user's instructions (scheduled tasks); interpretation only.
     pub instructions: String,
@@ -102,28 +113,11 @@ pub struct RunConfig {
 }
 
 impl RunConfig {
-    pub fn load(state: &AppState, instructions: &str, calendar: bool) -> AppResult<Self> {
-        let prefs = state.db.call(|c| connector_repo::preferences(c))?;
-        Ok(Self {
+    pub fn new(instructions: &str, calendar: bool) -> Self {
+        Self {
             instructions: instructions.to_string(),
             calendar,
-            policy: CalendarPolicy {
-                mode: prefs.interview_mode,
-                buffer_ms: i64::from(prefs.prep_buffer_minutes) * 60_000,
-            },
-        })
-    }
-}
-
-impl Default for RunConfig {
-    fn default() -> Self {
-        Self {
-            instructions: String::new(),
-            calendar: true,
-            policy: CalendarPolicy {
-                mode: InterviewMode::Ask,
-                buffer_ms: 0,
-            },
+            policy: CalendarPolicy::default(),
         }
     }
 }
@@ -171,13 +165,57 @@ fn short_error(error: &AppError) -> String {
     error.to_string().chars().take(200).collect()
 }
 
-/// Start of a first or recovery sync: the lookback, extended back to the
-/// last success, at most 90 days.
-pub fn window_start(now: i64, lookback_days: u32, last_success: Option<i64>) -> i64 {
-    let lookback = now - i64::from(lookback_days) * DAY_MS;
-    last_success
-        .map_or(lookback, |at| at.min(lookback))
-        .max(now - MAX_WINDOW_DAYS * DAY_MS)
+/// What to read from one mailbox in a run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadingPlan {
+    /// Where a first or recovery sync starts.
+    pub since: i64,
+    /// A range before what was read so far, read once.
+    pub backfill: Option<(i64, i64)>,
+    /// How far back the mailbox is read after this run.
+    pub covered_from: i64,
+}
+
+/// Where reading a mailbox starts and whether a range must be backfilled:
+///
+/// - first run (no cursor): the last `lookback_days` days;
+/// - later runs: incremental from the cursor; a recovery (expired cursor)
+///   starts at the last success, never before the lookback boundary;
+/// - a longer lookback than what was read so far: the newly included range,
+///   once; a shorter one reads nothing old and deletes nothing.
+pub fn reading_plan(
+    now: i64,
+    lookback_days: u32,
+    has_cursor: bool,
+    last_success: Option<i64>,
+    covered_from: Option<i64>,
+) -> ReadingPlan {
+    let boundary = now - i64::from(lookback_days.clamp(1, MAX_LOOKBACK_DAYS)) * DAY_MS;
+    if !has_cursor {
+        return ReadingPlan {
+            since: boundary,
+            backfill: None,
+            covered_from: boundary,
+        };
+    }
+    let since = last_success.map_or(boundary, |at| at.max(boundary));
+    match covered_from {
+        Some(covered) if boundary < covered => ReadingPlan {
+            since,
+            backfill: Some((boundary, covered)),
+            covered_from: boundary,
+        },
+        Some(covered) => ReadingPlan {
+            since,
+            backfill: None,
+            covered_from: covered,
+        },
+        None => ReadingPlan {
+            since,
+            backfill: None,
+            covered_from: boundary,
+        },
+    }
 }
 
 /// Signals for the prefilter, from what the tracker already knows.
@@ -224,8 +262,11 @@ fn new_record(message: &MailMessage, status: MailStatus, score: i64, now: i64) -
     }
 }
 
-/// Step 1: new mail since the cursor, deduplicated and prefiltered. The new
-/// cursor is stored in the same transaction as the records.
+/// Step 1: new mail since the cursor (and a backfilled range, if the
+/// lookback grew), deduplicated and prefiltered. The records, the new cursor
+/// and the coverage are stored in one transaction, only after everything
+/// was read: a failed read leaves the previous position untouched, and a
+/// recorded message waits (pending) until it is classified.
 async fn sync_mailbox(
     state: &AppState,
     source: &MailSource<'_>,
@@ -236,7 +277,7 @@ async fn sync_mailbox(
     let cursor = state
         .db
         .call(|c| connector_repo::cursor(c, provider, &source.account_id, MAIL_RESOURCE))?;
-    let batch = source
+    let mut batch = source
         .provider
         .sync_changes(cursor.as_deref(), source.since)
         .await?;
@@ -245,6 +286,10 @@ async fn sync_mailbox(
             "{}: the sync position had expired; ReMa resynchronized recent mail.",
             source.connector.name()
         ));
+    }
+    if let Some((from, to)) = source.backfill {
+        let older = source.provider.list_range(from, to).await?;
+        batch.messages.extend(older);
     }
     report.emails_checked += batch.messages.len() as u32;
     let ids: Vec<String> = batch
@@ -282,6 +327,14 @@ async fn sync_mailbox(
             &source.account_id,
             MAIL_RESOURCE,
             &batch.cursor,
+            now,
+        )?;
+        connector_repo::save_cursor(
+            &tx,
+            provider,
+            &source.account_id,
+            COVERAGE_RESOURCE,
+            &source.covered_from.to_string(),
             now,
         )?;
         tx.commit()?;
@@ -363,11 +416,11 @@ async fn triage(
     Ok(())
 }
 
-/// Validated proposed times, checked against the calendar.
+/// Validated proposed times, checked against every connected calendar.
 async fn check_slots(
     extraction: &extract::Extraction,
     email_text: &str,
-    calendar: Option<&dyn CalendarProvider>,
+    calendars: &[&dyn CalendarProvider],
     buffer_ms: i64,
     now: i64,
 ) -> Vec<ProposedSlot> {
@@ -380,13 +433,16 @@ async fn check_slots(
         else {
             continue;
         };
-        let (available, conflicts) = match calendar {
-            Some(api) => match api
+        // Unknown unless every calendar could be read.
+        let mut conflicts = Vec::new();
+        let mut read = !calendars.is_empty();
+        for api in calendars {
+            match api
                 .list_events(start_at - buffer_ms, end_at + buffer_ms)
                 .await
             {
-                Ok(events) => {
-                    let conflicts: Vec<_> = crate::connectors::calendar::find_conflicts(
+                Ok(events) => conflicts.extend(
+                    crate::connectors::calendar::find_conflicts(
                         &events, start_at, end_at, -1, buffer_ms,
                     )
                     .into_iter()
@@ -394,14 +450,13 @@ async fn check_slots(
                         title: e.title,
                         start_at: e.start_at.unwrap_or_default(),
                         end_at: e.end_at.unwrap_or_default(),
-                    })
-                    .collect();
-                    (Some(conflicts.is_empty()), conflicts)
-                }
-                Err(_) => (None, Vec::new()),
-            },
-            None => (None, Vec::new()),
-        };
+                    }),
+                ),
+                Err(_) => read = false,
+            }
+        }
+        conflicts.sort_by_key(|c| c.start_at);
+        let available = read.then_some(conflicts.is_empty());
         slots.push(ProposedSlot {
             start_at,
             end_at,
@@ -474,15 +529,19 @@ fn notify_change(
         // Confirmed interviews are announced by the calendar step (with
         // their conflict status).
         EmailCategory::InterviewConfirmed | EmailCategory::InterviewRescheduled => {}
-        EmailCategory::AssessmentRequest | EmailCategory::ActionRequired => {
+        EmailCategory::AssessmentRequest | EmailCategory::NeedsAction | EmailCategory::Offer
+            if applied.status_changed || applied.created =>
+        {
             let next = extraction
                 .next_action
                 .clone()
                 .unwrap_or_else(|| "Check the latest email.".into());
-            notifications::add(
-                state,
-                notice("action", "Action required", format!("{heading}\n{next}")),
-            );
+            let title = if extraction.category == EmailCategory::Offer {
+                "Offer received"
+            } else {
+                "Action required"
+            };
+            notifications::add(state, notice("action", title, format!("{heading}\n{next}")));
         }
         _ if applied.status_changed || applied.created => {
             notifications::add(
@@ -498,38 +557,94 @@ fn notify_change(
     }
 }
 
-/// Step 3: classify pending mail and update the tracker.
+/// A classified email's record, before it is stored.
+fn classified(
+    mail: &MailRecord,
+    message: &MailMessage,
+    extraction: &extract::Extraction,
+    now: i64,
+) -> MailRecord {
+    MailRecord {
+        sender: Some(message.sender.clone()),
+        subject: Some(message.subject.clone()),
+        web_link: message.provider_web_link.clone(),
+        category: Some(extraction.category),
+        confidence: Some(extraction.confidence),
+        classification: extraction.status,
+        extraction: serde_json::to_string(extraction).ok(),
+        processed_at: Some(now),
+        attempts: mail.attempts + 1,
+        error: None,
+        ..mail.clone()
+    }
+}
+
+/// Step 3: classify pending mail of every synchronized mailbox, oldest
+/// first, and update the tracker.
 #[allow(clippy::too_many_arguments)]
 async fn classify(
     state: &AppState,
     model: &RunModel<'_>,
-    source: &MailSource<'_>,
+    mailboxes: &[&MailSource<'_>],
     calendars: &[&dyn CalendarProvider],
     config: &RunConfig,
-    budget: &mut usize,
     report: &mut JobRunReport,
     touched: &mut HashSet<i64>,
     cancel: &CancellationToken,
     now: i64,
 ) -> AppResult<()> {
-    let provider = source.provider.provider();
-    let pending = state.db.call(|c| repo::pending_mail(c, provider))?;
-    report.deferred_emails += pending.len().saturating_sub(*budget) as u32;
+    let by_provider: HashMap<ProviderId, &MailSource<'_>> = mailboxes
+        .iter()
+        .map(|m| (m.provider.provider(), *m))
+        .collect();
+    let pending: Vec<MailRecord> = state
+        .db
+        .call(|c| repo::pending_mail_all(c))?
+        .into_iter()
+        .filter(|m| by_provider.contains_key(&m.provider))
+        .collect();
+    report.deferred_emails += pending.len().saturating_sub(MAX_EXTRACTIONS_PER_RUN) as u32;
     let known = state.db.call(|c| applications::known_applications(c, 20))?;
     let today = jiff::Timestamp::from_millisecond(now)
         .map(|t| t.to_zoned(jiff::tz::TimeZone::system()).date().to_string())
         .unwrap_or_default();
-    let calendar = calendars
-        .iter()
-        .find(|c| c.provider() == provider)
-        .or(calendars.first())
-        .copied();
 
-    for mail in pending.into_iter().take(*budget) {
-        *budget -= 1;
+    for mail in pending.into_iter().take(MAX_EXTRACTIONS_PER_RUN) {
         if cancel.is_cancelled() {
             return Err(cancelled());
         }
+        let provider = mail.provider;
+        let Some(source) = by_provider.get(&provider) else {
+            continue;
+        };
+
+        // The same email in the user's other mailbox was handled already.
+        let twin = match (&mail.sender, &mail.subject) {
+            (Some(sender), Some(subject)) if !subject.trim().is_empty() => state
+                .db
+                .call(|c| repo::processed_twin(c, provider, sender, subject, mail.received_at))?,
+            _ => None,
+        };
+        if let Some(twin) = twin {
+            let record = MailRecord {
+                status: twin.status,
+                category: twin.category,
+                confidence: twin.confidence,
+                classification: twin.classification,
+                application_id: twin.application_id,
+                processed_at: Some(now),
+                error: Some("same email as in the other mailbox".into()),
+                ..mail.clone()
+            };
+            state.db.call(|c| {
+                if let Some(id) = twin.application_id {
+                    repo::link_thread(c, provider, &mail.thread_id, id)?;
+                }
+                repo::upsert_mail(c, &record)
+            })?;
+            continue;
+        }
+
         let outcome: AppResult<MailRecord> = async {
             let message = source.provider.get_message(&mail.message_id).await?;
             let text = ask(
@@ -539,7 +654,7 @@ async fn classify(
                 cancel,
             )
             .await?;
-            let Some(extraction) = extract::parse_extraction(&text)? else {
+            let Some(mut extraction) = extract::parse_extraction(&text)? else {
                 return Ok(MailRecord {
                     status: MailStatus::Irrelevant,
                     category: Some(EmailCategory::NotJobRelated),
@@ -551,33 +666,40 @@ async fn classify(
                     ..mail.clone()
                 });
             };
-            let stored = serde_json::to_string(&extraction).ok();
-            let base = MailRecord {
-                sender: Some(message.sender.clone()),
-                subject: Some(message.subject.clone()),
-                web_link: message.provider_web_link.clone(),
-                category: Some(extraction.category),
-                confidence: Some(extraction.confidence),
-                classification: extraction.status,
-                extraction: stored,
-                processed_at: Some(now),
-                attempts: mail.attempts + 1,
-                error: None,
-                ..mail.clone()
-            };
-            if extraction.confidence < MIN_CONFIDENCE {
-                // Ambiguous: listed for review, no state changes.
-                let application_id = state
+            let email_text = message.text();
+            extract::verify_rejection(&mut extraction, &email_text);
+            let base = classified(&mail, &message, &extraction, now);
+            // Unclear meaning: listed for review, nothing changes.
+            if extraction.confidence < extract::required_confidence(extraction.category) {
+                let application_id = match state
                     .db
                     .call(|c| applications::find_application(c, &message, &extraction))?
-                    .map(|a| a.id);
+                {
+                    applications::Match::Existing(app) => Some(app.id),
+                    _ => None,
+                };
                 return Ok(MailRecord {
                     status: MailStatus::Ambiguous,
                     application_id,
+                    error: Some("unclear classification; no status was changed".into()),
                     ..base
                 });
             }
-            let email_text = message.text();
+            // Unclear application: nothing changes either.
+            if let applications::Match::Ambiguous(reason) = state
+                .db
+                .call(|c| applications::find_application(c, &message, &extraction))?
+            {
+                report.issues.push(format!(
+                    "{}: {reason}; no status was changed.",
+                    extraction.company
+                ));
+                return Ok(MailRecord {
+                    status: MailStatus::Ambiguous,
+                    error: Some(reason),
+                    ..base
+                });
+            }
             let check = extraction
                 .interview
                 .as_ref()
@@ -593,7 +715,7 @@ async fn classify(
                 check_slots(
                     &extraction,
                     &email_text,
-                    calendar.filter(|_| config.calendar),
+                    if config.calendar { calendars } else { &[] },
                     config.policy.buffer_ms,
                     now,
                 )
@@ -650,7 +772,7 @@ async fn classify(
                     .clone()
                     .unwrap_or_else(|| "an unknown sender".into());
                 report.issues.push(format!(
-                    "An email from {domain} could not be processed: {}",
+                    "An email from {domain} could not be processed and will be retried: {}",
                     short_error(&error)
                 ));
                 MailRecord {
@@ -680,9 +802,9 @@ pub async fn run(
     let window_start = sources
         .mail
         .iter()
-        .map(|s| s.since)
+        .map(|s| s.backfill.map_or(s.since, |(from, _)| from.min(s.since)))
         .min()
-        .unwrap_or(now - 14 * DAY_MS);
+        .unwrap_or(now - 30 * DAY_MS);
     let mut report = JobRunReport {
         window_start,
         window_end: now,
@@ -712,29 +834,25 @@ pub async fn run(
     let mut touched = HashSet::new();
     match &model {
         Some(model) => {
-            let mut budget = MAX_EXTRACTIONS_PER_RUN;
             for source in &synced {
                 let provider = source.provider.provider();
                 triage(state, model, provider, &config, &mut report, cancel).await?;
-                classify(
-                    state,
-                    model,
-                    source,
-                    &sources.calendars,
-                    &config,
-                    &mut budget,
-                    &mut report,
-                    &mut touched,
-                    cancel,
-                    now,
-                )
-                .await?;
             }
+            classify(
+                state,
+                model,
+                &synced,
+                &sources.calendars,
+                &config,
+                &mut report,
+                &mut touched,
+                cancel,
+                now,
+            )
+            .await?;
         }
         None => report.issues.push(
-            "No model is set up: new job emails wait until you choose a default model in \
-             Settings."
-                .into(),
+            "No model is set up: new job emails wait until you choose a model for the task.".into(),
         ),
     }
     report.applications_updated = touched.len() as u32;
@@ -743,17 +861,30 @@ pub async fn run(
         .call(|c| applications::settle_past_interviews(c, now))?;
 
     // 4. Calendars.
-    if config.calendar && !sources.calendars.is_empty() {
-        let calendar = sync_calendars(
-            state,
-            &sources.calendars,
-            config.policy,
-            window_start,
-            now,
-            &mut report.issues,
-        )
-        .await?;
-        report.calendar = Some(calendar);
+    if config.calendar {
+        if sources.calendars.is_empty() {
+            let waiting = state.db.call(|c| repo::interviews_to_sync(c, now))?;
+            if waiting.iter().any(|i| {
+                i.state == repo::InterviewState::Confirmed && i.calendar_event_id.is_none()
+            }) {
+                report.issues.push(
+                    "No calendar is connected: confirmed interviews were not added. Connect \
+                     Google Calendar or Outlook Calendar in Settings → Connectors."
+                        .into(),
+                );
+            }
+        } else {
+            let calendar = sync_calendars(
+                state,
+                &sources.calendars,
+                config.policy,
+                window_start,
+                now,
+                &mut report.issues,
+            )
+            .await?;
+            report.calendar = Some(calendar);
+        }
     }
 
     // 5. The overview, from stored state.
@@ -788,19 +919,22 @@ pub async fn sync_calendars(
         let app = state
             .db
             .call(|c| repo::get_application(c, interview.application_id))?;
-        let item =
-            match calendar_sync::sync_interview(state, api, policy, &interview, &app, now).await {
-                Ok(item) => item,
-                Err(error @ AppError::Authentication(_)) => return Err(error),
-                Err(error) => {
-                    issues.push(format!(
-                        "Calendar: {} — {}",
-                        app.company,
-                        short_error(&error)
-                    ));
-                    continue;
-                }
-            };
+        let item = match calendar_sync::sync_interview(
+            state, api, calendars, policy, &interview, &app, now,
+        )
+        .await
+        {
+            Ok(item) => item,
+            Err(error @ AppError::Authentication(_)) => return Err(error),
+            Err(error) => {
+                issues.push(format!(
+                    "Calendar: {} — {}",
+                    app.company,
+                    short_error(&error)
+                ));
+                continue;
+            }
+        };
         let settled_cancellation = interview.state == repo::InterviewState::Cancelled
             && matches!(
                 item.outcome,

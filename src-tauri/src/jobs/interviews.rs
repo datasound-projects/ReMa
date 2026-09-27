@@ -149,8 +149,9 @@ pub fn mentions_date(quote: &str, date: civil::Date) -> bool {
     day_mentioned && month_mentioned
 }
 
-/// Resolves a stated time zone: IANA names and UTC/GMT offsets.
-/// Returns the zone and the name to give Calendar.
+/// Resolves a stated time zone: IANA names, unambiguous abbreviations and
+/// UTC/GMT offsets. Returns the zone and its label as stored and shown
+/// ("Europe/Vienna", "CEST", "UTC+02:00").
 pub fn resolve_timezone(value: &str) -> Option<(TimeZone, String)> {
     let value = value.trim();
     if let Ok(tz) = TimeZone::get(value) {
@@ -176,9 +177,9 @@ pub fn resolve_timezone(value: &str) -> Option<(TimeZone, String)> {
         ("PST", -8),
         ("PDT", -7),
     ];
-    if let Some((_, hours)) = ABBREVIATIONS.iter().find(|(name, _)| *name == upper) {
+    if let Some((name, hours)) = ABBREVIATIONS.iter().find(|(name, _)| *name == upper) {
         let offset = jiff::tz::Offset::from_hours(*hours as i8).ok()?;
-        return Some((TimeZone::fixed(offset), "UTC".into()));
+        return Some((TimeZone::fixed(offset), (*name).to_string()));
     }
     let offset_part = upper
         .strip_prefix("UTC")
@@ -205,8 +206,32 @@ pub fn resolve_timezone(value: &str) -> Option<(TimeZone, String)> {
         return None;
     }
     let offset = jiff::tz::Offset::from_seconds(sign * (hours * 3600 + minutes * 60)).ok()?;
-    Some((TimeZone::fixed(offset), "UTC".into()))
+    let label = format!(
+        "UTC{}{hours:02}:{minutes:02}",
+        if sign < 0 { '-' } else { '+' }
+    );
+    Some((TimeZone::fixed(offset), label))
 }
+
+/// The zone for a stored label (UTC when unknown).
+pub fn zone_of(label: Option<&str>) -> TimeZone {
+    label
+        .and_then(resolve_timezone)
+        .map_or(TimeZone::UTC, |(tz, _)| tz)
+}
+
+/// The name a calendar accepts: the IANA name, else UTC (the event's start
+/// and end are exact instants either way).
+pub fn calendar_zone(label: Option<&str>) -> String {
+    match label {
+        Some(label) if label.contains('/') && TimeZone::get(label).is_ok() => label.to_string(),
+        _ => "UTC".to_string(),
+    }
+}
+
+/// Minutes reserved in the calendar when the email states no end or
+/// duration (the interview is confirmed without it).
+pub const DEFAULT_DURATION_MINUTES: i64 = 60;
 
 fn is_http_url(url: &str) -> bool {
     reqwest::Url::parse(url).is_ok_and(|u| matches!(u.scheme(), "https" | "http"))
@@ -257,7 +282,8 @@ pub fn validate(claim: &InterviewClaim, email_text: &str, now: i64) -> Interview
         return InterviewCheck::NeedsReview(format!("unrecognized time zone \"{tz_text}\""));
     };
 
-    // Never guess the duration.
+    // The end, if stated; else a default duration is reserved (noted).
+    let mut notes = Vec::new();
     let end_time = match (claim.end_time.as_deref(), claim.duration_minutes) {
         (Some(end), _) => match schedule::parse_time(end) {
             Ok(end) if mentions_time(quote, end) => end,
@@ -275,7 +301,16 @@ pub fn validate(claim: &InterviewClaim, email_text: &str, now: i64) -> Interview
                 }
             }
         }
-        _ => return review("the email does not state when the interview ends"),
+        (None, Some(_)) => return review("the interview duration is not plausible"),
+        (None, None) => match start.checked_add(DEFAULT_DURATION_MINUTES.minutes()) {
+            Ok(end) if end > start => {
+                notes.push(format!(
+                    "the email states no end time; {DEFAULT_DURATION_MINUTES} minutes were reserved"
+                ));
+                end
+            }
+            _ => return review("the interview would end after midnight; check the details"),
+        },
     };
 
     let (Ok(start_at), Ok(end_at)) = (
@@ -291,7 +326,6 @@ pub fn validate(claim: &InterviewClaim, email_text: &str, now: i64) -> Interview
         return review("the interview would last more than 8 hours");
     }
 
-    let mut notes = Vec::new();
     let meeting_url = claim.meeting_url.clone().filter(|url| {
         let ok = is_http_url(url) && email_text.contains(url.as_str());
         if !ok {
@@ -438,9 +472,16 @@ mod tests {
         invented_tz.timezone_quote = Some("Pacific Time".into());
         assert!(reason(validate(&invented_tz, EMAIL, now())).contains("time zone"));
 
+        // Duration is optional: an hour is reserved, and noted.
         let mut no_end = claim();
         no_end.end_time = None;
-        assert!(reason(validate(&no_end, EMAIL, now())).contains("ends"));
+        match validate(&no_end, EMAIL, now()) {
+            InterviewCheck::Upcoming(v) => {
+                assert_eq!(v.end_at - v.start_at, 3_600_000);
+                assert!(v.notes.iter().any(|n| n.contains("no end time")));
+            }
+            other => panic!("expected a confirmed interview, got {other:?}"),
+        }
 
         let mut invented_end = claim();
         invented_end.end_time = Some("11:30".into());

@@ -5,8 +5,8 @@ use tauri_plugin_opener::OpenerExt;
 use crate::{
     connectors,
     error::{AppError, AppResult},
-    models::connectors::{ConnectorId, ConnectorPreferences, ConnectorsOverview, ProviderId},
-    services::{background, mail_monitor},
+    models::connectors::{ConnectorId, ConnectorsOverview, ProviderId},
+    services::background,
     state::AppState,
 };
 
@@ -57,39 +57,6 @@ pub async fn disconnect_connector(
     id: ConnectorId,
 ) -> AppResult<ConnectorsOverview> {
     connectors::disconnect(&state, id).await?;
-    connectors::overview(&state).await
-}
-
-/// "Sync now".
-#[tauri::command]
-#[specta::specta]
-pub async fn sync_connector(
-    state: State<'_, AppState>,
-    id: ConnectorId,
-) -> AppResult<ConnectorsOverview> {
-    connectors::require(&state, id).await?;
-    mail_monitor::spawn_sync(&state, id)?;
-    connectors::overview(&state).await
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn set_connector_background_sync(
-    state: State<'_, AppState>,
-    id: ConnectorId,
-    enabled: bool,
-) -> AppResult<ConnectorsOverview> {
-    connectors::set_background_sync(&state, id, enabled)?;
-    connectors::overview(&state).await
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn set_connector_preferences(
-    state: State<'_, AppState>,
-    preferences: ConnectorPreferences,
-) -> AppResult<ConnectorsOverview> {
-    connectors::set_preferences(&state, preferences)?;
     connectors::overview(&state).await
 }
 

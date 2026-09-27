@@ -12,7 +12,16 @@
 // access: they redirect to ReMa's loopback address with a code and the
 // request's state. `scripts/e2e/bin/xdg-open` plays the system browser.
 // Every request is logged to stdout (one JSON line) for the validation
-// report. Release builds ignore all REMA_DEV_* and *_BASE_URL variables.
+// report, and so is every email the model is asked about (subject only).
+// Release builds ignore all REMA_DEV_* and *_BASE_URL variables.
+//
+// The mailboxes cover each Applications section, a confirmed interview on
+// a free slot and one that conflicts, an email older than the default
+// 30-day lookback in each mailbox (read once the lookback is raised), the
+// same email in Gmail and Outlook, and personal mail that must never reach
+// the model. `POST /__e2e/next` delivers two more emails: the Globex
+// interview moves to a new (free) time, and a Vandelay interview lands on
+// a time that is free in Google Calendar but busy in Outlook Calendar.
 
 import http from 'node:http';
 
@@ -26,94 +35,135 @@ const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 
 const inDays = (n) => new Date(Date.now() + n * DAY);
 const longDate = (d) => `${WEEKDAYS[d.getUTCDay()]}, ${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
 const isoDate = (d) => d.toISOString().slice(0, 10);
-const interviewDay = inDays(5);
+const HOUR = 3_600_000;
 const b64url = (text) => Buffer.from(text).toString('base64url');
+
+// Interviews (Europe/Vienna). Globex lands on a free slot; Soylent overlaps
+// the "Team offsite" below; the reschedule moves Globex two days later.
+const globexDay = inDays(5);
+const soylentDay = inDays(6);
+const movedDay = inDays(7);
+// 09:00–10:00 Vienna (CEST) is 07:00–08:00 UTC: the Outlook "Dentist".
+const vandelayDay = inDays(2);
 
 // ── Mailboxes ─────────────────────────────────────────────────────────
 let historyId = 1000;
 const gmail = [];
 function addGmail(id, thread, from, subject, body, hoursAgo, labels = ['INBOX']) {
   historyId += 1;
-  gmail.push({ id, thread, from, subject, body, at: Date.now() - hoursAgo * 3_600_000, labels, history: historyId });
+  gmail.push({ id, thread, from, subject, body, at: Date.now() - hoursAgo * HOUR, labels, history: historyId });
 }
-const globexBody = `Hi Ana, we are happy to confirm your technical interview on ${longDate(interviewDay)} from 14:00 to 15:00 (Europe/Vienna time). Join here: https://meet.example.com/globex-1 . Kind regards, Globex Talent Team`;
+const globexBody = `Hi Ana, we are happy to confirm your technical interview on ${longDate(globexDay)} from 14:00 to 15:00 (Europe/Vienna time). Join here: https://meet.example.com/globex-1 . Kind regards, Globex Talent Team`;
+const soylentBody = `Hi Ana, your interview for the ML Engineer role is confirmed for ${longDate(soylentDay)} from 10:00 to 11:00 (Europe/Vienna time). Meeting link: https://meet.example.com/soylent-7 . Best, Soylent People Team`;
+const starkBody = 'Thank you for your interest in the Site Reliability Engineer role. Unfortunately, we have decided to proceed with candidates who have more hands-on Kubernetes experience. We wish you all the best.';
+addGmail('g9', 'gt9', 'Wayne Careers <careers@wayne.example>', 'Application received - Security Analyst', 'Thank you for applying for Security Analyst. Your application was received.', 45 * 24);
 addGmail('g1', 'gt1', 'Acme Careers <jobs@acme.com>', 'Your application: Backend Engineer', 'Thank you for applying for Backend Engineer. We received your application.', 50);
 addGmail('g2', 'gt2', 'Job Alerts <alerts@jobs.example>', '12 new jobs for you', 'Recommended jobs this week. PRIVATE-NEWSLETTER-CONTENT', 40);
 addGmail('g3', 'gt3', 'Globex Recruiting <talent@globex.com>', 'Interview confirmation - Data Engineer', globexBody, 30);
 addGmail('g4', 'gt4', 'Initech HR <hr@initech.com>', 'Your application at Initech', 'Unfortunately we decided to move forward with other candidates.', 20);
+addGmail('g6', 'gt6', 'Umbrella Hiring <hiring@umbrella.example>', 'Coding assessment for your application - Frontend Engineer', 'Please complete the online coding assessment by 3 October. The link is valid for 7 days.', 15);
+addGmail('g7', 'gt7', 'Hooli Recruiting <recruiting@hooli.example>', 'Application update - Platform Engineer', 'Good news: your application has moved to the hiring manager review. We will be in touch.', 12);
 addGmail('g5', 'gt5', 'Mom <mom@family.net>', 'Dinner on Sunday', 'PRIVATE-FAMILY-CONTENT see you', 10);
+addGmail('g8', 'gt8', 'Stark Talent <talent@stark.example>', 'Update on your application - Site Reliability Engineer', starkBody, 8);
+addGmail('g10', 'gt10', 'Soylent People <people@soylent.example>', 'Interview confirmed - ML Engineer', soylentBody, 6);
 
 let deltaToken = 1;
-const outlook = [
-  {
-    id: 'o1',
-    conversationId: 'oc1',
-    from: { name: 'Contoso Talent', address: 'talent@contoso.com' },
-    subject: 'Offer letter - Cloud Engineer',
-    body: 'We are delighted to offer you the Cloud Engineer position. Please reply by Friday.',
-    at: Date.now() - 5 * 3_600_000,
-    token: 1,
-  },
-];
+const outlook = [];
+function addOutlook(id, conversationId, name, address, subject, body, hoursAgo) {
+  outlook.push({ id, conversationId, from: { name, address }, subject, body, at: Date.now() - hoursAgo * HOUR, token: deltaToken });
+}
+addOutlook('o3', 'oc3', 'Initrode Careers', 'careers@initrode.example', 'Application received - Product Designer', 'We received your application for Product Designer.', 40 * 24);
+// The Acme confirmation also reached Outlook (e.g. a forwarding alias).
+addOutlook('o2', 'oc2', 'Acme Careers', 'jobs@acme.com', 'Your application: Backend Engineer', 'Thank you for applying for Backend Engineer. We received your application.', 50 - 2 / 60);
+addOutlook('o1', 'oc1', 'Contoso Talent', 'talent@contoso.com', 'Offer letter - Cloud Engineer', 'We are delighted to offer you the Cloud Engineer position. Please reply by Friday.', 5);
 
+const at = (day, time) => ({ dateTime: `${isoDate(day)}T${time}:00Z` });
 const events = [
-  // Busy the day after the interview; not a conflict.
-  {
-    id: 'busy1',
-    summary: 'Team offsite',
-    start: { dateTime: `${isoDate(inDays(6))}T08:00:00Z` },
-    end: { dateTime: `${isoDate(inDays(6))}T16:00:00Z` },
-    transparency: 'opaque',
-    status: 'confirmed',
-  },
+  // Busy all day when Soylent's interview is: a conflict.
+  { id: 'busy1', summary: 'Team offsite', start: at(soylentDay, '07:00'), end: at(soylentDay, '16:00'), transparency: 'opaque', status: 'confirmed', htmlLink: 'https://calendar.google.com/event?eid=busy1' },
+  { id: 'sync1', summary: 'Weekly sync', start: at(inDays(1), '09:00'), end: at(inDays(1), '09:30'), transparency: 'opaque', status: 'confirmed', hangoutLink: 'https://meet.google.com/abc-defg-hij', htmlLink: 'https://calendar.google.com/event?eid=sync1' },
 ];
 let eventSeq = 1;
+const outlookEvents = [
+  { id: 'ol-dentist', subject: 'Dentist', start: { dateTime: `${isoDate(inDays(2))}T07:00:00`, timeZone: 'UTC' }, end: { dateTime: `${isoDate(inDays(2))}T08:00:00`, timeZone: 'UTC' }, showAs: 'busy', isAllDay: false, isCancelled: false, location: { displayName: 'Dental clinic' }, webLink: 'https://outlook.live.com/calendar/item/ol-dentist' },
+];
 
 // ── Model answers (OpenAI-compatible) ─────────────────────────────────
+const plain = { reference: null, stage: null, action_required: false, next_action: null, rejection_reason: null, rejection_quote: null, existing_application_id: null, contacts: [], interview: null };
+const interviewAt = (day, start, end, url) => ({
+  state: 'confirmed', date: isoDate(day), start_time: start, end_time: end, duration_minutes: null, timezone: 'Europe/Vienna',
+  datetime_quote: `${longDate(day)} from ${start} to ${end}`, timezone_quote: 'Europe/Vienna time',
+  type: 'Technical interview', location: null, meeting_url: url, participants: [], interviewer: null, proposed_slots: [], unclear: null,
+});
 const answers = {
-  'Your application: Backend Engineer': {
-    category: 'application_received', confidence: 0.95, company: 'Acme', role: 'Backend Engineer',
-    reference: null, stage: null, action_required: false, next_action: null,
-    summary: 'Application received.', existing_application_id: null, contacts: [], interview: null,
-  },
+  'Application received - Security Analyst': { ...plain, category: 'application_confirmed', confidence: 0.95, company: 'Wayne Enterprises', role: 'Security Analyst', latest_update: 'Application received.', summary: 'Application received.' },
+  'Application received - Product Designer': { ...plain, category: 'application_confirmed', confidence: 0.95, company: 'Initrode', role: 'Product Designer', latest_update: 'Application received.', summary: 'Application received.' },
+  'Your application: Backend Engineer': { ...plain, category: 'application_confirmed', confidence: 0.95, company: 'Acme', role: 'Backend Engineer', latest_update: 'Application received.', summary: 'Application received.' },
   'Interview confirmation - Data Engineer': {
-    category: 'interview_confirmed', confidence: 0.97, company: 'Globex', role: 'Data Engineer',
-    reference: null, stage: 'Technical interview', action_required: false, next_action: null,
-    summary: 'Technical interview confirmed.', existing_application_id: null, contacts: ['Globex Talent Team'],
-    interview: {
-      state: 'confirmed', date: isoDate(interviewDay), start_time: '14:00', end_time: '15:00',
-      duration_minutes: null, timezone: 'Europe/Vienna',
-      datetime_quote: `${longDate(interviewDay)} from 14:00 to 15:00`, timezone_quote: 'Europe/Vienna time',
-      type: 'Technical interview', location: null, meeting_url: 'https://meet.example.com/globex-1',
-      participants: [], interviewer: null, proposed_slots: [], unclear: null,
-    },
+    ...plain, category: 'interview_confirmed', confidence: 0.97, company: 'Globex', role: 'Data Engineer', stage: 'Technical interview',
+    latest_update: 'Technical interview confirmed.', summary: 'Technical interview confirmed.', contacts: ['Globex Talent Team'],
+    interview: interviewAt(globexDay, '14:00', '15:00', 'https://meet.example.com/globex-1'),
   },
-  'Your application at Initech': {
-    category: 'rejection', confidence: 0.97, company: 'Initech', role: 'QA Engineer',
-    reference: null, stage: null, action_required: false, next_action: null,
-    summary: 'Rejected.', existing_application_id: null, contacts: [], interview: null,
+  'Re: Interview confirmation - Data Engineer': {
+    ...plain, category: 'interview_rescheduled', confidence: 0.96, company: 'Globex', role: 'Data Engineer', stage: 'Technical interview',
+    latest_update: 'Technical interview moved to a new time.', summary: 'Interview rescheduled.', contacts: ['Globex Talent Team'],
+    interview: { ...interviewAt(movedDay, '11:00', '12:00', 'https://meet.example.com/globex-1'), state: 'rescheduled' },
+  },
+  'Interview confirmation - Import Export Analyst': {
+    ...plain, category: 'interview_confirmed', confidence: 0.95, company: 'Vandelay Industries', role: 'Import Export Analyst', stage: 'First interview',
+    latest_update: 'First interview confirmed.', summary: 'Interview confirmed.', interview: interviewAt(vandelayDay, '09:00', '10:00', 'https://meet.example.com/vandelay-3'),
+  },
+  'Interview confirmed - ML Engineer': {
+    ...plain, category: 'interview_confirmed', confidence: 0.96, company: 'Soylent', role: 'ML Engineer', stage: 'Technical interview',
+    latest_update: 'Interview confirmed.', summary: 'Interview confirmed.', interview: interviewAt(soylentDay, '10:00', '11:00', 'https://meet.example.com/soylent-7'),
+  },
+  'Your application at Initech': { ...plain, category: 'rejection', confidence: 0.97, company: 'Initech', role: 'QA Engineer', latest_update: 'Application rejected.', summary: 'Rejected.' },
+  'Update on your application - Site Reliability Engineer': {
+    ...plain, category: 'rejection', confidence: 0.97, company: 'Stark Industries', role: 'Site Reliability Engineer', latest_update: 'Application rejected.', summary: 'Rejected.',
+    rejection_reason: 'They chose candidates with more hands-on Kubernetes experience.',
+    rejection_quote: 'we have decided to proceed with candidates who have more hands-on Kubernetes experience',
+  },
+  'Coding assessment for your application - Frontend Engineer': {
+    ...plain, category: 'assessment_request', confidence: 0.94, company: 'Umbrella', role: 'Frontend Engineer', action_required: true,
+    next_action: 'Complete the online coding assessment by 3 October.', latest_update: 'Coding assessment sent.', summary: 'Assessment requested.',
+  },
+  'Application update - Platform Engineer': {
+    ...plain, category: 'application_update', confidence: 0.9, company: 'Hooli', role: 'Platform Engineer',
+    latest_update: 'Application moved to hiring manager review.', summary: 'In review.',
   },
   'Offer letter - Cloud Engineer': {
-    category: 'offer', confidence: 0.99, company: 'Contoso', role: 'Cloud Engineer',
-    reference: null, stage: null, action_required: true, next_action: 'Reply by Friday',
-    summary: 'Offer received.', existing_application_id: null, contacts: [], interview: null,
+    ...plain, category: 'offer', confidence: 0.99, company: 'Contoso', role: 'Cloud Engineer', action_required: true,
+    next_action: 'Reply to the offer by Friday.', latest_update: 'Offer received.', summary: 'Offer received.',
   },
 };
 
 function modelReply(body) {
   const user = [...(body.messages ?? [])].reverse().find((m) => m.role === 'user');
   const content = typeof user?.content === 'string' ? user.content : JSON.stringify(user?.content ?? '');
+  // Personal mail and newsletters must never reach the model.
+  const leaked = JSON.stringify(body).includes('PRIVATE-');
   const marker = content.indexOf('Emails:\n');
   if (marker >= 0) {
     const emails = JSON.parse(content.slice(marker + 8));
     const relevant = emails.filter((e) => !/new jobs|dinner/i.test(e.subject)).map((e) => e.id);
+    log({ model: 'triage', subjects: emails.map((e) => e.subject), leaked });
     return JSON.stringify({ relevant });
   }
   const subject = content.split('\n').find((l) => l.startsWith('Subject: '))?.slice(9);
   if (subject !== undefined) {
+    log({ model: 'classify', subject, leaked });
     return JSON.stringify(answers[subject] ?? { category: 'not_job_related', confidence: 0.9 });
   }
+  log({ model: 'chat', leaked });
   return 'Mock answer from the local model.';
+}
+
+/** The next emails (POST /__e2e/next). */
+function deliverNext() {
+  const moved = `Hi Ana, we need to move your technical interview. The new time is ${longDate(movedDay)} from 11:00 to 12:00 (Europe/Vienna time), same link: https://meet.example.com/globex-1 . Globex Talent Team`;
+  addGmail('g11', 'gt3', 'Globex Recruiting <talent@globex.com>', 'Re: Interview confirmation - Data Engineer', moved, 0.2);
+  const vandelay = `Hi Ana, your first interview for the Import Export Analyst role is confirmed for ${longDate(vandelayDay)} from 09:00 to 10:00 (Europe/Vienna time). Link: https://meet.example.com/vandelay-3 . Vandelay Industries`;
+  addGmail('g12', 'gt12', 'Vandelay Hiring <hiring@vandelay.example>', 'Interview confirmation - Import Export Analyst', vandelay, 0.1);
 }
 
 // ── HTTP helpers ──────────────────────────────────────────────────────
@@ -211,7 +261,8 @@ function route(req, url, body, res) {
   if (p === '/gmail/v1/users/me/profile') return send(res, 200, { emailAddress: 'ana@gmail.com', historyId: String(historyId) });
   if (p === '/gmail/v1/users/me/messages') {
     const after = Number((q.get('q') ?? '').match(/after:(\d+)/)?.[1] ?? 0) * 1000;
-    const found = gmail.filter((m) => m.at >= after).sort((a, b) => b.at - a.at);
+    const before = Number((q.get('q') ?? '').match(/before:(\d+)/)?.[1] ?? Infinity) * 1000;
+    const found = gmail.filter((m) => m.at >= after && m.at < before).sort((a, b) => b.at - a.at);
     return send(res, 200, { messages: found.map((m) => ({ id: m.id, threadId: m.thread })), resultSizeEstimate: found.length });
   }
   let match = p.match(/^\/gmail\/v1\/users\/me\/messages\/([^/]+)$/);
@@ -266,11 +317,26 @@ function route(req, url, body, res) {
 
   // Microsoft Graph
   if (p === '/graph/v1.0/me') return send(res, 200, { id: 'm-oid', displayName: 'Ana Example', mail: 'ana@outlook.com', userPrincipalName: 'ana@outlook.com' });
+  // `$filter=receivedDateTime ge <iso> [and receivedDateTime lt <iso>]`
+  const received = (filter) => ({
+    from: Date.parse(filter?.match(/receivedDateTime ge (\S+)/)?.[1] ?? '') || 0,
+    to: Date.parse(filter?.match(/receivedDateTime lt (\S+)/)?.[1] ?? '') || Infinity,
+  });
   if (p === '/graph/v1.0/me/mailFolders/inbox/messages/delta') {
-    const since = Number(q.get('$deltatoken') ?? 0);
-    const value = outlook.filter((m) => m.token > since).map((m) => graphMessage(m, false));
+    // The first round honours the lookback filter; later rounds return
+    // what arrived since the delta token.
+    const token = q.get('$deltatoken');
+    const { from } = received(q.get('$filter'));
+    const value = outlook
+      .filter((m) => (token === null ? m.at >= from : m.token > Number(token)))
+      .map((m) => graphMessage(m, false));
     deltaToken = Math.max(deltaToken, ...outlook.map((m) => m.token));
     return send(res, 200, { value, '@odata.deltaLink': `${base}/graph/v1.0/me/mailFolders/inbox/messages/delta?$deltatoken=${deltaToken}` });
+  }
+  if (p === '/graph/v1.0/me/mailFolders/inbox/messages') {
+    const { from, to } = received(q.get('$filter'));
+    const value = outlook.filter((m) => m.at >= from && m.at < to).sort((a, b) => a.at - b.at);
+    return send(res, 200, { value: value.map((m) => graphMessage(m, false)) });
   }
   match = p.match(/^\/graph\/v1\.0\/me\/messages\/([^/]+)$/);
   if (match) {
@@ -278,8 +344,28 @@ function route(req, url, body, res) {
     return m ? send(res, 200, graphMessage(m, true)) : send(res, 404, { error: { code: 'ErrorItemNotFound' } });
   }
   if (p === '/graph/v1.0/me/messages') return send(res, 200, { value: outlook.map((m) => graphMessage(m, false)) });
-  if (p === '/graph/v1.0/me/calendarView' || p === '/graph/v1.0/me/events') return send(res, 200, { value: [] });
-  if (p === '/graph/v1.0/me/calendar/getSchedule') return send(res, 200, { value: [{ scheduleId: 'ana@outlook.com', scheduleItems: [] }] });
+  const graphMs = (t) => Date.parse(`${t.dateTime}Z`);
+  if (p === '/graph/v1.0/me/calendarView') {
+    const min = Date.parse(q.get('startDateTime'));
+    const max = Date.parse(q.get('endDateTime'));
+    return send(res, 200, { value: outlookEvents.filter((e) => graphMs(e.start) < max && min < graphMs(e.end)) });
+  }
+  if (p === '/graph/v1.0/me/events') return send(res, 200, { value: [] });
+  if (p === '/graph/v1.0/me/calendar/getSchedule') {
+    const request = JSON.parse(body);
+    const min = graphMs(request.startTime);
+    const max = graphMs(request.endTime);
+    const scheduleItems = outlookEvents
+      .filter((e) => graphMs(e.start) < max && min < graphMs(e.end))
+      .map((e) => ({ status: e.showAs, start: e.start, end: e.end }));
+    return send(res, 200, { value: [{ scheduleId: 'ana@outlook.com', scheduleItems }] });
+  }
+
+  // Test control
+  if (p === '/__e2e/next' && req.method === 'POST') {
+    deliverNext();
+    return send(res, 200, { ok: true });
+  }
 
   return send(res, 404, { error: 'not mocked', path: p });
 }

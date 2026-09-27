@@ -35,6 +35,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0006_profile_agents_mcp.sql"),
     include_str!("migrations/0007_rema_mcp.sql"),
     include_str!("migrations/0008_connectors.sql"),
+    include_str!("migrations/0009_job_mail_sync.sql"),
 ];
 
 #[derive(Clone)]
@@ -188,6 +189,71 @@ mod tests {
             Ok(())
         })
         .unwrap();
+    }
+
+    #[test]
+    fn one_mail_task_becomes_job_mail_sync_and_nothing_else_reads_mail() {
+        // A database as ReMa 0008 found it: two mail tasks, a prompt task and
+        // a mail connector syncing in the background.
+        let mut conn = Connection::open_in_memory().unwrap();
+        for sql in &MIGRATIONS[..8] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 8).unwrap();
+        conn.execute_batch(
+            r#"INSERT INTO scheduled_tasks
+                 (id, name, prompt, provider_id, model_id, schedule, timezone, start_at, status,
+                  next_run_at, created_at, updated_at, kind)
+             VALUES
+                 (3, 'Mail monitor', '', 'p', 'm', '{"kind":"daily","every":1}', 'UTC', 0, 'active', 100, 0, 0,
+                  '{"type":"job_applications","lookbackDays":30,"syncCalendar":true}'),
+                 (4, 'Old mail monitor', '', 'p', 'm', '{"kind":"daily","every":1}', 'UTC', 0, 'active', 100, 0, 0,
+                  '{"type":"job_applications","lookbackDays":7,"syncCalendar":false}'),
+                 (5, 'Morning digest', 'Summarize', 'p', 'm', '{"kind":"daily","every":1}', 'UTC', 0, 'active', 100, 0, 0,
+                  '{"type":"prompt"}');
+             UPDATE connectors SET enabled = 1, background_sync = 1, next_sync_at = 5 WHERE id = 'gmail';"#,
+        )
+        .unwrap();
+
+        migrate(&mut conn).unwrap();
+        type Row = (i64, String, Option<String>, bool, Option<i64>);
+        let tasks: Vec<Row> = conn
+            .prepare(
+                "SELECT id, name, builtin, enabled, next_run_at FROM scheduled_tasks ORDER BY id",
+            )
+            .unwrap()
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            tasks,
+            [
+                (
+                    3,
+                    "Job Mail & Interview Sync".into(),
+                    Some("job_mail_sync".into()),
+                    true,
+                    Some(100)
+                ),
+                (4, "Old mail monitor".into(), None, false, None),
+                (5, "Morning digest".into(), None, true, Some(100)),
+            ]
+        );
+        let gmail: (bool, Option<i64>) = conn
+            .query_row(
+                "SELECT background_sync, next_sync_at FROM connectors WHERE id = 'gmail'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            gmail,
+            (false, None),
+            "connectors no longer read mail on their own"
+        );
     }
 
     #[test]

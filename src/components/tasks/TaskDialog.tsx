@@ -7,14 +7,17 @@ import {
   defaultForm,
   formFromTask,
   formToInput,
-  LOOKBACK_PRESETS,
+  JOB_MAIL_SYNC_DESCRIPTION,
+  jobMailSyncForm,
   MAX_LOOKBACK_DAYS,
   type TaskForm,
 } from '../../lib/taskForm';
 import { toApiError } from '../../services/ipc';
 import { sameModel, type ModelCatalog, type ModelRef } from '../../services/providerService';
 import { createTask, updateTask, type ScheduledTask } from '../../services/taskService';
+import { MailCalendarIcon } from '../icons';
 import { Dialog } from '../ui/Dialog';
+import { StatusIndicator } from '../ui/StatusIndicator';
 
 interface TaskDialogProps {
   catalog: ModelCatalog | null;
@@ -26,13 +29,19 @@ interface TaskDialogProps {
   initialModel?: ModelRef | null;
   /** Prefill from the composer's Profile toggle. */
   initialUseProfile?: boolean;
+  /** Set up the built-in Job Mail & Interview Sync (no `task` yet). */
+  jobMailSync?: boolean;
   onClose: () => void;
   onSaved: (task: ScheduledTask) => void;
 }
 
 const modelKey = (model: ModelRef) => `${model.providerId}/${model.modelId}`;
 
-/** Create or edit a scheduled task: type, prompt, model, start, repeat and end. */
+/**
+ * Create or edit a scheduled task: a prompt, or the built-in Job Mail &
+ * Interview Sync (mail sources, initial lookback, calendar), with the same
+ * model and schedule controls.
+ */
 export function TaskDialog({
   catalog,
   timezone,
@@ -40,11 +49,16 @@ export function TaskDialog({
   initialPrompt = '',
   initialModel = null,
   initialUseProfile = false,
+  jobMailSync = false,
   onClose,
   onSaved,
 }: TaskDialogProps) {
   const [form, setForm] = useState<TaskForm>(() =>
-    task ? formFromTask(task) : defaultForm(initialPrompt, initialModel, initialUseProfile),
+    task
+      ? formFromTask(task)
+      : jobMailSync
+        ? jobMailSyncForm(initialModel)
+        : defaultForm(initialPrompt, initialModel, initialUseProfile),
   );
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -55,6 +69,13 @@ export function TaskDialog({
   const mailboxes = usable('mail');
   const calendars = usable('calendar');
   const jobs = form.type === 'job_applications';
+  const title = jobs
+    ? task
+      ? 'Job Mail & Interview Sync settings'
+      : 'Set up Job Mail & Interview Sync'
+    : task
+      ? 'Edit task'
+      : 'Schedule task';
 
   const taskTimezone = task?.timezone ?? timezone;
   const models = catalog?.models ?? [];
@@ -87,7 +108,7 @@ export function TaskDialog({
 
   return (
     <Dialog
-      title={task ? 'Edit task' : 'Schedule task'}
+      title={title}
       onClose={onClose}
       actions={
         <>
@@ -105,29 +126,80 @@ export function TaskDialog({
             disabled={saving}
             onClick={() => void save()}
           >
-            {task ? 'Save' : 'Schedule'}
+            {task ? 'Save' : jobs ? 'Turn on' : 'Schedule'}
           </button>
         </>
       }
     >
       <div className="form">
-        <label className="field">
-          <span className="field__label">Type</span>
-          <select
-            className="input"
-            value={form.type}
-            onChange={(e) => update({ type: e.target.value as TaskForm['type'] })}
-          >
-            <option value="prompt">Prompt</option>
-            <option value="job_applications">Job Application Mail Monitor</option>
-          </select>
-        </label>
+        {jobs && (
+          <div className="builtin-intro">
+            <MailCalendarIcon className="builtin-intro__icon" aria-hidden="true" />
+            <p className="builtin-intro__text">
+              {JOB_MAIL_SYNC_DESCRIPTION} ReMa reads your mail only while this task is on.
+            </p>
+          </div>
+        )}
+
+        {jobs && (
+          <div className="job-options">
+            <div className="field">
+              <span className="field__label">Mail sources</span>
+              {mailboxes.length === 0 ? (
+                <p className="form__hint">
+                  Connect Gmail or Outlook Mail in Settings → Connectors to use this task.
+                </p>
+              ) : (
+                <ul className="source-list">
+                  {mailboxes.map((c) => (
+                    <li key={c.id}>
+                      <StatusIndicator tone="ready" label={c.name} />
+                      {c.accountEmail && <span className="source-list__account">{c.accountEmail}</span>}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+            <div className="form__inline">
+              <label htmlFor="lookback-days">Initial lookback: last</label>
+              <input
+                id="lookback-days"
+                type="number"
+                min={1}
+                max={MAX_LOOKBACK_DAYS}
+                className="input input--number"
+                value={form.lookbackDays}
+                onChange={(e) => update({ lookbackDays: Number(e.target.value) })}
+              />
+              <span>days</span>
+            </div>
+            <p className="form__hint">
+              The first run reads this many days of mail; later runs read only new mail. A longer lookback reads the
+              added days once; a shorter one removes nothing.
+            </p>
+            <label className="checkbox">
+              <input
+                type="checkbox"
+                checked={form.syncCalendar}
+                onChange={(e) => update({ syncCalendar: e.target.checked })}
+              />
+              <span>Add confirmed interviews to my calendar when the time is free</span>
+            </label>
+            <p className="form__hint">
+              {form.syncCalendar
+                ? calendars.length > 0
+                  ? `Checks ${calendars.map((c) => c.name).join(' and ')} for conflicts first; a conflict is flagged, never double-booked.`
+                  : 'No calendar is connected: confirmed interviews are tracked but not added. Connect Google Calendar or Outlook Calendar in Settings → Connectors.'
+                : 'Confirmed interviews are tracked in Applications only.'}
+            </p>
+          </div>
+        )}
 
         <label className="field">
           <span className="field__label">{jobs ? 'Instructions (optional)' : 'Prompt'}</span>
           <textarea
             className="input input--textarea"
-            rows={3}
+            rows={jobs ? 2 : 3}
             placeholder={
               jobs ? 'E.g. I applied for data engineering roles in Vienna. Ignore recruiter newsletters.' : ''
             }
@@ -147,70 +219,18 @@ export function TaskDialog({
           </label>
         )}
 
-        {jobs && (
-          <div className="job-options">
-            <div className="form__inline">
-              <span>Check emails from the last</span>
-              <select
-                className="input input--auto"
-                aria-label="Lookback"
-                value={form.lookback}
-                onChange={(e) => update({ lookback: e.target.value })}
-              >
-                {LOOKBACK_PRESETS.map((days) => (
-                  <option key={days} value={days}>
-                    {days === 1 ? '1 day' : `${days} days`}
-                  </option>
-                ))}
-                <option value="custom">Custom</option>
-              </select>
-              {form.lookback === 'custom' && (
-                <>
-                  <input
-                    type="number"
-                    min={1}
-                    max={MAX_LOOKBACK_DAYS}
-                    className="input input--number"
-                    aria-label="Lookback in days"
-                    value={form.customLookback}
-                    onChange={(e) => update({ customLookback: Number(e.target.value) })}
-                  />
-                  <span>days</span>
-                </>
-              )}
-            </div>
-            <label className="checkbox">
-              <input
-                type="checkbox"
-                checked={form.syncCalendar}
-                onChange={(e) => update({ syncCalendar: e.target.checked })}
-              />
-              <span>Handle confirmed interviews in my calendar (conflicts are always checked)</span>
-            </label>
-            <p className="form__hint">
-              {mailboxes.length === 0
-                ? 'Connect Gmail or Outlook Mail in Settings → Connectors to use this task.'
-                : `Checks ${mailboxes.map((c) => c.name).join(' and ')}${
-                    form.syncCalendar
-                      ? calendars.length > 0
-                        ? ` with ${calendars.map((c) => c.name).join(' and ')}`
-                        : ' (connect a calendar in Settings → Connectors for interviews)'
-                      : ''
-                  }. Each run also covers mail since the last successful sync.`}
-            </p>
-          </div>
-        )}
-
         <div className="form__row">
-          <label className="field field--grow">
-            <span className="field__label">Name</span>
-            <input
-              className="input"
-              placeholder={jobs ? 'Job Application Mail Monitor' : 'From the prompt'}
-              value={form.name}
-              onChange={(e) => update({ name: e.target.value })}
-            />
-          </label>
+          {!jobs && (
+            <label className="field field--grow">
+              <span className="field__label">Name</span>
+              <input
+                className="input"
+                placeholder="From the prompt"
+                value={form.name}
+                onChange={(e) => update({ name: e.target.value })}
+              />
+            </label>
+          )}
           <label className="field field--grow">
             <span className="field__label">Model</span>
             <select

@@ -143,8 +143,8 @@ export function Composer({
                 aria-pressed={profileOn}
                 title={
                   profileOn
-                    ? 'Profile ON: your messages in this chat include your Profile (CVs, credentials, Custom Profile and Portfolio CVs; no email or phone) for the selected model provider. Click to turn off.'
-                    : 'Profile OFF: the model gets no Profile details. Click to include your Profile in this chat’s requests.'
+                    ? 'Profile ON: each message in this chat includes your current Profile context (Custom Profile, CVs and credentials; no email or phone). Your Custom Profile takes priority over uploaded documents. Click to turn off.'
+                    : 'Profile OFF: ReMa adds no Profile details. What you write or attach still counts. Click to include your Profile in this chat.'
                 }
                 onClick={() => onProfileChange(!profileOn)}
               >

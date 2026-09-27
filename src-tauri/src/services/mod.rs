@@ -2,6 +2,7 @@ pub mod accounts;
 pub mod agents;
 pub mod applications;
 pub mod background;
+pub mod calendar_view;
 pub mod chat;
 pub mod chat_tools;
 pub mod connector_tools;

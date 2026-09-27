@@ -9,8 +9,16 @@ import { FOOTER_NAV, MAIN_NAV } from './pages';
 import { SettingsPage } from '../pages/SettingsPage';
 
 describe('navigation', () => {
-  it('places Agents directly below Chat', () => {
-    expect(MAIN_NAV.map((i) => i.label)).toEqual(['Chat', 'Agents', 'Scheduled Tasks', 'Applications', 'Profile']);
+  it('lists Portfolio Studio under Profile and Applications under Portfolio Studio', () => {
+    expect(MAIN_NAV.map((i) => i.label)).toEqual([
+      'Chat',
+      'Agents',
+      'Scheduled Tasks',
+      'Profile',
+      'Portfolio Studio',
+      'Applications',
+    ]);
+    expect(MAIN_NAV.map((i) => i.id)).toEqual(['chat', 'agents', 'tasks', 'profile', 'portfolio', 'applications']);
     expect(FOOTER_NAV.map((i) => i.label)).toEqual(['Settings']);
   });
 

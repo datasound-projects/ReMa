@@ -1,4 +1,4 @@
-import type { SVGProps } from 'react';
+import { useId, type SVGProps } from 'react';
 
 export type IconProps = SVGProps<SVGSVGElement>;
 
@@ -590,6 +590,26 @@ export function CalendarIcon(props: IconProps) {
     <Icon {...props}>
       <rect x="3.25" y="4.5" width="13.5" height="12" rx="1.75" />
       <path d="M3.25 8.25h13.5M7 3v3M13 3v3" />
+    </Icon>
+  );
+}
+
+/** Mail with a calendar check: "Job Mail & Interview Sync". */
+export function MailCalendarIcon(props: IconProps) {
+  const mask = `mail-calendar-${useId()}`;
+  return (
+    <Icon {...props}>
+      <mask id={mask}>
+        <rect width="20" height="20" fill="white" stroke="none" />
+        <rect x="8.75" y="8.25" width="10.5" height="10.5" rx="2.5" fill="black" stroke="none" />
+      </mask>
+      <g mask={`url(#${mask})`}>
+        <rect x="2.25" y="3.5" width="11.5" height="8.75" rx="1.5" />
+        <path d="m3 4.75 5 3.75 5-3.75" />
+      </g>
+      <rect x="10.25" y="9.75" width="7.5" height="7.5" rx="1.5" />
+      <path d="M10.25 12.25h7.5M12.25 8.75v2M15.75 8.75v2" />
+      <path d="m12.4 14.6 1.1 1.1 2.1-2.1" />
     </Icon>
   );
 }

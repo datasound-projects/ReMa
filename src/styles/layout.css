@@ -363,6 +363,14 @@
   color: var(--color-text-secondary);
 }
 
+/* A second, smaller line under a page's description. */
+.page__subtitle-note {
+  display: block;
+  margin-top: var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--color-text-tertiary);
+}
+
 .page__actions {
   display: flex;
   align-items: center;

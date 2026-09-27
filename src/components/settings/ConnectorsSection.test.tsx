@@ -4,31 +4,42 @@ import '../../test/dom';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { NavigationContext, type View } from '../../app/navigation';
 import type { ConnectorStatus, ConnectorsOverview } from '../../services/connectorService';
-import { ConnectorsSection } from './ConnectorsSection';
+import type { ScheduledTask } from '../../services/taskService';
+import { ConnectorsSection as Section } from './ConnectorsSection';
 
 const mocks = vi.hoisted(() => ({
   getConnectors: vi.fn(),
   connectConnector: vi.fn(),
   cancelConnectorSignIn: vi.fn(),
   disconnectConnector: vi.fn(),
-  syncConnector: vi.fn(),
-  setConnectorBackgroundSync: vi.fn(),
-  setConnectorPreferences: vi.fn(),
   setBackgroundSettings: vi.fn(),
 }));
+const tasks = vi.hoisted(() => ({ listTasks: vi.fn() }));
+const navigate = vi.fn<(view: View) => void>();
 
 vi.mock('../../services/connectorService', () => mocks);
-vi.mock('../../services/systemService', () => ({ openExternalUrl: vi.fn(() => Promise.resolve(null)) }));
+vi.mock('../../services/taskService', () => tasks);
+vi.mock('../../services/systemService', () => ({
+  openExternalUrl: vi.fn(() => Promise.resolve(null)),
+  getSystemTimezone: vi.fn(() => Promise.resolve('Europe/Vienna')),
+}));
+
+function ConnectorsSection() {
+  return (
+    <NavigationContext value={{ view: { page: 'settings' }, navigate }}>
+      <Section />
+    </NavigationContext>
+  );
+}
 
 const base = {
   enabled: false,
   accountEmail: null,
   accountName: null,
-  backgroundSync: null,
   lastSyncStartedAt: null,
   lastSyncAt: null,
-  nextSyncAt: null,
   message: null,
   detail: null,
 };
@@ -54,7 +65,6 @@ function card(patch: Partial<ConnectorStatus> & Pick<ConnectorStatus, 'id'>): Co
           { capability: 'calendar_read', label: 'Calendar — Read events', granted: false },
           { capability: 'calendar_write', label: 'Calendar — Create and update events', granted: false },
         ],
-    backgroundSync: mail ? true : null,
     ...patch,
   } as ConnectorStatus;
 }
@@ -62,7 +72,6 @@ function card(patch: Partial<ConnectorStatus> & Pick<ConnectorStatus, 'id'>): Co
 function overview(connectors: ConnectorStatus[]): ConnectorsOverview {
   return {
     connectors,
-    preferences: { interviewMode: 'ask', syncIntervalMinutes: 15, prepBufferMinutes: 0 },
     background: { runInBackground: false, startAtLogin: false, trayAvailable: true },
   };
 }
@@ -86,6 +95,7 @@ const gmailConnected = card({
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.getConnectors.mockResolvedValue(disconnected);
+  tasks.listTasks.mockResolvedValue([]);
 });
 
 describe('Settings → Connectors', () => {
@@ -158,7 +168,12 @@ describe('Settings → Connectors', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Gmail details' }));
     const detail = screen.getByRole('dialog', { name: 'Gmail' });
     expect(within(detail).getByText('Mail — Read')).toBeTruthy();
-    expect(within(detail).getByRole('switch', { name: 'Background sync' })).toBeTruthy();
+    // No sync controls of its own: only the built-in task reads mail.
+    expect(within(detail).queryByRole('switch')).toBeNull();
+    expect(within(detail).queryByRole('button', { name: 'Sync now' })).toBeNull();
+    expect(
+      await within(detail).findByText(/Not read automatically: turn on Job Mail & Interview Sync in Scheduled Tasks/),
+    ).toBeTruthy();
     fireEvent.click(within(detail).getByRole('button', { name: 'Disconnect' }));
 
     const confirm = screen.getByRole('dialog', { name: 'Disconnect Gmail?' });
@@ -169,19 +184,19 @@ describe('Settings → Connectors', () => {
     await waitFor(() => expect(mocks.disconnectConnector).toHaveBeenCalledWith('gmail'));
   });
 
-  it('defaults to asking before adding interviews and saves preferences', async () => {
-    mocks.setConnectorPreferences.mockResolvedValue(disconnected);
+  it('says that only Job Mail & Interview Sync reads mail', async () => {
     render(<ConnectorsSection />);
-    const ask = (await screen.findByRole('radio', { name: 'Ask before adding' })) as HTMLInputElement;
-    expect(ask.checked).toBe(true);
-    fireEvent.click(screen.getByRole('radio', { name: 'Add automatically when confidently confirmed' }));
-    await waitFor(() =>
-      expect(mocks.setConnectorPreferences).toHaveBeenCalledWith({
-        interviewMode: 'auto',
-        syncIntervalMinutes: 15,
-        prepBufferMinutes: 0,
-      }),
-    );
+    expect(await screen.findByText(/Connecting a mailbox never starts reading it/)).toBeTruthy();
+    expect(await screen.findByText('Off')).toBeTruthy();
+    expect(screen.queryByRole('radio')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Scheduled Tasks' }));
+    expect(navigate).toHaveBeenCalledWith({ page: 'tasks' });
+  });
+
+  it('shows tracking as on when the built-in task is on', async () => {
+    tasks.listTasks.mockResolvedValue([{ id: 1, builtin: 'job_mail_sync', enabled: true } as ScheduledTask]);
+    render(<ConnectorsSection />);
+    expect(await screen.findByText('On')).toBeTruthy();
   });
 
   it('offers explicit background options, off by default', async () => {

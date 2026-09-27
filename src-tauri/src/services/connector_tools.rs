@@ -40,10 +40,7 @@ use crate::{
         mail::{MailMessage, MailQuery, MAX_BODY_CHARS},
         sync,
     },
-    db::{
-        connectors as connector_repo,
-        jobs::{self as repo, InterviewState, TimelineRecord},
-    },
+    db::jobs::{self as repo, InterviewState, TimelineRecord},
     error::{AppError, AppResult},
     jobs::{
         self, applications, calendar_sync, extract,
@@ -54,7 +51,7 @@ use crate::{
     models::{
         chat::{ActivityKind, ApprovalDecision, ChatEvent, ToolActivity, ToolStatus},
         connectors::{ConnectorId, ConnectorKind, ProviderId},
-        jobs::{ApplicationStatus, UpdateSource},
+        jobs::{ApplicationSection, ApplicationStatus, UpdateSource},
     },
     state::AppState,
     time::now_ms,
@@ -244,7 +241,7 @@ fn calendar_specs() -> Vec<ToolSpec> {
         spec(
             CALENDAR_CHECK_AVAILABILITY,
             "Checks whether the user is free for a time (for example a proposed interview \
-             slot), including the preparation buffer set in ReMa. Returns conflicting events.",
+             slot). Returns conflicting events.",
             schema(
                 json!({
                     "start": { "type": "string", "description": TIME_PROPERTY },
@@ -289,13 +286,20 @@ fn application_specs() -> Vec<ToolSpec> {
     vec![
         spec(
             APPLICATIONS_FIND_MATCH,
-            "Finds the user's tracked job applications by company (and role); without a \
-             company, lists the most recently updated ones. Returns ids, status, next action \
-             and interviews (with interview_id and calendar state).",
+            "Reads the user's tracked job applications (the same state as the Applications \
+             page): by company (and role), or by section (e.g. needs_action for \
+             \"which applications need my action?\"); without either, the most recently \
+             updated ones. Returns ids, section, status, the latest update / requested action \
+             / rejection reason, and interviews (with interview_id, time, meeting link and \
+             calendar state).",
             schema(
                 json!({
                     "company": { "type": "string" },
                     "role": { "type": "string" },
+                    "section": { "type": "string", "enum": [
+                        "interviews_confirmed", "applications_confirmed", "needs_action",
+                        "in_progress", "rejected"
+                    ]},
                 }),
                 &[],
             ),
@@ -385,6 +389,7 @@ struct UpdateArgs {
 struct FindArgs {
     company: Option<String>,
     role: Option<String>,
+    section: Option<ApplicationSection>,
 }
 
 #[derive(Deserialize)]
@@ -857,12 +862,7 @@ impl ConnectorTools {
         let args: RangeArgs = parse(call)?;
         let tz = zone(args.timezone.as_deref())?;
         let (start, end) = range(&args.start, &args.end, &tz)?;
-        let buffer_ms = i64::from(
-            self.state
-                .db
-                .call(|c| connector_repo::preferences(c))?
-                .prep_buffer_minutes,
-        ) * 60_000;
+        let buffer_ms = 0;
         let mut conflicts = Vec::new();
         for id in &self.calendars {
             let calendar = sync::calendar_client(&self.state, *id).await?;
@@ -1076,28 +1076,38 @@ impl ConnectorTools {
         let company = short(args.company, 120);
         let role = short(args.role, 120);
         let now = now_ms();
+        let section = args.section;
         let rows = self.state.db.call(|c| {
             let apps = match &company {
                 Some(company) => tracker::find(c, company, role.as_deref())?,
                 None => repo::all_applications(c)?,
             };
             let mut rows = Vec::new();
-            for app in apps.into_iter().take(MAX_RESULTS) {
+            for app in apps
+                .into_iter()
+                .filter(|a| section.is_none_or(|s| a.status.section() == s))
+                .take(MAX_RESULTS)
+            {
                 let interviews = repo::interviews_for_application(c, app.id)?;
+                let row = tracker::row(c, app.clone(), now)?;
                 rows.push(json!({
                     "application_id": app.id,
                     "company": app.company,
                     "role": app.role,
+                    "section": row.section,
                     "status": app.status.as_str(),
-                    "status_label": app.status.label(),
-                    "last_update": show_in(Some(app.last_update_at), None),
-                    "next_action": app.next_action,
+                    "status_label": row.status_label,
+                    "latest_update": row.latest_update,
+                    "last_email": show_in(Some(app.last_update_at), None),
+                    "next_action": row.next_action,
+                    "rejection_reason": row.rejection_reason,
                     "interviews": interviews.iter().map(|i| json!({
                         "interview_id": i.id,
                         "state": i.state.as_str(),
                         "start": show_in(i.start_at, i.timezone.as_deref()),
                         "end": show_in(i.end_at, i.timezone.as_deref()),
                         "upcoming": i.end_at.is_some_and(|e| e > now),
+                        "meeting_url": i.meeting_url,
                         "calendar": i.calendar_state.as_str(),
                         "needs_review": i.review_reason,
                     })).collect::<Vec<_>>(),

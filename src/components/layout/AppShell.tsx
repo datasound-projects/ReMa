@@ -8,6 +8,7 @@ import { SIDEBAR_SHORTCUT } from '../../hooks/useSidebar';
 import { ChartIcon, GlobeIcon, PanelIcon } from '../icons';
 import { BrandMark } from '../ui/BrandMark';
 import { IconButton } from '../ui/IconButton';
+import { CalendarButton } from './CalendarPanel';
 import { NotificationBell } from './NotificationBell';
 import { ThemeToggle } from './ThemeToggle';
 
@@ -142,6 +143,7 @@ export function AppShell({ sidebar, sidebarCollapsed, onToggleSidebar, children 
           >
             <GlobeIcon />
           </IconButton>
+          <CalendarButton />
           <NotificationBell />
           <ThemeToggle />
         </div>

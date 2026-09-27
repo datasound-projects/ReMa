@@ -1,38 +1,47 @@
 import { useState } from 'react';
 
 import { useNavigation } from '../app/navigation';
-import { ArrowLeftIcon, BriefcaseIcon, CalendarIcon, ExternalIcon, MailIcon } from '../components/icons';
+import {
+  ArrowLeftIcon,
+  CalendarIcon,
+  ChevronDownIcon,
+  ChevronRightIcon,
+  ExternalIcon,
+  MailCalendarIcon,
+  MailIcon,
+} from '../components/icons';
 import { PageContainer } from '../components/layout/PageContainer';
-import { EmptyState, LoadingState } from '../components/ui/EmptyState';
+import { LoadingState } from '../components/ui/EmptyState';
 import { useAction } from '../hooks/useAction';
 import { useApplication, useApplications } from '../hooks/useApplications';
 import { dataOr } from '../hooks/useAsyncData';
-import { useConnectors } from '../hooks/useConnectors';
-import { APPLICATION_STATUS_LABELS, formatDateTime, formatInTimezone, formatTimeRange } from '../lib/format';
+import { APPLICATION_STATUS_LABELS, formatDate, formatDateTime, formatRelative, formatTimeRange } from '../lib/format';
 import {
   addInterviewToCalendar,
   declineInterviewCalendar,
   setApplicationStatus,
   type ApplicationRow,
+  type ApplicationSection,
   type ApplicationStatus,
   type Correspondence,
   type EmailCategory,
   type InterviewView,
   type TimelineEntry,
+  type TrackingStatus,
   type UpdateSource,
 } from '../services/applicationService';
 import { openExternalUrl } from '../services/systemService';
 
 const CATEGORY_LABELS: Record<EmailCategory, string> = {
-  application_received: 'Application received',
+  application_confirmed: 'Application confirmed',
   application_update: 'Application update',
+  needs_action: 'Action requested',
   recruiter_message: 'Recruiter message',
-  interview_request: 'Interview request',
+  interview_request: 'Interview requested',
   interview_confirmed: 'Interview confirmed',
   interview_rescheduled: 'Interview rescheduled',
   interview_cancelled: 'Interview cancelled',
-  assessment_request: 'Assessment',
-  action_required: 'Action required',
+  assessment_request: 'Assessment requested',
   rejection: 'Rejection',
   offer: 'Offer',
   other_job_related: 'Other job-related',
@@ -52,20 +61,66 @@ const CALENDAR_NAMES: Record<string, string> = { google: 'Google Calendar', micr
 
 const STATUSES = Object.keys(APPLICATION_STATUS_LABELS) as ApplicationStatus[];
 
-function StatusBadge({ status }: { status: ApplicationStatus }) {
-  return <span className={`app-status app-status--${status}`}>{APPLICATION_STATUS_LABELS[status]}</span>;
+/** The five sections, in page order. Each application is in exactly one. */
+const SECTIONS: { id: ApplicationSection; title: string; lastColumn: string; empty: string }[] = [
+  {
+    id: 'interviews_confirmed',
+    title: 'Interviews Confirmed',
+    lastColumn: 'Interview',
+    empty: 'No confirmed interviews.',
+  },
+  {
+    id: 'applications_confirmed',
+    title: 'Applications Confirmed',
+    lastColumn: 'Latest update',
+    empty: 'No confirmed applications waiting for news.',
+  },
+  { id: 'needs_action', title: 'Needs Your Action', lastColumn: 'Requested action', empty: 'Nothing needs your action.' },
+  {
+    id: 'in_progress',
+    title: 'Applications In Progress',
+    lastColumn: 'Latest update',
+    empty: 'No applications in progress.',
+  },
+  { id: 'rejected', title: 'Rejected', lastColumn: 'Rejection reason', empty: 'No rejections.' },
+];
+
+const COLLAPSED_KEY = 'rema.applications.collapsed';
+
+/** Which sections the user collapsed (remembered on this computer only). */
+function useCollapsed() {
+  const [collapsed, setCollapsed] = useState<ApplicationSection[]>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(COLLAPSED_KEY) ?? '[]') as unknown;
+      return Array.isArray(saved) ? (saved as ApplicationSection[]) : [];
+    } catch {
+      return [];
+    }
+  });
+  const toggle = (id: ApplicationSection) => {
+    const next = collapsed.includes(id) ? collapsed.filter((c) => c !== id) : [...collapsed, id];
+    setCollapsed(next);
+    try {
+      localStorage.setItem(COLLAPSED_KEY, JSON.stringify(next));
+    } catch {
+      // Not remembered; the page still works.
+    }
+  };
+  return { collapsed, toggle };
 }
 
-function openMail(link: string | null) {
+function openLink(link: string | null) {
   if (link) void openExternalUrl(link).catch(() => {});
 }
 
-/** The job applications ReMa tracks from connected mail. */
+/**
+ * The job applications ReMa tracks: five sections for the current state,
+ * each application in exactly one, latest email first.
+ */
 export function ApplicationsPage({ applicationId }: { applicationId: number | null }) {
   const { navigate } = useNavigation();
   const overview = useApplications();
-  const connectors = dataOr(useConnectors().state, null)?.connectors ?? [];
-  const mailConnected = connectors.some((c) => c.kind === 'mail' && c.enabled);
+  const { collapsed, toggle } = useCollapsed();
   const open = (id: number | null) => navigate({ page: 'applications', applicationId: id });
 
   if (applicationId !== null) {
@@ -76,7 +131,7 @@ export function ApplicationsPage({ applicationId }: { applicationId: number | nu
   return (
     <PageContainer
       title="Applications"
-      subtitle="Tracked from your connected mail. Every change shows where it came from."
+      subtitle="The current state of each job application, from your job email."
       width="wide"
     >
       {overview.state.status === 'loading' && <LoadingState />}
@@ -87,112 +142,171 @@ export function ApplicationsPage({ applicationId }: { applicationId: number | nu
       )}
       {data && (
         <>
-          <div className="apps-summary" aria-label="Summary">
-            <Stat value={data.summary.updatesToday} label="Updates today" />
-            <Stat value={data.summary.interviewsScheduled} label="Interviews scheduled" />
-            <Stat value={data.summary.actionRequired} label="Action required" attention />
-            <Stat value={data.summary.offers} label="Offers" />
-            <Stat value={data.summary.total} label="Applications" />
+          <TrackingNotice tracking={data.tracking} />
+          <div className="apps-sections">
+            {SECTIONS.map((section) => (
+              <SectionCard
+                key={section.id}
+                section={section}
+                rows={data.applications.filter((row) => row.section === section.id)}
+                expanded={!collapsed.includes(section.id)}
+                onToggle={() => toggle(section.id)}
+                onOpen={open}
+              />
+            ))}
           </div>
-
-          {data.needsReview.length > 0 && (
-            <section className="section" aria-labelledby="review-heading">
-              <h2 id="review-heading" className="section__title">
-                Needs review
-              </h2>
-              <p className="section__description">
-                ReMa was not sure what these emails mean, so it changed nothing. Check them yourself.
-              </p>
-              <ul className="apps-review">
-                {data.needsReview.map((mail) => (
-                  <MailRow key={`${mail.provider}:${mail.messageId}`} mail={mail} />
-                ))}
-              </ul>
-            </section>
-          )}
-
-          {data.applications.length === 0 ? (
-            <EmptyState
-              framed
-              icon={<BriefcaseIcon />}
-              title={mailConnected ? 'No applications yet' : 'Connect your mailbox'}
-              actions={
-                !mailConnected && (
-                  <button
-                    type="button"
-                    className="button button--primary"
-                    onClick={() => navigate({ page: 'settings', focus: 'connectors' })}
-                  >
-                    Open Connectors
-                  </button>
-                )
-              }
-            >
-              {mailConnected
-                ? 'Applications appear here as ReMa finds job-related email: confirmations, interviews, rejections and offers.'
-                : 'Connect Gmail or Outlook Mail and ReMa keeps track of your job applications from your email.'}
-            </EmptyState>
-          ) : (
-            <div className="panel apps-table-wrap">
-              <table className="job-table apps-table">
-                <thead>
-                  <tr>
-                    <th scope="col">Company</th>
-                    <th scope="col">Role</th>
-                    <th scope="col">Status</th>
-                    <th scope="col">Last update</th>
-                    <th scope="col">Next</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.applications.map((row) => (
-                    <tr key={row.id} className="apps-table__row" onClick={() => open(row.id)}>
-                      <td className="job-table__company">
-                        <button type="button" className="link-button apps-table__open" onClick={() => open(row.id)}>
-                          {row.company}
-                        </button>
-                      </td>
-                      <td>{row.role ?? '—'}</td>
-                      <td>
-                        <StatusBadge status={row.status} />
-                      </td>
-                      <td className="job-table__muted">{formatDateTime(row.lastUpdateAt)}</td>
-                      <td>{nextStep(row)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
         </>
       )}
     </PageContainer>
   );
 }
 
-/** "Fri, 2 Oct, 14:00–15:00 (Europe/Vienna)" in the interview's own time zone. */
-function interviewWhen(start: number, end: number, timezone: string | null): string {
-  const options: Intl.DateTimeFormatOptions = { weekday: 'short', day: 'numeric', month: 'short' };
-  let day: string;
-  try {
-    day = new Intl.DateTimeFormat(undefined, { ...options, timeZone: timezone ?? undefined }).format(start);
-  } catch {
-    day = new Intl.DateTimeFormat(undefined, options).format(start);
+/** Where the rows come from: only "Job Mail & Interview Sync" reads mail. */
+function TrackingNotice({ tracking }: { tracking: TrackingStatus }) {
+  const { navigate } = useNavigation();
+  if (tracking.enabled) {
+    return (
+      <p className="apps-tracking apps-tracking--on">
+        <MailCalendarIcon className="apps-tracking__icon" aria-hidden="true" />
+        <span>
+          Updated by Job Mail &amp; Interview Sync
+          {tracking.lastRunAt !== null && ` · last run ${formatRelative(tracking.lastRunAt)}`}
+          {tracking.nextRunAt !== null && ` · next run ${formatDateTime(tracking.nextRunAt)}`}
+        </span>
+      </p>
+    );
   }
-  return `${day}, ${formatTimeRange(start, end, timezone)}${timezone ? ` (${timezone})` : ''}`;
-}
-
-function nextStep(row: ApplicationRow): string {
-  if (row.interviewAt !== null) return `Interview ${formatInTimezone(row.interviewAt, row.interviewTimezone)}`;
-  return row.nextAction ?? '—';
-}
-
-function Stat({ value, label, attention }: { value: number; label: string; attention?: boolean }) {
   return (
-    <div className={`apps-summary__stat${attention && value > 0 ? ' apps-summary__stat--attention' : ''}`}>
-      <span className="apps-summary__value">{value}</span>
-      <span className="apps-summary__label">{label}</span>
+    <div className="apps-tracking apps-tracking--off" role="note">
+      <MailCalendarIcon className="apps-tracking__icon" aria-hidden="true" />
+      <p className="apps-tracking__text">
+        {tracking.mailConnected
+          ? 'ReMa is not reading your mail. Turn on Job Mail & Interview Sync in Scheduled Tasks to keep these sections up to date.'
+          : 'Connect Gmail or Outlook Mail in Settings → Connectors, then turn on Job Mail & Interview Sync in Scheduled Tasks.'}
+      </p>
+      <button
+        type="button"
+        className="button button--secondary button--small"
+        onClick={() =>
+          tracking.mailConnected ? navigate({ page: 'tasks' }) : navigate({ page: 'settings', focus: 'connectors' })
+        }
+      >
+        {tracking.mailConnected ? 'Scheduled Tasks' : 'Open Connectors'}
+      </button>
     </div>
+  );
+}
+
+function SectionCard({
+  section,
+  rows,
+  expanded,
+  onToggle,
+  onOpen,
+}: {
+  section: (typeof SECTIONS)[number];
+  rows: ApplicationRow[];
+  expanded: boolean;
+  onToggle: () => void;
+  onOpen: (id: number) => void;
+}) {
+  const bodyId = `apps-section-${section.id}`;
+  return (
+    <section className={`apps-section apps-section--${section.id}`} aria-label={section.title}>
+      <h2 className="apps-section__heading">
+        <button
+          type="button"
+          className="apps-section__toggle"
+          aria-expanded={expanded}
+          aria-controls={bodyId}
+          onClick={onToggle}
+        >
+          {expanded ? (
+            <ChevronDownIcon className="apps-section__chevron" aria-hidden="true" />
+          ) : (
+            <ChevronRightIcon className="apps-section__chevron" aria-hidden="true" />
+          )}
+          <span className="apps-section__title">{section.title}</span>
+          <span
+            className={`apps-section__count${section.id === 'needs_action' && rows.length > 0 ? ' apps-section__count--attention' : ''}`}
+            aria-label={`${rows.length} applications`}
+          >
+            {rows.length}
+          </span>
+        </button>
+      </h2>
+      {expanded && (
+        <div className="apps-section__body" id={bodyId}>
+          {rows.length === 0 ? (
+            <p className="apps-section__empty">{section.empty}</p>
+          ) : (
+            <div className="apps-section__scroll">
+              <table className="job-table apps-table">
+                <thead>
+                  <tr>
+                    <th scope="col" className="apps-table__date">
+                      Date (latest msg)
+                    </th>
+                    <th scope="col">Company</th>
+                    <th scope="col">Role</th>
+                    <th scope="col">Status</th>
+                    <th scope="col" className="apps-table__update">
+                      {section.lastColumn}
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((row) => (
+                    <Row key={row.id} row={row} onOpen={() => onOpen(row.id)} />
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function Row({ row, onOpen }: { row: ApplicationRow; onOpen: () => void }) {
+  return (
+    <tr className="apps-table__row" onClick={onOpen}>
+      <td className="job-table__muted apps-table__date">{formatDate(row.lastUpdateAt)}</td>
+      <td className="job-table__company">
+        <button
+          type="button"
+          className="link-button apps-table__open"
+          onClick={(e) => {
+            e.stopPropagation();
+            onOpen();
+          }}
+        >
+          {row.company}
+        </button>
+      </td>
+      <td>{row.role ?? '—'}</td>
+      <td>
+        <span className={`app-status app-status--${row.status}`}>{row.statusLabel}</span>
+      </td>
+      <td className="apps-table__update">
+        <span className="apps-table__update-text">{row.latestUpdate}</span>
+        {row.calendarConflict && <span className="calendar-outcome calendar-outcome--conflict">Calendar conflict</span>}
+        {row.meetingUrl && (
+          <button
+            type="button"
+            className="button button--ghost button--small apps-table__join"
+            onClick={(e) => {
+              e.stopPropagation();
+              openLink(row.meetingUrl);
+            }}
+          >
+            <ExternalIcon className="button__icon" />
+            Meeting link
+          </button>
+        )}
+      </td>
+    </tr>
   );
 }
 
@@ -210,13 +324,19 @@ function MailRow({ mail }: { mail: Correspondence }) {
         </span>
       </div>
       {mail.webLink && (
-        <button type="button" className="button button--ghost button--small" onClick={() => openMail(mail.webLink)}>
+        <button type="button" className="button button--ghost button--small" onClick={() => openLink(mail.webLink)}>
           <ExternalIcon className="button__icon" />
           Open in {mail.provider === 'microsoft' ? 'Outlook' : 'Gmail'}
         </button>
       )}
     </li>
   );
+}
+
+/** "Fri, 2 Oct, 14:00–15:00" in local time (proposed slots). */
+function slotWhen(start: number, end: number): string {
+  const day = new Intl.DateTimeFormat(undefined, { weekday: 'short', day: 'numeric', month: 'short' }).format(start);
+  return `${day}, ${formatTimeRange(start, end, null)}`;
 }
 
 function ApplicationDetailView({ id, onBack }: { id: number; onBack: () => void }) {
@@ -269,8 +389,8 @@ function ApplicationDetailView({ id, onBack }: { id: number; onBack: () => void 
       {data && app && (
         <div className="apps-detail">
           <div className="apps-detail__summary">
-            <StatusBadge status={app.status} />
-            {app.nextAction && <span className="apps-detail__next">Next: {app.nextAction}</span>}
+            <span className={`app-status app-status--${app.status}`}>{app.statusLabel}</span>
+            <span className="apps-detail__next">{app.latestUpdate}</span>
           </div>
 
           {data.interviews.length > 0 && (
@@ -345,7 +465,7 @@ function InterviewCard({ interview: i }: { interview: InterviewView }) {
   // "conflict"), which offers "Add anyway".
   const add = (allowConflict: boolean) => void action.run(() => addInterviewToCalendar(i.id, allowConflict));
 
-  const when = i.startAt !== null && i.endAt !== null ? interviewWhen(i.startAt, i.endAt, i.timezone) : null;
+  const when = i.timeText;
 
   return (
     <div className="apps-interview">
@@ -364,7 +484,7 @@ function InterviewCard({ interview: i }: { interview: InterviewView }) {
         <p className="apps-interview__line">
           {i.location && <span>{i.location}</span>}
           {i.meetingUrl && (
-            <button type="button" className="link-button" onClick={() => openMail(i.meetingUrl)}>
+            <button type="button" className="link-button" onClick={() => openLink(i.meetingUrl)}>
               Meeting link
             </button>
           )}
@@ -376,7 +496,7 @@ function InterviewCard({ interview: i }: { interview: InterviewView }) {
         <ul className="apps-interview__conflicts">
           {i.conflicts.map((c, n) => (
             <li key={n}>
-              Conflicts with “{c.title}” ({formatTimeRange(c.startAt, c.endAt, i.timezone)})
+              Conflicts with “{c.title}” ({formatTimeRange(c.startAt, c.endAt, null)})
             </li>
           ))}
         </ul>
@@ -387,7 +507,7 @@ function InterviewCard({ interview: i }: { interview: InterviewView }) {
           <ul>
             {i.proposedSlots.map((slot, n) => (
               <li key={n}>
-                {interviewWhen(slot.startAt, slot.endAt, null)} —{' '}
+                {slotWhen(slot.startAt, slot.endAt)} —{' '}
                 {slot.available === true
                   ? 'you are free'
                   : slot.available === false

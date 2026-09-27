@@ -10,30 +10,41 @@ use crate::{
     db::jobs::{self as repo, ApplicationRecord, InterviewRecord, MailRecord, TimelineRecord},
     error::{AppError, AppResult},
     models::jobs::{
-        ApplicationDetail, ApplicationRow, ApplicationStatus, ApplicationsOverview,
-        ApplicationsSummary, Correspondence, InterviewView, UpdateSource,
+        ApplicationDetail, ApplicationRow, ApplicationStatus, ApplicationsOverview, CalendarState,
+        Correspondence, InterviewView, TrackingStatus, UpdateSource,
     },
 };
 
-const DAY_MS: i64 = 86_400_000;
-
-/// One overview row (next interview for upcoming ones).
+/// One row of the Applications page: the current state only.
 pub fn row(conn: &Connection, app: ApplicationRecord, now: i64) -> AppResult<ApplicationRow> {
+    let upcoming = app.status == ApplicationStatus::UpcomingInterview;
     let next_interview = repo::interviews_for_application(conn, app.id)?
         .into_iter()
         .filter(|i| {
             i.state == repo::InterviewState::Confirmed && i.end_at.is_some_and(|end| end > now)
         })
-        .min_by_key(|i| i.start_at);
+        .min_by_key(|i| i.start_at)
+        .filter(|_| upcoming);
+    let latest_update = applications::latest_update_text(&app, next_interview.as_ref());
+    let status_label = applications::status_label(&app);
     Ok(ApplicationRow {
         id: app.id,
+        section: app.status.section(),
+        status_label,
+        latest_update,
         company: app.company,
         role: app.role,
         status: app.status,
         last_update_at: app.last_update_at,
-        next_action: app.next_action,
+        next_action: app.next_action.filter(|_| !upcoming),
+        rejection_reason: app.rejection_reason,
         interview_at: next_interview.as_ref().and_then(|i| i.start_at),
-        interview_timezone: next_interview.and_then(|i| i.timezone),
+        interview_timezone: next_interview.as_ref().and_then(|i| i.timezone.clone()),
+        meeting_url: next_interview.as_ref().and_then(|i| i.meeting_url.clone()),
+        calendar_conflict: next_interview
+            .as_ref()
+            .is_some_and(|i| i.calendar_state == CalendarState::Conflict),
+        mail_provider: app.mail_provider.map(|p| p.as_str().to_string()),
     })
 }
 
@@ -56,6 +67,9 @@ pub fn interview_view(i: InterviewRecord) -> InterviewView {
         id: i.id,
         state: i.state.as_str().to_string(),
         interview_type: i.interview_type,
+        time_text: i
+            .start_at
+            .map(|start| applications::interview_time(start, i.timezone.as_deref())),
         start_at: i.start_at,
         end_at: i.end_at,
         timezone: i.timezone,
@@ -70,42 +84,24 @@ pub fn interview_view(i: InterviewRecord) -> InterviewView {
     }
 }
 
-/// Midnight (local time) of the day `now` falls on.
-fn start_of_today(now: i64) -> i64 {
-    jiff::Timestamp::from_millisecond(now)
-        .ok()
-        .and_then(|t| {
-            t.to_zoned(jiff::tz::TimeZone::system())
-                .start_of_day()
-                .ok()
-                .map(|z| z.timestamp().as_millisecond())
-        })
-        .unwrap_or(now - now.rem_euclid(DAY_MS))
-}
-
+/// Every application in its one current section, latest email first.
+/// `tracking` is filled in by the caller (it depends on tasks and
+/// connectors).
 pub fn overview(conn: &Connection, now: i64) -> AppResult<ApplicationsOverview> {
-    let apps = repo::all_applications(conn)?;
-    let total = apps.len() as u32;
-    let mut rows = Vec::with_capacity(apps.len());
-    for app in apps {
+    let mut rows = Vec::new();
+    for app in repo::all_applications(conn)? {
         rows.push(row(conn, app, now)?);
     }
-    let summary = ApplicationsSummary {
-        updates_today: repo::updates_since(conn, start_of_today(now))?,
-        interviews_scheduled: rows.iter().filter(|r| r.interview_at.is_some()).count() as u32,
-        action_required: rows
-            .iter()
-            .filter(|r| r.status == ApplicationStatus::NeedsAction)
-            .count() as u32,
-        offers: rows
-            .iter()
-            .filter(|r| r.status == ApplicationStatus::Offer)
-            .count() as u32,
-        total,
-    };
+    rows.sort_by_key(|r| (std::cmp::Reverse(r.last_update_at), std::cmp::Reverse(r.id)));
     Ok(ApplicationsOverview {
-        summary,
         applications: rows,
+        tracking: TrackingStatus {
+            task_id: None,
+            enabled: false,
+            mail_connected: false,
+            last_run_at: None,
+            next_run_at: None,
+        },
         needs_review: repo::ambiguous_mail(conn, 20)?
             .into_iter()
             .map(correspondence)
@@ -183,7 +179,14 @@ pub fn set_status(
     if status != ApplicationStatus::NeedsAction {
         app.next_action = None;
     }
-    app.last_update_at = app.last_update_at.max(now);
+    // The user's change is the newest state: older mail read later never
+    // overrides it.
+    app.status_at = app.status_at.max(now);
+    app.status_category = None;
+    app.latest_update = note.map(|n| n.chars().take(160).collect());
+    if status != ApplicationStatus::Rejected {
+        app.rejection_reason = None;
+    }
     app.updated_at = now;
     repo::save_application(&tx, &app)?;
     let change = applications::change_text(Some(previous), status, "Status confirmed");
@@ -247,24 +250,12 @@ mod tests {
     use crate::db::Database;
 
     fn seed(c: &Connection) -> AppResult<i64> {
-        repo::insert_application(
-            c,
-            &ApplicationRecord {
-                id: 0,
-                company: "SAP SE".into(),
-                company_key: applications::company_key("SAP SE"),
-                role: Some("AI Engineer".into()),
-                role_key: Some(applications::role_key("AI Engineer")),
-                reference: None,
-                sender_domain: Some("sap.com".into()),
-                status: ApplicationStatus::InProcess,
-                requires_action: false,
-                next_action: None,
-                last_update_at: 10,
-                created_at: 10,
-                updated_at: 10,
-            },
-        )
+        let mut app = ApplicationRecord::new("SAP SE", ApplicationStatus::InProcess, 10);
+        app.company_key = applications::company_key("SAP SE");
+        app.role = Some("AI Engineer".into());
+        app.role_key = Some(applications::role_key("AI Engineer"));
+        app.sender_domain = Some("sap.com".into());
+        repo::insert_application(c, &app)
     }
 
     #[test]
@@ -291,8 +282,13 @@ mod tests {
             assert_eq!(detail.timeline[1].change, "Application changed to Offer");
             assert_eq!(detail.timeline[1].source, UpdateSource::User);
             let overview = overview(c, 40)?;
-            assert_eq!(overview.summary.offers, 1);
-            assert_eq!(overview.summary.total, 1);
+            assert_eq!(overview.applications.len(), 1);
+            let row = &overview.applications[0];
+            assert_eq!(
+                row.section,
+                crate::models::jobs::ApplicationSection::NeedsAction
+            );
+            assert_eq!(row.latest_update, "Call on Monday");
             Ok(())
         })
         .unwrap();

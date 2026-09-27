@@ -3,6 +3,7 @@ import { useCallback, useState } from 'react';
 import { dataOr } from '../../hooks/useAsyncData';
 import { useLinkedRuns } from '../../hooks/useLinkedRuns';
 import { mayListJobs } from '../../lib/analytics';
+import { canRunNow } from '../../lib/taskForm';
 import { analyzeTaskResult, listTaskJobRuns, type LinkedRun } from '../../services/analyticsService';
 import { useTaskExecutions } from '../../hooks/useTasks';
 import {
@@ -66,7 +67,7 @@ export function TaskDetail({ task, catalog, onBack, onEdit }: TaskDetailProps) {
             <button
               type="button"
               className="button button--secondary"
-              disabled={task.running}
+              disabled={!canRunNow(task)}
               onClick={() =>
                 runTaskNow(task.id).catch((e: unknown) => setError(toApiError(e).message))
               }
@@ -85,7 +86,7 @@ export function TaskDetail({ task, catalog, onBack, onEdit }: TaskDetailProps) {
 
         {task.kind.type === 'job_applications' ? (
           <section className="section">
-            <h2 className="section__title">Job Application Mail Monitor</h2>
+            <h2 className="section__title">Job Mail &amp; Interview Sync</h2>
             <p className="prompt-box">
               <span className="prompt-box__meta">
                 {describeTaskKind(task.kind)}

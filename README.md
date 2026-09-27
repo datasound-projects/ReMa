@@ -10,15 +10,17 @@ Rust owns application state, persistence, scheduling, validation, provider confi
 - **Models**: OpenAI, Anthropic, Google Gemini, and any OpenAI-compatible endpoint (Ollama, LM Studio, vLLM, …). Connect OpenAI with your **ChatGPT account** and Anthropic with your **Claude Console account** in the browser, or use API keys. Pick the model in the chat composer.
 - **Scheduled Tasks**: schedule the prompt you are writing, straight from the composer. Supports one-time, daily, every N days, selected weekdays, and intervals of 15 minutes or more. A task can end on a date or after N runs. You can edit, pause, resume, delete or run tasks now, and each task keeps its run history with results.
 - **Settings**: connect providers, choose which models appear in the chat, and set the default model. **Connectors** add Gmail, Google Calendar, Outlook Mail and Outlook Calendar with a sign-in in your browser (see [Connectors](#connectors)).
-- **Applications**: the job applications ReMa tracks from your connected mail (received, in process, action required, interview, rejected, offer), each with a timeline that says where every change came from ("Application changed to Interview · Source: Gmail message · Confidence: 98%"), its interviews and its emails. Confirmed interviews are checked against your calendar and added after you confirm (or automatically, if you choose).
-- **Job Application Mail Monitor**: mail connectors sync in the background while ReMa runs, and a scheduled task type runs the same pipeline on its own schedule and model. Notifications appear in the bell at the top and from the operating system.
-- **Profile**: your career context, in three independent parts. **Documents & Credentials** (the default) keeps your CV files and optional credentials (degrees, certificates, courses, licenses, badges) with an in-app preview. **Custom Profile** is an optional structured form. **Portfolio Studio** builds new CVs from 12 templates and exports them as PDF. Uploading a CV never fills the Custom Profile or opens the builder.
+- **Applications**: every job application ReMa tracks from your job mail, in five sections: Interviews Confirmed, Applications Confirmed, Needs Your Action, Applications In Progress and Rejected. Each row shows the date of the latest email, company, role, status and the latest update, the requested action or the rejection reason. An application also has a timeline that says where every change came from ("Application changed to Interview · Source: Gmail message · Confidence: 98%"), its interviews and its emails (see [Applications](#applications)).
+- **Job Mail & Interview Sync**: a built-in scheduled task, and the only part of ReMa that reads your mail. Once you turn it on, it reads the last N days (30 by default), then only new mail, keeps Applications up to date, and adds confirmed interviews to your calendar when the time is free. Notifications appear in the bell at the top and from the operating system.
+- **Calendar**: the calendar button at the top right shows your connected Google and Outlook calendars inside ReMa, a week at a time, with your interviews marked and their meeting links one click away.
+- **Profile**: your career context, in two parts. **Documents & Credentials** (the default) keeps your CV files and optional credentials (degrees, certificates, courses, licenses, badges) with an in-app preview. **Custom Profile** is an optional structured form for your current goals, preferences and facts. Uploading a CV never fills the Custom Profile.
+- **Portfolio Studio**: its own page below Profile. Builds new CVs from 12 templates and exports them as PDF.
 - **Agents**: reusable instructions for the model (a page directly below Chat). Six built-in agents (Job Search, Job Match Analyst, CV Tailoring, Interview Prep, Application Strategist, Career Research) and your own custom agents.
 - **MCP (Model Context Protocol)**: connect local or remote MCP servers in Settings, turn them on, and pick them per chat. The model can then call their tools; tools that may change something wait for your approval.
 - **Built-in browser**: links in Chat and task results open in a panel next to ReMa. You can collapse, maximize, dock left or right, and resize it. "Open in external browser" is always available.
 - **ReMa Auto Fill**: fills the standard fields of an application form in the built-in browser from your Profile. You review and submit yourself. ReMa never submits.
 - **Chat + menu**: the **+** button in the composer selects agents and MCP servers for the chat (shown as removable chips), independently of the **Profile** switch.
-- **Profile context**: the **Profile** switch in the chat composer (and an option on scheduled prompt tasks) adds your CVs, credentials, Custom Profile and Portfolio Studio CVs to the request. It is off unless you turn it on.
+- **Profile context**: the **Profile** switch in the chat composer (and an option on scheduled prompt tasks) combines your Custom Profile, CVs and credentials into one career context for each message. The Custom Profile wins when it disagrees with a document. It is off unless you turn it on.
 - **Analytics**: a deterministic dashboard over every job search ReMa has run, from Chat or scheduled tasks. It opens from the **Analytics** button in the header as a panel beside the current page. You can filter and rank the jobs, compare their requirements with your Profile (skill gap), see which requirements are common or rare, and research learning resources for the gaps that matter.
 - **Light and dark**: the small sun/moon button at the top-right corner switches between the light and the dark theme. ReMa remembers your choice.
 
@@ -35,7 +37,7 @@ Thin Tauri commands         src-tauri/src/commands
       ↓
 Rust services               src-tauri/src/services   (chat, chat_tools, providers, tasks, scheduler, schedule,
                                                       profile, documents, profile_import, profile_context,
-                                                      portfolio, agents, mcp)
+                                                      portfolio, agents, mcp, mail_monitor, calendar_view)
                             src-tauri/src/mcp        (MCP client on the official Rust SDK: stdio, Streamable HTTP, OAuth)
                             src-tauri/src/jobs       (job-application workflow, run by the scheduler)
                             src-tauri/src/browser    (built-in browser webview, navigation policy, Auto Fill)
@@ -109,7 +111,7 @@ So the Claude Agent SDK and Claude Code subscription sign-in are not used. If An
 
 ## Connectors
 
-Settings → Connectors has four cards: **Gmail** and **Google Calendar** (by Google), **Outlook Mail** and **Outlook Calendar** (by Microsoft). `+` connects, a green check shows a working connector, and a card that needs attention says why (reconnect, missing permission, failed sync) with technical details on request. A card opens its details: account, permissions, last and next sync, **Sync now**, **Reconnect**, **Disconnect** (after confirmation) and background sync.
+Settings → Connectors has four cards: **Gmail** and **Google Calendar** (by Google), **Outlook Mail** and **Outlook Calendar** (by Microsoft). `+` connects, a green check shows a working connector, and a card that needs attention says why (reconnect, missing permission, failed sync) with technical details on request. A card opens its details: account, permissions, last sync, whether Job Mail & Interview Sync is on, **Reconnect** and **Disconnect** (after confirmation). Connecting reads no mail: only [Job Mail & Interview Sync](#job-mail--interview-sync) does.
 
 **Signing in.** ReMa uses OAuth 2.0 for native apps (RFC 8252): authorization code with PKCE (S256), a random `state` checked on return, a one-time loopback redirect (`http://127.0.0.1:<port>` for Google, `http://localhost:<port>` for Microsoft) and your default browser, never an embedded one. ReMa brings its own app registrations (a Google "Desktop app" client and a Microsoft Entra public client, set when ReMa is built; see [docs/connectors/registration.md](docs/connectors/registration.md)); users never create or enter OAuth clients. Installed apps get no incremental authorization, so a Google sign-in asks for the union of the enabled Google connectors, and ReMa checks which permissions were actually granted.
 
@@ -123,26 +125,52 @@ Settings → Connectors has four cards: **Gmail** and **Google Calendar** (by Go
 
 **Tokens.** Access and refresh tokens live only in the OS credential store and in Rust memory: never in SQLite, settings, logs, the interface or a model's context. Access tokens are refreshed silently five minutes before they expire (Microsoft refresh tokens rotate). A revoked or expired grant marks the account "Reconnect needed" and sends one notification; ReMa never opens a sign-in on its own. **Disconnect** stops syncing; the account's last connector also signs out: Google access is revoked at Google, Microsoft tokens are deleted (and the details link to your Microsoft account's app permissions). Your tracked applications and their history are kept.
 
-**Sync.** Gmail: the first sync records the mailbox `historyId` and reads recent job mail with a narrow dated search; later syncs read `users.history.list` changes only; an expired history id leads to a bounded resync. Outlook: Microsoft Graph delta queries on the Inbox with the stored `@odata.deltaLink`; an invalid delta token leads to a bounded resync. At most one sync per connector runs at a time.
+**Sync** (only when Job Mail & Interview Sync runs). Gmail: the first run records the mailbox `historyId` and reads the lookback's job mail with a narrow dated search; later runs read `users.history.list` changes only; an expired history id leads to a bounded resync. Outlook: Microsoft Graph delta queries on the Inbox, bounded by the lookback, with the stored `@odata.deltaLink`; an invalid delta token leads to a bounded resync. A longer lookback reads the added days once (a dated search, a `receivedDateTime` range). At most one sync per connector runs at a time.
 
 **From email to tracker.**
 
 1. A deterministic prefilter scores each new message from its headers: a known application thread, recruiter or company domain, or an applicant-tracking system goes straight on; job words make a candidate; everything else is filtered, never read in full, and only its id, thread, date and sender domain are kept.
 2. Candidates get a headers-only relevance check by your model.
 3. Relevant messages are read in full (text only, truncated) and classified into one of 13 categories with a confidence, as strict JSON validated in Rust. Email text is delimited untrusted data; these requests carry no tools and no web access.
-4. The tracker applies the result with an audit entry. Only the newest email decides the status; confidence below 50% changes nothing and lists the email under "Needs review".
+4. The tracker applies the result with an audit entry, oldest email first across both mailboxes. Only the newest email decides the status; confidence below 50% changes nothing and lists the email under "Needs review" (interview confirmations, reschedules, cancellations, rejections and offers need 80%). The same email in Gmail and Outlook is processed once.
 
-**Interviews and your calendar.** Only confirmed interviews whose date, time and time zone the email itself states become calendar candidates. ReMa checks your calendar for conflicts, including a preparation buffer you choose. By default it asks before adding ("Add to calendar", "Add anyway" after a conflict, "Don't add"); with "Add automatically when confidently confirmed" it adds events for confident confirmations at free times. Every event carries a private `remaInterviewId` property, so an event is never created twice; a reschedule updates the same event (a new time that conflicts is reported, not moved); a cancellation keeps the event, renamed and marked free; events you delete are not recreated.
+**Interviews and your calendar.** Only confirmed interviews (never proposed times) whose date and time the email itself states are added. ReMa first checks every connected calendar, Google and Outlook, for overlapping events. If the time is free, it creates "Interview — Company — Role" with the company, role, time, interview type, interviewers, location and meeting link. If not, it flags the conflict in Applications and sends a notification naming the conflicting events, and creates nothing. Every event carries a private `remaInterviewId` property, so an event is never created twice; a reschedule updates the same event (a new time that conflicts is reported, not moved); a cancellation keeps the event, renamed and marked free; events you delete are not recreated.
 
-**Background.** While ReMa runs, mail connectors with background sync check for new mail at the chosen interval (5 minutes to a day). Two options are off until you turn them on: **Run ReMa in background** (closing the window keeps ReMa in the system tray) and **Start ReMa at login** (starts in the tray). When ReMa is not running, nothing syncs; no system service is installed. A second launch shows the running ReMa.
+**Background.** Mail is read only by Job Mail & Interview Sync, on its schedule, while ReMa runs. Two options are off until you turn them on: **Run ReMa in background** (closing the window keeps ReMa in the system tray, whose menu can also run Job Mail & Interview Sync) and **Start ReMa at login** (starts in the tray). When ReMa is not running, nothing syncs; no system service is installed. A second launch shows the running ReMa.
 
 **In chat.** A question about your mail, calendar or applications gets ReMa's connector tools (`mail_search`, `mail_get_message`, `mail_get_thread`, `calendar_list_events`, `calendar_check_availability`, `calendar_create_event`, `calendar_update_event`, `applications_find_match`, `applications_update_status`, `applications_append_timeline_event`) and no web access in that answer. Mail tools return job-related mail only, marked as untrusted private data. Changes wait for your approval every time, and once an answer has read private data, every MCP tool call needs approval too.
 
 Details, compliance and validation: [docs/connectors/](docs/connectors/implementation.md).
 
+## Applications
+
+One row per application, always in exactly one section:
+
+| Section | What it holds | Last column |
+|---|---|---|
+| Interviews Confirmed | an interview with an agreed date and time | the interview ("Interview confirmed for Sep 29 at 10:00 CEST.") and a meeting link |
+| Applications Confirmed | the employer confirmed the application | "Application received successfully. No action required." |
+| Needs Your Action | a request (proposed interview times, an assessment, documents) or an offer | the requested action, from the email |
+| Applications In Progress | under review, recruiter messages | the latest update, from the email |
+| Rejected | an explicit rejection | the reason the email gives, or "No reason provided." |
+
+Rows are sorted by the latest email; each section collapses and scrolls on its own. History is replayed in order, so an older email read later never moves an application back. An email is matched by thread, job ID, then company and role (the same company with another role, or the same role with another job ID, is another application); a new application after a rejection, or after 180 days of silence, starts a new row; an unclear match changes nothing and is listed for review. Chat's application tools read the same rows. Details: [docs/applications/implementation.md](docs/applications/implementation.md).
+
+## Job Mail & Interview Sync
+
+A built-in scheduled task (Scheduled Tasks → Built-in) and the only thing that reads your mail: connecting Gmail or Outlook reads nothing, and while the task is off (or paused) nothing is read, not even with "Run now". Setting it up needs a connected mailbox and shows the mail sources, **Initial lookback: last [N] days** (default 30), whether to add confirmed interviews to your calendar, optional instructions, the model, and the usual schedule (default every hour).
+
+- The first run reads the last N days; later runs read only new mail.
+- A longer lookback reads the added days once; a shorter one reads nothing old and deletes nothing.
+- Progress (messages, cursor, how far back the mailbox was read) is saved in one transaction, only after a successful run.
+
+## Calendar
+
+The calendar button at the top right opens a week of your connected calendars inside ReMa (previous week, today, next week). Events are read live from Google Calendar and Outlook Calendar and never stored; ReMa's interviews are highlighted with company and role, link to their application and have a **Join** button for the meeting link. An interview that is in no calendar (a conflict, or no calendar connected) is shown with the reason; the same interview in two calendars is listed once. Without a calendar the panel says "No calendar connected. Connect Google Calendar or Outlook Calendar in Settings → Connectors."
+
 ## Profile
 
-The Profile page has three independent parts, chosen with the tabs under its title. The selected part is part of the navigation state: uploading, previewing or re-rendering never switches it.
+The Profile page has two independent parts, chosen with the tabs under its title. The selected part is part of the navigation state: uploading, previewing or re-rendering never switches it.
 
 **Documents & Credentials** (default).
 
@@ -153,7 +181,10 @@ The Profile page has three independent parts, chosen with the tabs under its tit
 
 **Custom Profile** (optional). The structured form: personal details, professional title and summary, experience, education, skills, languages, links and custom fields. Empty fields are fine. **Fill from a CV…** is the only way to copy details from a document: Rust extracts the text, finds email addresses, phone numbers and links deterministically, and the default model structures the rest as JSON, which Rust validates (a name, email, phone or link that does not appear in the document is dropped). A review dialog shows every value; nothing is saved until you choose.
 
-**Portfolio Studio.** CVs built in ReMa, separate from uploaded files (which are never changed).
+## Portfolio Studio
+
+A page of its own, directly below Profile: CVs built in ReMa, separate from uploaded files (which are never changed).
+
 
 - **Templates.** 12 designs in a registry (`src/lib/portfolio/templates.ts`): Minimal, Modern, Executive, Technical, Data / AI, Consulting, Product, Creative, Academic, Compact, Two-column and ATS-friendly. A template is data read by one layout engine (`src/lib/portfolio/layout.ts`), so adding one means adding an entry.
 - **Editor.** Header and sections (summary, experience, projects, education, skills, languages, certifications, links, custom): add, remove, reorder, show or hide, rename. Switch templates, paper size (A4, Letter) and accent color at any time without losing content. Changes save automatically.
@@ -187,15 +218,14 @@ Auto Fill never clicks buttons and never submits a form. Forms inside cross-orig
 
 ## Profile context
 
-The **Profile** switch in the chat composer is the single control for career context. When it is on (it is saved per conversation), or when a scheduled prompt task has **Include my Profile** checked, the context builder (`services/profile_context.rs`) assembles the available sources locally, in this order:
+The **Profile** switch in the chat composer is the single control for career context. When it is on (it is saved per conversation), or when a scheduled prompt task has **Include my Profile** checked, `services/profile_context/` builds one normalized context from the Custom Profile, the primary CV, other CVs and credentials, for every message:
 
-1. the primary CV's extracted text,
-2. the Custom Profile (structured fields),
-3. credentials (type, title, issuer, dates, ID, URL, note),
-4. Portfolio Studio CVs (visible sections only),
-5. other CVs, then the names of other documents.
+1. **Normalize.** CV text is split into sections, entries and facts; Custom Profile fields are mapped to the same fields (identity, summary, target roles, experience, skills, technologies, education, certifications, languages, locations, work and salary preferences, industries, projects, achievements, portfolio information, other context).
+2. **Deduplicate.** The same skill, job, degree or language appears once.
+3. **Precedence.** Custom Profile, then the primary CV, then other CVs, then credentials. For preferences (summary, target roles, locations, work and salary preferences) the highest source wins and the others are left out; everything else is merged. Credentials are objective records: they replace a vaguer CV mention and are added next to a Custom Profile fact, never overwriting it.
+4. **Detail on demand.** A document's own text is added only when the message needs it: the whole CV when you ask to work on it or on a cover letter, otherwise up to three matching passages.
 
-Empty sources are skipped. Each source is wrapped with its type and name, so the model (and ReMa) know where every part came from. Email addresses and phone numbers are removed. The whole context is limited to about 24,000 characters, with per-source limits; when it must be shortened, the primary CV and structured data keep their share and long texts are cut at line boundaries. Extracted text is cached in SQLite when a document is stored, so nothing is re-read or uploaded in the background. Nothing is sent until you send a message, and with the switch off no Profile data is sent.
+Every fact keeps its source, listed with the precedence at the end. Email addresses, phone numbers and personal details are removed; other files and Portfolio Studio CVs are named, never included. The fields are limited to about 14,000 characters. Extracted text is cached in SQLite when a document is stored, so nothing is re-read or uploaded in the background. Nothing is sent until you send a message; an edit to the Profile applies to the next message; with the switch off no Profile data is sent.
 
 ## Agents
 
@@ -360,10 +390,12 @@ Then open **Settings**, connect a provider (or add an OpenAI-compatible endpoint
 rema/
 ├── src/                          # Frontend (React + TypeScript)
 │   ├── app/                      # App root, navigation, sidebar entries
-│   ├── pages/                    # ChatPage, AgentsPage, ScheduledTasksPage, ProfilePage, SettingsPage
+│   ├── pages/                    # ChatPage, AgentsPage, ScheduledTasksPage, ProfilePage, PortfolioStudioPage,
+│   │                             # ApplicationsPage, SettingsPage
 │   ├── assets/brand/             # Master app icon (rema-icon-source.png), in-app icon, logo lockups
 │   ├── components/
-│   │   ├── layout/               # AppShell, Sidebar, PageContainer, ThemeToggle, LaunchIntro
+│   │   ├── layout/               # AppShell, Sidebar, PageContainer, ThemeToggle, LaunchIntro, NotificationBell,
+│   │   │                         # CalendarPanel
 │   │   ├── browser/              # BrowserProvider, BrowserPanel, Auto Fill button and report
 │   │   ├── analytics/            # AnalyticsPanel, scope/filter/ranking editors, Jobs, Skill gap,
 │   │   │                         # Requirements and Learning tabs, charts, Analyze button
@@ -393,10 +425,11 @@ rema/
     ├── ipc_commands.rs           # Command list for the permission manifest (checked by a test)
     ├── commands/                 # Thin Tauri commands
     ├── services/                 # chat, providers, tasks, scheduler, schedule (pure math), system,
-    │                             # profile, documents (storage + text extraction), profile_import, profile_context,
+    │                             # profile, documents (storage + text extraction), profile_import, profile_context/,
     │                             # portfolio, agents, mcp, chat_tools (MCP tools in chat, approvals), websearch,
-    │                             # connector_tools (mail/calendar/tracker tools in chat), mail_monitor (background
-    │                             # sync), applications, notifications, background (tray, start at login)
+    │                             # connector_tools (mail/calendar/tracker tools in chat), mail_monitor (runs Job Mail &
+    │                             # Interview Sync), calendar_view (in-app calendar), applications, notifications,
+    │                             # background (tray, start at login)
     ├── mcp/                      # MCP client: config validation, connections (stdio/HTTP), OAuth
     ├── rema_mcp/                 # ReMa MCP: contracts, source registry, safe fetcher, ATS adapters,
     │                             # job engine, cache, in-process MCP server and host

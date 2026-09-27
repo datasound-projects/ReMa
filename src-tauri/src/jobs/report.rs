@@ -3,7 +3,7 @@
 use rusqlite::Connection;
 
 use crate::{
-    db::jobs::{self as repo, InterviewState},
+    db::jobs as repo,
     error::AppResult,
     models::jobs::{ApplicationRow, ApplicationStatus, JobRunReport},
 };
@@ -13,26 +13,7 @@ pub fn overview(conn: &Connection, window_start: i64, now: i64) -> AppResult<Vec
     let apps = repo::overview_applications(conn, window_start)?;
     let mut rows = Vec::with_capacity(apps.len());
     for app in apps {
-        let next_interview = repo::interviews_for_application(conn, app.id)?
-            .into_iter()
-            .filter(|i| {
-                i.state == InterviewState::Confirmed && i.end_at.is_some_and(|end| end > now)
-            })
-            .min_by_key(|i| i.start_at);
-        let upcoming = app.status == ApplicationStatus::UpcomingInterview;
-        rows.push(ApplicationRow {
-            id: app.id,
-            company: app.company,
-            role: app.role,
-            status: app.status,
-            last_update_at: app.last_update_at,
-            next_action: if upcoming { None } else { app.next_action },
-            interview_at: next_interview
-                .as_ref()
-                .filter(|_| upcoming)
-                .and_then(|i| i.start_at),
-            interview_timezone: next_interview.filter(|_| upcoming).and_then(|i| i.timezone),
-        });
+        rows.push(super::tracker::row(conn, app, now)?);
     }
     Ok(rows)
 }

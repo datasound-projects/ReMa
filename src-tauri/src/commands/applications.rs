@@ -2,10 +2,25 @@ use tauri::State;
 
 use crate::{
     error::AppResult,
-    models::jobs::{ApplicationDetail, ApplicationStatus, ApplicationsOverview, NotificationItem},
-    services::{applications, notifications},
+    models::{
+        calendar::CalendarView,
+        jobs::{ApplicationDetail, ApplicationStatus, ApplicationsOverview, NotificationItem},
+    },
+    services::{applications, calendar_view, notifications},
     state::AppState,
 };
+
+/// The in-app calendar: events of the connected calendars between `start`
+/// and `end` (epoch ms), read live, with ReMa's interviews marked.
+#[tauri::command]
+#[specta::specta]
+pub async fn get_calendar(
+    state: State<'_, AppState>,
+    start: i64,
+    end: i64,
+) -> AppResult<CalendarView> {
+    calendar_view::view(&state, start, end).await
+}
 
 #[tauri::command]
 #[specta::specta]

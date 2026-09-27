@@ -103,6 +103,14 @@ pub trait MailProvider: Send + Sync {
         cursor: Option<&'a str>,
         since: i64,
     ) -> BoxFuture<'a, AppResult<SyncBatch>>;
+    /// Messages received in `[after, before)` (metadata only, oldest
+    /// first): a range before what was read so far, when the lookback
+    /// grows. Gmail narrows it to likely job mail like a first sync.
+    fn list_range<'a>(
+        &'a self,
+        after: i64,
+        before: i64,
+    ) -> BoxFuture<'a, AppResult<Vec<MailMessage>>>;
     /// Matching messages, newest first (metadata only).
     fn search<'a>(
         &'a self,

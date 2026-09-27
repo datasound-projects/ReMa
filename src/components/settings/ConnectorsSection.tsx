@@ -1,19 +1,17 @@
 import { useRef, useState } from 'react';
 
+import { useNavigation } from '../../app/navigation';
 import { useAction } from '../../hooks/useAction';
 import { useScrollIntoFocus } from '../../hooks/useScrollIntoFocus';
 import { dataOr } from '../../hooks/useAsyncData';
 import { useConnectors } from '../../hooks/useConnectors';
+import { useTasks } from '../../hooks/useTasks';
 import { formatDateTime, formatRelative } from '../../lib/format';
 import {
   cancelConnectorSignIn,
   connectConnector,
   disconnectConnector,
   setBackgroundSettings,
-  setConnectorBackgroundSync,
-  setConnectorPreferences,
-  syncConnector,
-  type ConnectorPreferences,
   type ConnectorStatus,
   type ConnectorsOverview,
 } from '../../services/connectorService';
@@ -28,14 +26,11 @@ import { ConnectorLogo } from './ConnectorIcons';
 const MICROSOFT_APPS_URL = 'https://account.microsoft.com/privacy/app-access';
 const GOOGLE_APPS_URL = 'https://myaccount.google.com/connections';
 
-const INTERVALS = [5, 10, 15, 30, 60, 120, 240, 720, 1440];
-const BUFFERS = [0, 10, 15, 30, 45, 60, 90, 120];
-
-function intervalLabel(minutes: number): string {
-  if (minutes < 60) return `Every ${minutes} minutes`;
-  if (minutes === 60) return 'Every hour';
-  if (minutes === 1440) return 'Once a day';
-  return `Every ${minutes / 60} hours`;
+/** Whether "Job Mail & Interview Sync" is set up and turned on. */
+function useMailTracking(): boolean | null {
+  const tasks = useTasks();
+  if (tasks.state.status !== 'success') return null;
+  return tasks.state.data.some((t) => t.builtin === 'job_mail_sync' && t.enabled);
 }
 
 /** Whether a connector counts as added (it may still need attention). */
@@ -75,7 +70,7 @@ export function ConnectorsSection({ focus = false }: { focus?: boolean }) {
               <ConnectorCard key={connector.id} connector={connector} onOpen={() => setOpenId(connector.id)} />
             ))}
           </div>
-          <InterviewPreferences preferences={overview.preferences} />
+          <MailTrackingNote />
           <BackgroundOptions overview={overview} />
           <p className="form__hint connectors__privacy">
             Only job-related email is read in full, and only relevant email reaches your model. Tokens never reach the
@@ -108,7 +103,6 @@ function useConnect(connector: ConnectorStatus) {
 
 function ConnectorCard({ connector: c, onOpen }: { connector: ConnectorStatus; onOpen: () => void }) {
   const connect = useConnect(c);
-  const sync = useAction();
   const [showDetail, setShowDetail] = useState(false);
   const isAdded = added(c);
   const needsReconnect = c.state === 'reauth_required' || c.state === 'permission_missing';
@@ -167,16 +161,8 @@ function ConnectorCard({ connector: c, onOpen }: { connector: ConnectorStatus; o
       );
       break;
     case 'error':
-      status = (
-        <button
-          type="button"
-          className="button button--secondary button--small"
-          disabled={sync.busy}
-          onClick={() => void sync.run(() => syncConnector(c.id))}
-        >
-          Retry
-        </button>
-      );
+      // The last run of a task that used it failed; the next run retries.
+      status = <StatusIndicator tone="error" label="Last sync failed" />;
       break;
     case 'unavailable':
       status = <StatusIndicator tone="idle" label="Unavailable" />;
@@ -233,9 +219,9 @@ function ConnectorCard({ connector: c, onOpen }: { connector: ConnectorStatus; o
           {showDetail && <pre className="connector-card__details">{c.detail}</pre>}
         </>
       )}
-      {(connect.error ?? sync.error) && (
+      {connect.error && (
         <p className="form-error" role="alert">
-          {connect.error ?? sync.error}
+          {connect.error}
         </p>
       )}
     </div>
@@ -344,40 +330,11 @@ function ConnectorDetail({
           </dd>
           <dt>Last sync</dt>
           <dd>{c.lastSyncAt !== null ? formatDateTime(c.lastSyncAt) : 'Not yet'}</dd>
-          {c.backgroundSync !== null && c.nextSyncAt !== null && (
-            <>
-              <dt>Next sync</dt>
-              <dd>{formatDateTime(c.nextSyncAt)} (while ReMa is running)</dd>
-            </>
-          )}
         </dl>
 
-        {c.backgroundSync !== null && (
-          <div className="setting-row setting-row--flush">
-            <div className="setting-row__text">
-              <span className="setting-row__label">Background sync</span>
-              <span className="setting-row__hint">
-                Check for new job email at the interval below while ReMa is running.
-              </span>
-            </div>
-            <Switch
-              checked={c.backgroundSync}
-              disabled={action.busy}
-              aria-label="Background sync"
-              onChange={(on) => void action.run(() => setConnectorBackgroundSync(c.id, on))}
-            />
-          </div>
-        )}
+        {c.kind === 'mail' && <MailTrackingLine />}
 
         <div className="connector-detail__actions">
-          <button
-            type="button"
-            className="button button--secondary button--small"
-            disabled={action.busy || c.state === 'syncing' || c.state === 'connecting'}
-            onClick={() => void action.run(() => syncConnector(c.id))}
-          >
-            {c.state === 'syncing' ? 'Syncing…' : 'Sync now'}
-          </button>
           {c.state === 'connecting' ? (
             <button type="button" className="button button--ghost button--small" onClick={connect.cancel}>
               Cancel sign-in
@@ -452,95 +409,40 @@ function DetailStatus({ connector: c }: { connector: ConnectorStatus }) {
   }
 }
 
-function InterviewPreferences({ preferences }: { preferences: ConnectorPreferences }) {
-  const action = useAction();
-  const save = (patch: Partial<ConnectorPreferences>) =>
-    void action.run(() => setConnectorPreferences({ ...preferences, ...patch }));
+/** Mail is read only by the built-in task, never because it is connected. */
+function MailTrackingNote() {
+  const { navigate } = useNavigation();
+  const tracking = useMailTracking();
   return (
     <div className="panel panel--list connectors__prefs">
       <div className="setting-row">
         <div className="setting-row__text">
-          <span className="setting-row__label" id="interview-mode-label">
-            Confirmed interviews
-          </span>
+          <span className="setting-row__label">Job mail tracking</span>
           <span className="setting-row__hint">
-            ReMa checks your calendar for conflicts first. Nothing is added when a time conflicts or the confirmation is
-            unclear.
+            Connecting a mailbox never starts reading it. ReMa tracks job mail and adds confirmed interviews to your
+            calendar only while the scheduled task Job Mail &amp; Interview Sync is turned on.
           </span>
         </div>
-        <div className="radio-group" role="radiogroup" aria-labelledby="interview-mode-label">
-          <label className="radio">
-            <input
-              type="radio"
-              name="interview-mode"
-              checked={preferences.interviewMode === 'ask'}
-              disabled={action.busy}
-              onChange={() => save({ interviewMode: 'ask' })}
-            />
-            <span>Ask before adding</span>
-          </label>
-          <label className="radio">
-            <input
-              type="radio"
-              name="interview-mode"
-              checked={preferences.interviewMode === 'auto'}
-              disabled={action.busy}
-              onChange={() => save({ interviewMode: 'auto' })}
-            />
-            <span>Add automatically when confidently confirmed</span>
-          </label>
-        </div>
+        <span className="connectors__tracking">
+          {tracking !== null && <StatusIndicator tone={tracking ? 'ready' : 'idle'} label={tracking ? 'On' : 'Off'} />}
+          <button type="button" className="button button--secondary button--small" onClick={() => navigate({ page: 'tasks' })}>
+            Scheduled Tasks
+          </button>
+        </span>
       </div>
-      <div className="setting-row">
-        <div className="setting-row__text">
-          <label className="setting-row__label" htmlFor="sync-interval">
-            Check for new mail
-          </label>
-          <span className="setting-row__hint">For mail connectors with background sync on.</span>
-        </div>
-        <select
-          id="sync-interval"
-          className="input input--auto input--small setting-row__control"
-          value={preferences.syncIntervalMinutes}
-          disabled={action.busy}
-          onChange={(e) => save({ syncIntervalMinutes: Number(e.target.value) })}
-        >
-          {(INTERVALS.includes(preferences.syncIntervalMinutes)
-            ? INTERVALS
-            : [...INTERVALS, preferences.syncIntervalMinutes].sort((a, b) => a - b)
-          ).map((m) => (
-            <option key={m} value={m}>
-              {intervalLabel(m)}
-            </option>
-          ))}
-        </select>
-      </div>
-      <div className="setting-row">
-        <div className="setting-row__text">
-          <label className="setting-row__label" htmlFor="prep-buffer">
-            Preparation buffer
-          </label>
-          <span className="setting-row__hint">Free time required before and after an interview.</span>
-        </div>
-        <select
-          id="prep-buffer"
-          className="input input--auto input--small setting-row__control"
-          value={preferences.prepBufferMinutes}
-          disabled={action.busy}
-          onChange={(e) => save({ prepBufferMinutes: Number(e.target.value) })}
-        >
-          {(BUFFERS.includes(preferences.prepBufferMinutes)
-            ? BUFFERS
-            : [...BUFFERS, preferences.prepBufferMinutes].sort((a, b) => a - b)
-          ).map((m) => (
-            <option key={m} value={m}>
-              {m === 0 ? 'None' : `${m} minutes`}
-            </option>
-          ))}
-        </select>
-      </div>
-      {action.error && <p className="form-error connectors__error">{action.error}</p>}
     </div>
+  );
+}
+
+function MailTrackingLine() {
+  const tracking = useMailTracking();
+  if (tracking === null) return null;
+  return (
+    <p className="form__hint">
+      {tracking
+        ? 'Read by Job Mail & Interview Sync on its schedule (Scheduled Tasks).'
+        : 'Not read automatically: turn on Job Mail & Interview Sync in Scheduled Tasks to track job mail.'}
+    </p>
   );
 }
 
@@ -554,7 +456,7 @@ function BackgroundOptions({ overview }: { overview: ConnectorsOverview }) {
           <span className="setting-row__label">Run ReMa in background</span>
           <span className="setting-row__hint">
             {trayAvailable
-              ? 'Closing the window keeps ReMa in the system tray, so mail keeps syncing. Quit from the tray icon.'
+              ? 'Closing the window keeps ReMa in the system tray, so scheduled tasks keep running. Quit from the tray icon.'
               : 'Not available: this desktop has no system tray.'}
           </span>
         </div>
@@ -569,8 +471,8 @@ function BackgroundOptions({ overview }: { overview: ConnectorsOverview }) {
         <div className="setting-row__text">
           <span className="setting-row__label">Start ReMa at login</span>
           <span className="setting-row__hint">
-            ReMa opens {runInBackground ? 'in the tray' : ''} when you log in. When ReMa is not running, nothing syncs;
-            no background service is installed.
+            ReMa opens {runInBackground ? 'in the tray' : ''} when you log in. When ReMa is not running, no scheduled
+            task runs; no background service is installed.
           </span>
         </div>
         <Switch

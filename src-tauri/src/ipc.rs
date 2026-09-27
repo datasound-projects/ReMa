@@ -64,12 +64,10 @@ pub fn builder() -> Builder<tauri::Wry> {
             commands::connectors::connect_connector,
             commands::connectors::cancel_connector_sign_in,
             commands::connectors::disconnect_connector,
-            commands::connectors::sync_connector,
-            commands::connectors::set_connector_background_sync,
-            commands::connectors::set_connector_preferences,
             commands::connectors::set_background_settings,
             // Applications tracker & notifications
             commands::applications::get_applications,
+            commands::applications::get_calendar,
             commands::applications::get_application,
             commands::applications::set_application_status,
             commands::applications::add_interview_to_calendar,

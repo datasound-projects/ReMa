@@ -253,6 +253,46 @@ impl MailProvider for OutlookMail {
         })
     }
 
+    fn list_range<'a>(
+        &'a self,
+        after: i64,
+        before: i64,
+    ) -> BoxFuture<'a, AppResult<Vec<MailMessage>>> {
+        Box::pin(async move {
+            let mut url = format!(
+                "me/mailFolders/inbox/messages?$select={SELECT}&$orderby=receivedDateTime&$top=50&$filter=receivedDateTime+ge+{}+and+receivedDateTime+lt+{}",
+                iso(after),
+                iso(before)
+            );
+            let mut messages = Vec::new();
+            let mut seen = HashSet::new();
+            for _ in 0..MAX_PAGES {
+                let body = self.api.get(&url, &[]).await?;
+                for item in body
+                    .get("value")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    if item.get("isDraft").and_then(Value::as_bool) == Some(true) {
+                        continue;
+                    }
+                    if let Some(message) = parse_message(item, &self.account_id) {
+                        if seen.insert(message.message_id.clone()) {
+                            messages.push(message);
+                        }
+                    }
+                }
+                match body.get("@odata.nextLink").and_then(Value::as_str) {
+                    Some(next) => url = next.to_string(),
+                    None => break,
+                }
+            }
+            messages.sort_by_key(|m| m.received_at);
+            Ok(messages)
+        })
+    }
+
     fn search<'a>(
         &'a self,
         query: &'a MailQuery,

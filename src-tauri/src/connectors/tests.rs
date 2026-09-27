@@ -320,7 +320,9 @@ async fn gmail_signs_in_with_pkce_through_the_loopback_redirect() {
         "Read job-related emails and track application updates."
     );
     assert!(gmail.permissions.iter().all(|p| p.granted));
-    assert_eq!(gmail.background_sync, Some(true));
+    // Connecting reads no mail: only "Job Mail & Interview Sync" does.
+    assert_eq!(gmail.last_sync_started_at, None);
+    assert!(!state.connectors.is_syncing(ConnectorId::Gmail));
     assert_eq!(
         card(&state, ConnectorId::GoogleCalendar).await.state,
         ConnectorState::Disconnected
@@ -403,8 +405,13 @@ async fn adding_a_second_google_connector_asks_for_the_union_of_scopes() {
         assert!(scope.split(' ').any(|s| s == wanted), "{wanted} in {scope}");
     }
     for id in [ConnectorId::Gmail, ConnectorId::GoogleCalendar] {
-        assert_eq!(card(&state, id).await.state, ConnectorState::Connected);
+        let connector = card(&state, id).await;
+        assert_eq!(connector.state, ConnectorState::Connected);
+        // Connecting (or adding a connector to the account) reads nothing
+        // and claims no sync.
+        assert_eq!(connector.last_sync_at, None, "{id:?}");
     }
+    assert!(providers.requests("/gmail/").is_empty(), "no mail was read");
 }
 
 #[tokio::test]
@@ -739,21 +746,7 @@ async fn disconnecting_revokes_the_grant_once_the_last_connector_is_removed() {
             repo::save_cursor(c, ProviderId::Google, "g-123", "mail:inbox", "42", now)?;
             jobs_repo::insert_application(
                 c,
-                &jobs_repo::ApplicationRecord {
-                    id: 0,
-                    company: "Acme".into(),
-                    company_key: "acme".into(),
-                    role: None,
-                    role_key: None,
-                    reference: None,
-                    sender_domain: None,
-                    status: ApplicationStatus::Confirmed,
-                    requires_action: false,
-                    next_action: None,
-                    last_update_at: now,
-                    created_at: now,
-                    updated_at: now,
-                },
+                &jobs_repo::ApplicationRecord::new("Acme", ApplicationStatus::Confirmed, now),
             )
         })
         .unwrap();
@@ -822,33 +815,7 @@ async fn microsoft_disconnect_deletes_local_tokens() {
     );
 }
 
-// ── Settings and sync slots ─────────────────────────────────────────
-
-#[tokio::test]
-async fn preferences_and_background_sync_are_validated() {
-    let providers = providers().await;
-    let (state, _) = state_for(&providers, apps());
-    let prefs = |minutes, buffer| ConnectorPreferences {
-        interview_mode: crate::models::connectors::InterviewMode::Ask,
-        sync_interval_minutes: minutes,
-        prep_buffer_minutes: buffer,
-    };
-    assert!(set_preferences(&state, prefs(1, 0)).is_err());
-    assert!(set_preferences(&state, prefs(15, 500)).is_err());
-    set_preferences(&state, prefs(30, 15)).unwrap();
-    let saved = overview(&state).await.unwrap().preferences;
-    assert_eq!(
-        (saved.sync_interval_minutes, saved.prep_buffer_minutes),
-        (30, 15)
-    );
-    assert_eq!(
-        saved.interview_mode,
-        crate::models::connectors::InterviewMode::Ask,
-        "ask before adding is the default"
-    );
-    assert!(set_background_sync(&state, ConnectorId::GoogleCalendar, true).is_err());
-    set_background_sync(&state, ConnectorId::Gmail, false).unwrap();
-}
+// ── Sync slots ──────────────────────────────────────────────────────
 
 #[test]
 fn at_most_one_sync_runs_per_connector() {
