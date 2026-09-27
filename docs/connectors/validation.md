@@ -92,10 +92,10 @@ Findings fixed during the run:
 
 ## 3. Not verified here
 
-- Real Google and Microsoft sign-ins, consent screens and API responses (needs the publisher's registrations; see [registration.md](registration.md)).
+- Real Google and Microsoft sign-ins, consent screens and API responses (needs the publisher's registrations; see [registration.md](registration.md)). The release package was run against provider stand-ins at the real host names (§4.2).
 - Google verification and the security assessment (see [compliance.md](compliance.md)).
 - The system tray menu itself (Xvfb has no tray host) and native notifications on macOS and Windows.
-- Release packaging of this change.
+- macOS and Windows packages on clean machines (this container runs Linux; see [../production-plan.md §9](../production-plan.md)).
 
 ## 4. Production desktop connectors (specification B)
 
@@ -198,7 +198,15 @@ previous one (same home, keychain and database):
 | 24 | §58 | Reconnect on Gmail, then on Outlook Mail | One sign-in per provider for all its connectors (Google asked for the union again); every capability checked; new keychain items; the cards keep their real last sync |
 | 25 | §57 | Disconnect Google Calendar, Gmail, Outlook Calendar, Outlook Mail (confirmation each) | Google Calendar first: grant kept (Gmail uses it). Gmail: `POST https://oauth2.googleapis.com/revoke` and the Google item deleted. Microsoft: local items deleted, no request (the dialog says so and points to account.microsoft.com). Applications, the task and its run history stay |
 
-Across all sign-ins (6) and refreshes (10, including refused and failed
-ones), no issued token value appears in the home directory (database and
-WAL, webview storage) or any app log; the Google Desktop client secret is in
-the binary (public configuration) and in no log.
+Row 26 ran on the final package, built from `f3f2c52`:
+
+| # | Spec | Scenario | Result |
+|---|---|---|---|
+| 26 | §74, §77 | New empty profile; then the main profile: Gmail, Google Calendar and Outlook Mail connected, quit, providers unreachable, start, Run now; providers back, Run now | New profile: all four **+**, none "Unavailable", `[connector] config google=ready microsoft=ready`. Unreachable: the run **Failed** — "Network error: Google could not be reached. Check your internet connection and try again." — Gmail and Outlook Mail "Last sync failed: The provider could not be reached. Check your connection; the next run tries again.", Google Calendar not marked synced, both keychain items kept. Back online: the run succeeded ("Synchronized Gmail and Outlook Mail"), all three "Synced just now" |
+
+Across all sign-ins (9) and refreshes (12, including refused and failed
+ones), no issued token value and no client secret appears in either home
+directory (database and WAL, webview storage) or any app log; the Google
+Desktop client secret is only in the binary (public configuration). After
+the run the provider host names were removed from `/etc/hosts`, the
+stand-ins stopped and the package removed.

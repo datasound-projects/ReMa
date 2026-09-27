@@ -171,8 +171,8 @@ configuration, never as a security boundary.
 | B5 | Capability validation after sign-in; scheduled runs need no browser | Verified | tests; packaged rows 2, 4, 6, 7, 14, 23 |
 | B6 | UI states, details, cloud-model disclosure, keychain resilience | Verified | Vitest; packaged rows 5, 8, 12, 20, 23, 25 |
 | B7 | Tests (§70–§71 and the rest) | Verified | 715 Rust (3 ignored), 121 Vitest |
-| B8 | Packaged release build, clean install, E2E with stand-ins | In progress | validation §4.2; final package re-check pending |
-| B9 | Docs, provider checklists (§81–§82), blockers, commit, push, CI | In progress | [connectors/registration.md](connectors/registration.md), §9 |
+| B8 | Packaged release build, clean install, E2E with stand-ins | Verified | [validation §4.2](connectors/validation.md) rows 1–26 (final package built from `f3f2c52`) |
+| B9 | Docs, provider checklists (§81–§82), blockers, commit, push, CI | Done | [connectors/registration.md](connectors/registration.md), [connectors/implementation.md §5](connectors/implementation.md), §9; CI green on every push |
 
 The packaged run found five defects, all fixed with tests that fail without
 the fix ([connectors/implementation.md §5.9](connectors/implementation.md)):
