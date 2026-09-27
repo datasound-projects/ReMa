@@ -209,7 +209,14 @@ export function Pipeline({
 
       {data && data.suppressions.length > 0 && <Suppressions items={data.suppressions} />}
 
-      {focused && <OpportunityDetail opportunity={focused} overview={overview} onClose={() => onFocus(null)} />}
+      {focused && (
+        <OpportunityDetail
+          opportunity={focused}
+          overview={overview}
+          suppressions={data?.suppressions ?? []}
+          onClose={() => onFocus(null)}
+        />
+      )}
       {adding && <NewOpportunityDialog overview={overview} onClose={() => setAdding(false)} onCreated={(id) => onFocus(id)} />}
     </div>
   );

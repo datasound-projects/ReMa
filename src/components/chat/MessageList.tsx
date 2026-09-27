@@ -58,6 +58,11 @@ interface AssistantMessageProps {
   run: LinkedRun | undefined;
 }
 
+/** A Business answer listing client prospects: companies, not job postings. */
+function listsCompanies(message: Message): boolean {
+  return message.activity.some((a) => a.kind === 'retrieval' && a.arguments === 'ReMa Business: clients');
+}
+
 function AssistantMessage({ message, catalog, canRetry, onRetry, run }: AssistantMessageProps) {
   const streaming = message.status === 'streaming';
   return (
@@ -89,7 +94,7 @@ function AssistantMessage({ message, catalog, canRetry, onRetry, run }: Assistan
             </IconButton>
           )}
           {message.status === 'stopped' && <span className="message__note">Stopped</span>}
-          {message.status === 'complete' && (run || mayListJobs(message.content)) && (
+          {message.status === 'complete' && !listsCompanies(message) && (run || mayListJobs(message.content)) && (
             <AnalyzeButton run={run} analyze={() => analyzeAnswer(message.id)} />
           )}
           {message.model && (

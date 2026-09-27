@@ -30,6 +30,12 @@ use crate::{
     time::now_ms,
 };
 
+/// The contact id of a buyer role (no named person) at one company:
+/// suppressing it must not reach the same role at other companies.
+pub fn role_contact_id(company_key: &str, role: &str) -> String {
+    format!("role:{company_key}:{}", role.trim().to_lowercase())
+}
+
 fn get(state: &AppState, id: &str) -> AppResult<Opportunity> {
     state
         .db
@@ -78,7 +84,7 @@ pub fn save_prospect(
         .map(|c| ContactRef {
             id: match &c.name {
                 Some(name) => resolve::person_id(name, Some(&prospect.company_name)),
-                None => format!("role:{}", c.role.to_lowercase()),
+                None => role_contact_id(&prospect.company_key, &c.role),
             },
             name: c.name.clone(),
             title: c.title.clone(),
@@ -610,7 +616,11 @@ pub fn suppress_contact(
         .iter()
         .find(|c| c.id == contact_id)
         .ok_or_else(|| AppError::not_found("That contact is not on this opportunity."))?;
-    let label = contact.name.clone().unwrap_or_else(|| contact.role.clone());
+    let who = contact.name.clone().unwrap_or_else(|| contact.role.clone());
+    let label = match &opportunity.company_name {
+        Some(company) => format!("{who} at {company}"),
+        None => who,
+    };
     state
         .db
         .call(|c| store::suppress(c, "person", contact_id, &label, reason, now_ms()).map(|_| ()))?;
@@ -665,7 +675,7 @@ pub fn delete_contact(
                 "DELETE FROM business_drafts WHERE opportunity_id = ?1 AND recipient LIKE ?2",
                 rusqlite::params![id, format!("%{name}%")],
             )?;
-            redacted = store::redact_text(&tx, &name)?;
+            redacted = store::redact_text(&tx, &name, now)?;
         }
         store::record_redaction(
             &tx,

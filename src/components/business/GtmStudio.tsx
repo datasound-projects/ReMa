@@ -25,10 +25,11 @@ import {
 } from '../../services/businessService';
 import { PlusIcon, SparkleIcon, TrashIcon } from '../icons';
 import { EmptyState } from '../ui/EmptyState';
-import { Links, RunProgress, SourceNotes } from './common';
+import { FitCell, Links, RunProgress, SourceNotes } from './common';
 import { DraftCard, NewDraftForm } from './Drafts';
 import { Experiments } from './Experiments';
-import { fitLabel, SEGMENT_STATUS_LABELS } from './labels';
+import { reveal } from './helpers';
+import { SEGMENT_STATUS_LABELS } from './labels';
 
 type Step = 'segments' | 'alternatives' | 'channels' | 'accounts' | 'drafts' | 'experiments';
 
@@ -137,6 +138,8 @@ export function GtmStudio({
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const plan = plans.find((p) => p.id === selectedId) ?? plans[0] ?? null;
   const [creating, setCreating] = useState(false);
+  // Outside the editor, which is remounted when the plan changes on disk.
+  const [step, setStep] = useState<Step>('segments');
 
   if (!offer || offer.currentVersion === null || offer.archived) {
     return (
@@ -171,7 +174,7 @@ export function GtmStudio({
           </label>
         )}
         <span className="biz-search__spacer" />
-        {!creating && (
+        {!creating && plans.length > 0 && (
           <button type="button" className="button button--secondary button--small" onClick={() => setCreating(true)}>
             <PlusIcon className="button__icon" />
             New plan
@@ -192,6 +195,8 @@ export function GtmStudio({
         <PlanEditor
           key={`${plan.id}:${plan.revision}`}
           plan={plan}
+          step={step}
+          onStep={setStep}
           overview={overview}
           onOpenOpportunity={onOpenOpportunity}
           onDeleted={() => setSelectedId(null)}
@@ -260,16 +265,19 @@ function NewPlan({ offer, onCreated, onCancel }: { offer: Offer; onCreated: (pla
 
 function PlanEditor({
   plan,
+  step,
+  onStep: setStep,
   overview,
   onOpenOpportunity,
   onDeleted,
 }: {
   plan: GtmPlan;
+  step: Step;
+  onStep: (step: Step) => void;
   overview: BusinessOverview;
   onOpenOpportunity: (id: string) => void;
   onDeleted: () => void;
 }) {
-  const [step, setStep] = useState<Step>('segments');
   const [name, setName] = useState(plan.name);
   const [geography, setGeography] = useState(plan.geography);
   const [content, setContent] = useState<PlanContent>(plan.content);
@@ -344,7 +352,7 @@ function PlanEditor({
         </div>
       </div>
       {confirmDelete && (
-        <div className="notice notice--danger biz-confirm" role="alertdialog" aria-label="Delete plan">
+        <div ref={reveal} className="notice notice--danger biz-confirm" role="alertdialog" aria-label="Delete plan">
           <span>Delete this plan with its experiments? Saved opportunities and drafts stay.</span>
           <button
             type="button"
@@ -774,14 +782,12 @@ function AccountsStep({ plan, dirty, onOpenOpportunity }: { plan: GtmPlan; dirty
           <table className="data-table biz-table">
             <thead>
               <tr>
-                <th scope="col">Company</th>
+                <th scope="col">Company / link</th>
                 <th scope="col">Why it fits</th>
                 <th scope="col">Buyer role / contact</th>
-                <th scope="col">Link</th>
                 <th scope="col">Observed trigger</th>
-                <th scope="col">Suggested angle</th>
+                <th scope="col">Suggested angle / validation question</th>
                 <th scope="col">Fit / evidence</th>
-                <th scope="col">Validation question</th>
                 <th scope="col">Pipeline</th>
               </tr>
             </thead>
@@ -793,19 +799,25 @@ function AccountsStep({ plan, dirty, onOpenOpportunity }: { plan: GtmPlan; dirty
                     <td className="biz-table__name">
                       {a.companyName}
                       {a.suppressed && <span className="badge badge--danger">Do not contact</span>}
+                      {a.link && (
+                        <span className="biz-person__title">
+                          <Links links={[{ label: a.contact ? 'Profile' : 'Contact page', url: a.link }]} />
+                        </span>
+                      )}
                     </td>
                     <td className="biz-table__why">{a.why}</td>
                     <td>
                       {a.contact ?? a.buyerRole}
                       {a.contact && <span className="biz-muted biz-person__title">{a.buyerRole}</span>}
                     </td>
-                    <td>{a.link ? <Links links={[{ label: 'Open', url: a.link }]} /> : <span className="biz-muted">—</span>}</td>
-                    <td className="biz-table__why">{a.trigger ?? <span className="biz-muted">None found</span>}</td>
-                    <td className="biz-table__why">{a.angle}</td>
-                    <td className="biz-table__fit">
-                      {fitLabel(a.fit, a.coverage ?? 0, a.fit !== null)}
+                    <td className="biz-table__signal">{a.trigger ?? <span className="biz-muted">None found</span>}</td>
+                    <td className="biz-table__why">
+                      {a.angle}
+                      <span className="biz-muted biz-person__title">Ask: {a.question}</span>
                     </td>
-                    <td className="biz-table__why">{a.question}</td>
+                    <td className="biz-table__fit">
+                      <FitCell score={a.fit} coverage={a.coverage} shown={a.fit !== null} />
+                    </td>
                     <td>
                       {opportunityId ? (
                         <button type="button" className="link-button" onClick={() => onOpenOpportunity(opportunityId)}>

@@ -799,6 +799,89 @@ async fn do_not_contact_blocks_drafts_and_survives_rediscovery() {
 }
 
 #[tokio::test]
+async fn a_suppressed_buyer_role_stays_with_its_company() {
+    let site = sources().await;
+    let state = state_for(&site);
+    let offer = reviewed(&state, offer_content(), "offer");
+    let query = "Find Austrian manufacturing companies for my Support Workspace";
+    let first = clients(&state, &offer, query).await;
+    let save = |name: &str| {
+        let key = first
+            .confirmed
+            .iter()
+            .find(|p| p.company_name == name)
+            .unwrap()
+            .company_key
+            .clone();
+        pipeline::save_prospect(&state, &first.run_id, &key, None)
+            .unwrap()
+            .0
+    };
+    let huber = save("Maschinenbau Huber");
+    let stahl = save("Stahl Nord AG");
+    let role = huber.contacts.first().expect("a buyer role").clone();
+    assert!(role.name.is_none());
+    let same_role = stahl
+        .contacts
+        .iter()
+        .find(|c| c.role == role.role)
+        .expect("the same buyer role at another company")
+        .clone();
+    assert_ne!(role.id, same_role.id);
+    let marked = pipeline::suppress_contact(&state, &huber.id, &role.id, None).unwrap();
+    let suppressions = pipeline::pipeline(&state).unwrap().suppressions;
+    assert_eq!(suppressions.len(), 1);
+    assert_eq!(
+        suppressions[0].label,
+        format!("{} at Maschinenbau Huber", role.role)
+    );
+    let request = |opportunity: &str, contact: &str, key: &str| gtm::DraftRequest {
+        opportunity_id: Some(opportunity.into()),
+        plan_id: None,
+        experiment_id: None,
+        variant: None,
+        contact_id: Some(contact.into()),
+        role: None,
+        channel: "email".into(),
+        idempotency_key: key.into(),
+    };
+    let refused = gtm::draft(
+        &state,
+        request(&marked.id, &role.id, "d1"),
+        None,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+    assert!(refused.to_string().contains("Do not contact"), "{refused}");
+    // The same role at another company is untouched.
+    gtm::draft(
+        &state,
+        request(&stahl.id, &same_role.id, "d2"),
+        None,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    // Research shows the suppressed role as such, and only at Huber.
+    let again = clients(&state, &offer, query).await;
+    let role_of = |name: &str| {
+        again
+            .confirmed
+            .iter()
+            .find(|p| p.company_name == name)
+            .unwrap()
+            .contacts
+            .iter()
+            .find(|c| c.role == role.role)
+            .unwrap()
+            .suppressed
+    };
+    assert!(role_of("Maschinenbau Huber"));
+    assert!(!role_of("Stahl Nord AG"));
+}
+
+#[tokio::test]
 async fn deleting_a_contact_removes_what_depends_on_it() {
     let (state, _) = testing::state(Arc::new(FakeLanguageModel::replying(&[])));
     let offer = reviewed(&state, offer_content(), "offer");
@@ -883,6 +966,39 @@ async fn deleting_a_contact_removes_what_depends_on_it() {
     )
     .await
     .unwrap();
+    // History and notes that name them.
+    pipeline::record_activity(
+        &state,
+        &id,
+        pipeline::NewActivity {
+            kind: ActivityType::Contact,
+            person: Some("Anna Beispiel".into()),
+            occurred_at: now_ms() - 60_000,
+            detail: Some("Emailed Anna Beispiel about a pilot".into()),
+            experiment_id: None,
+            idempotency_key: "a1".into(),
+        },
+    )
+    .unwrap();
+    let o = state
+        .db
+        .call(|c| store::opportunity(c, &id))
+        .unwrap()
+        .unwrap();
+    pipeline::edit(
+        &state,
+        &id,
+        store::OpportunityEdit {
+            name: o.name.clone(),
+            use_case: o.use_case.clone(),
+            next_step: "Follow up with Anna Beispiel".into(),
+            notes: "Anna Beispiel prefers email.".into(),
+            amount: None,
+            archived: false,
+        },
+        o.revision,
+    )
+    .unwrap();
     let o = state
         .db
         .call(|c| store::opportunity(c, &id))
@@ -893,6 +1009,18 @@ async fn deleting_a_contact_removes_what_depends_on_it() {
     assert!(state.db.call(|c| store::drafts(c)).unwrap().is_empty());
     let run = state.db.call(|c| store::run(c, "run-1")).unwrap().unwrap();
     assert!(!run.result.unwrap().contains("Anna Beispiel"));
+    assert!(!after.notes.contains("Anna Beispiel"), "{}", after.notes);
+    assert!(
+        !after.next_step.contains("Anna Beispiel"),
+        "{}",
+        after.next_step
+    );
+    let history = serde_json::to_string(&after.activities).unwrap();
+    assert!(!history.contains("Anna Beispiel"), "{history}");
+    assert!(after
+        .activities
+        .iter()
+        .any(|a| a.kind == ActivityType::Contact && a.person.as_deref() == Some("[removed]")));
     let redactions = state.db.call(|c| store::redactions(c)).unwrap();
     assert!(redactions
         .iter()

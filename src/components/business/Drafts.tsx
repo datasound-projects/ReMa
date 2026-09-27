@@ -14,7 +14,7 @@ import {
 } from '../../services/businessService';
 import { CopyIcon, TrashIcon } from '../icons';
 import { RunProgress, SourceNotes } from './common';
-import { CHANNELS, copyText } from './helpers';
+import { CHANNELS, copyText, reveal } from './helpers';
 
 /**
  * A local draft (B21): previewable, editable and copyable. ReMa has no
@@ -109,7 +109,7 @@ export function DraftCard({ draft }: { draft: Draft }) {
         )}
       </div>
       {confirmDelete && (
-        <div className="notice notice--danger biz-confirm" role="alertdialog" aria-label="Delete draft">
+        <div ref={reveal} className="notice notice--danger biz-confirm" role="alertdialog" aria-label="Delete draft">
           <span>Delete this draft?</span>
           <button
             type="button"

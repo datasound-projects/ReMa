@@ -20,7 +20,7 @@ import { ArrowLeftIcon, FileIcon, GlobeIcon, PencilIcon, PlusIcon, TrashIcon } f
 import { ChipInput } from '../profile/EntryList';
 import { RunProgress } from './common';
 import { MATURITY_LABELS, OFFER_KIND_LABELS } from './labels';
-import { emptyOfferContent } from './helpers';
+import { emptyOfferContent, hasUnreviewedChanges, reveal } from './helpers';
 import { OfferEditor } from './OfferEditor';
 
 type Source = 'url' | 'text' | 'document' | 'manual';
@@ -163,7 +163,9 @@ function ProfileForm({ profile }: { profile: BusinessProfile }) {
 function offerState(o: Offer): { label: string; className: string } {
   if (o.archived) return { label: 'Archived', className: 'badge' };
   if (o.currentVersion === null) return { label: 'Not reviewed', className: 'badge badge--warning' };
-  if (o.draft) return { label: `Reviewed v${o.currentVersion} · unreviewed changes`, className: 'badge badge--brand' };
+  if (hasUnreviewedChanges(o)) {
+    return { label: `Reviewed v${o.currentVersion} · unreviewed changes`, className: 'badge badge--brand' };
+  }
   return { label: `Reviewed v${o.currentVersion}`, className: 'badge badge--success' };
 }
 
@@ -227,7 +229,7 @@ function OfferList({
                   </button>
                 </div>
                 {confirmDelete === o.id && (
-                  <div className="notice notice--danger biz-confirm" role="alertdialog" aria-label={`Delete ${o.name}`}>
+                  <div ref={reveal} className="notice notice--danger biz-confirm" role="alertdialog" aria-label={`Delete ${o.name}`}>
                     <span>
                       Delete “{o.name}” and its versions? Earlier research keeps its record as “Deleted offer”; saved
                       opportunities stay in the Pipeline.

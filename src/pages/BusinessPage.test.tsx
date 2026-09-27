@@ -486,8 +486,12 @@ describe('BusinessPage', () => {
     expect(input?.runId).toMatch(/^run-/);
 
     // Fit is an evidence measure with its coverage, never a chance of buying.
-    expect(screen.getByText('72 (evidence coverage 80%)')).toBeTruthy();
-    expect(screen.getByText('Insufficient evidence (coverage 40%)')).toBeTruthy();
+    const huberRow = screen.getByRole('button', { name: 'Huber Maschinenbau' }).closest('tr') as HTMLElement;
+    expect(within(huberRow).getByText('72')).toBeTruthy();
+    expect(within(huberRow).getByText('evidence coverage 80%')).toBeTruthy();
+    const stahlRow = screen.getByRole('button', { name: 'Stahl Werke' }).closest('tr') as HTMLElement;
+    expect(within(stahlRow).getByText('Insufficient evidence')).toBeTruthy();
+    expect(within(stahlRow).getByText('coverage 40%')).toBeTruthy();
     expect(screen.queryByText(/likely to buy/i)).toBeNull();
     expect(screen.getByText('Confirmed matches')).toBeTruthy();
     expect(screen.getByText('Needs verification')).toBeTruthy();
@@ -497,7 +501,8 @@ describe('BusinessPage', () => {
     expect(await screen.findByText(/Not established: no source shows an active purchase/)).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Save to Pipeline' }));
     await screen.findByText('Saved as a New Lead.');
-    expect(mocks.saveProspect).toHaveBeenCalledWith('run-clients', 'huber', 'Internal knowledge search for service teams');
+    // The default use case is the offer's own, not a generated sentence.
+    expect(mocks.saveProspect).toHaveBeenCalledWith('run-clients', 'huber', 'Internal knowledge search');
   });
 
   it('shows contract terms as stated and keeps the agency apart from the client', async () => {

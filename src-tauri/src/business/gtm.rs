@@ -798,10 +798,15 @@ pub fn template(
             .trim_start_matches(&offer.name)
             .trim()
     ));
+    // Asked, never asserted; quoted, so any phrasing of the problem reads.
     if content.problem.is_known() {
         body.push_str(&format!(
-            " Is {} something your team is working on?",
-            content.problem.text.trim_end_matches('.').to_lowercase()
+            " Is this something your team is working on: \"{}\"?",
+            content
+                .problem
+                .text
+                .trim()
+                .trim_end_matches(['.', '!', '?'])
         ));
     }
     body.push_str("\n\nIf it is relevant, I would be glad to share a short example. If not, no problem at all.\n\nBest regards");

@@ -90,7 +90,7 @@ export function BusinessPage({ tab, opportunityId }: { tab: BusinessTab; opportu
         <BusinessProfileView overview={data} initialOfferId={profile.offerId} onBack={() => setProfile(null)} />
       )}
       {data && !profile && (
-        <>
+        <div className="biz-body">
           <div className="profile-tabs biz-tabs" role="tablist" aria-label="Business">
             {TABS.map((t) => (
               <button
@@ -148,7 +148,7 @@ export function BusinessPage({ tab, opportunityId }: { tab: BusinessTab; opportu
             )}
             {tab === 'pipeline' && <Pipeline overview={data} focusId={opportunityId} onFocus={openOpportunity} />}
           </div>
-        </>
+        </div>
       )}
     </PageContainer>
   );

@@ -187,3 +187,19 @@ export function LocationsField({ value, onChange }: { value: Locations; onChange
     </div>
   );
 }
+
+/** "72" over "evidence coverage 80%", or "Insufficient evidence" over its coverage. */
+export function FitCell({ score, coverage, shown }: { score: number | null; coverage: number | null; shown: boolean }) {
+  const pct = `${Math.round((coverage ?? 0) * 100)}%`;
+  return shown && score !== null ? (
+    <>
+      <strong className="biz-fit">{Math.round(score)}</strong>
+      <span className="biz-muted biz-person__title">evidence coverage {pct}</span>
+    </>
+  ) : (
+    <>
+      <span>Insufficient evidence</span>
+      <span className="biz-muted biz-person__title">coverage {pct}</span>
+    </>
+  );
+}

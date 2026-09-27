@@ -15,7 +15,7 @@ import {
 import { ChevronDownIcon, ChevronRightIcon, SearchIcon } from '../icons';
 import { ChipInput } from '../profile/EntryList';
 import { Switch } from '../ui/Switch';
-import { Chips, Links, LocationsField, RunProgress, SearchedDetails, SourceNotes, StatusBadge } from './common';
+import { Chips, FitCell, Links, LocationsField, RunProgress, SearchedDetails, SourceNotes, StatusBadge } from './common';
 import { EMPTY_LOCATIONS, isEmptyLocations } from './helpers';
 import { AUTHORITY_LABELS, fitLabel } from './labels';
 
@@ -269,17 +269,26 @@ export function FindClients({
           {run.error}
         </p>
       )}
-      {results && <ClientResultsView results={results} onSaved={markSaved} onOpenOpportunity={onOpenOpportunity} />}
+      {results && (
+        <ClientResultsView
+          results={results}
+          useCases={(offer?.reviewed?.useCases ?? []).map((c) => c.text).filter(Boolean)}
+          onSaved={markSaved}
+          onOpenOpportunity={onOpenOpportunity}
+        />
+      )}
     </div>
   );
 }
 
 function ClientResultsView({
   results,
+  useCases,
   onSaved,
   onOpenOpportunity,
 }: {
   results: ClientResults;
+  useCases: string[];
   onSaved: (companyKey: string, opportunityId: string) => void;
   onOpenOpportunity: (id: string) => void;
 }) {
@@ -311,6 +320,7 @@ function ClientResultsView({
         hint="Every hard requirement passed."
         prospects={results.confirmed}
         runId={results.runId}
+        useCases={useCases}
         onSaved={onSaved}
         onOpenOpportunity={onOpenOpportunity}
         offerLabel={`${results.offer.name} v${results.offer.version}`}
@@ -321,6 +331,7 @@ function ClientResultsView({
         hint="A required fact is unknown; nothing was assumed."
         prospects={results.needsVerification}
         runId={results.runId}
+        useCases={useCases}
         onSaved={onSaved}
         onOpenOpportunity={onOpenOpportunity}
         offerLabel={`${results.offer.name} v${results.offer.version}`}
@@ -331,6 +342,7 @@ function ClientResultsView({
         hint="A hard requirement failed; kept separately rather than hidden."
         prospects={results.excluded}
         runId={results.runId}
+        useCases={useCases}
         onSaved={onSaved}
         onOpenOpportunity={onOpenOpportunity}
         offerLabel={`${results.offer.name} v${results.offer.version}`}
@@ -348,6 +360,7 @@ function ProspectGroup({
   hint,
   prospects,
   runId,
+  useCases,
   offerLabel,
   onSaved,
   onOpenOpportunity,
@@ -357,6 +370,7 @@ function ProspectGroup({
   hint: string;
   prospects: ClientProspect[];
   runId: string;
+  useCases: string[];
   offerLabel: string;
   onSaved: (companyKey: string, opportunityId: string) => void;
   onOpenOpportunity: (id: string) => void;
@@ -410,8 +424,19 @@ function ProspectGroup({
                         {p.opportunityId && <span className="badge badge--brand">In Pipeline</span>}
                       </td>
                       <td>{p.locations.join(' / ') || <span className="biz-muted">Unknown</span>}</td>
-                      <td className="biz-table__why">{p.whyItFits.join('; ') || <span className="biz-muted">—</span>}</td>
                       <td className="biz-table__why">
+                        {p.whyItFits.length === 0 ? (
+                          <span className="biz-muted">—</span>
+                        ) : (
+                          <>
+                            {p.whyItFits.slice(0, 2).join('; ')}
+                            {p.whyItFits.length > 2 && (
+                              <span className="biz-muted biz-person__title">+{p.whyItFits.length - 2} more in details</span>
+                            )}
+                          </>
+                        )}
+                      </td>
+                      <td className="biz-table__signal">
                         {p.observedSignals[0] ?? <span className="biz-muted">None found</span>}
                       </td>
                       <td>
@@ -426,7 +451,7 @@ function ProspectGroup({
                         )}
                       </td>
                       <td className="biz-table__fit">
-                        {fitLabel(p.assessment.score, p.assessment.coverage ?? 0, p.assessment.scoreShown)}
+                        <FitCell score={p.assessment.score} coverage={p.assessment.coverage} shown={p.assessment.scoreShown} />
                       </td>
                       <td>
                         <Links links={prospectLinks(p)} />
@@ -438,6 +463,7 @@ function ProspectGroup({
                           <ProspectDetail
                             prospect={p}
                             runId={runId}
+                            useCases={useCases}
                             offerLabel={offerLabel}
                             onSaved={onSaved}
                             onOpenOpportunity={onOpenOpportunity}
@@ -471,17 +497,22 @@ function prospectLinks(p: ClientProspect) {
 function ProspectDetail({
   prospect: p,
   runId,
+  useCases,
   offerLabel,
   onSaved,
   onOpenOpportunity,
 }: {
   prospect: ClientProspect;
   runId: string;
+  useCases: string[];
   offerLabel: string;
   onSaved: (companyKey: string, opportunityId: string) => void;
   onOpenOpportunity: (id: string) => void;
 }) {
-  const [useCase, setUseCase] = useState(p.whyItFits[0] ?? '');
+  // The offer's own use case the evidence mentions, else its first one.
+  const mentioned = useCases.find((u) => p.whyItFits.some((w) => w.toLowerCase().includes(u.toLowerCase())));
+  const [useCase, setUseCase] = useState(mentioned ?? useCases[0] ?? '');
+  const listId = `biz-usecases-${p.companyKey}`;
   const [saved, setSaved] = useState<string | null>(null);
   const action = useAction();
   const a = p.assessment;
@@ -591,8 +622,8 @@ function ProspectDetail({
         </>
       )}
       <p className="biz-approach">
-        <strong>Suggested approach:</strong> ask {p.contacts[0]?.role ?? 'the relevant team'} a question about{' '}
-        {p.whyItFits[0]?.toLowerCase() ?? 'the use case'} — the need is a hypothesis until they confirm it.
+        <strong>Suggested approach:</strong> ask {p.contacts[0]?.role ?? 'the relevant team'} how they handle{' '}
+        {(useCase || 'this use case').toLowerCase()} today — the need is a hypothesis until they confirm it.
       </p>
       <div className="biz-save">
         {p.opportunityId ? (
@@ -603,7 +634,12 @@ function ProspectDetail({
           <>
             <label className="field biz-save__field">
               <span className="field__label">Use case for this opportunity</span>
-              <input className="input" value={useCase} onChange={(e) => setUseCase(e.target.value)} />
+              <input className="input" list={listId} value={useCase} onChange={(e) => setUseCase(e.target.value)} />
+              <datalist id={listId}>
+                {useCases.map((u) => (
+                  <option key={u} value={u} />
+                ))}
+              </datalist>
             </label>
             <button
               type="button"

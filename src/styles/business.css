@@ -1,8 +1,14 @@
 /* ── Business ──────────────────────────────────────────── */
 
+.biz-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
 .biz-tabs {
   flex-wrap: wrap;
-  margin-bottom: var(--space-4);
 }
 
 .biz-panel,
@@ -86,7 +92,6 @@
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-3);
-  margin-bottom: var(--space-4);
   padding: var(--space-2) var(--space-3);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
@@ -412,12 +417,23 @@
 }
 
 .biz-table__why {
-  min-width: 200px;
-  max-width: 360px;
+  min-width: 170px;
+  max-width: 280px;
+}
+
+.biz-table__signal {
+  min-width: 120px;
+  max-width: 220px;
 }
 
 .biz-table__fit {
-  min-width: 140px;
+  min-width: 120px;
+}
+
+.biz-fit {
+  font-size: var(--text-md);
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text);
 }
 
 .biz-table__detail td {
@@ -555,7 +571,7 @@
 }
 
 .biz-criteria-table th {
-  padding: 4px 0;
+  padding: 4px var(--space-2) 4px 0;
   font-size: var(--text-xs);
   font-weight: var(--weight-semibold);
   color: var(--color-text-tertiary);

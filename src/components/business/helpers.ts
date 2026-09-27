@@ -1,5 +1,6 @@
 import type {
   Claim,
+  Offer,
   ContractCriteria,
   ContractTerms,
   Locations,
@@ -12,6 +13,14 @@ import { openExternalUrl } from '../../services/systemService';
 /** External links open in the system browser, only when clicked (B27). */
 export function openLink(url: string | null | undefined) {
   if (url) void openExternalUrl(url).catch(() => {});
+}
+
+/**
+ * A callback ref that brings a confirmation into view when it opens (a
+ * module-level function, so React calls it on mount only, not per render).
+ */
+export function reveal(el: HTMLElement | null) {
+  el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 }
 
 /** Copies text only: never a contact, a stage change or a count (B21). */
@@ -104,7 +113,7 @@ export function durationSummary(t: ContractTerms): string {
     );
   } else parts.push('Duration not stated');
   if (t.extensionPossible) parts.push('extension possible');
-  if (t.start) parts.push(`start ${t.start}`);
+  if (t.start) parts.push(`Start: ${t.start}`);
   return parts.join(' · ');
 }
 
@@ -175,4 +184,14 @@ export function emptyOfferContent(name: string, kind: OfferKind): OfferContent {
     limitations: [],
     websiteUrls: [],
   };
+}
+
+/**
+ * Whether the working copy differs from the reviewed version (after a
+ * review the working copy equals it; research never uses an unreviewed one).
+ */
+export function hasUnreviewedChanges(offer: Offer): boolean {
+  if (offer.draft === null) return false;
+  if (offer.reviewed === null) return true;
+  return JSON.stringify(offer.draft) !== JSON.stringify(offer.reviewed);
 }

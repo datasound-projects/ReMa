@@ -478,6 +478,13 @@ function ContractDetail({
             {c.reasons.map((r) => (
               <li key={r}>{r}</li>
             ))}
+            {c.reasons.length === 0 && (
+              <li>
+                {c.status === 'confirmed'
+                  ? 'The listing’s own terms meet every hard criterion.'
+                  : 'The listing does not state enough to decide.'}
+              </li>
+            )}
           </ul>
           {c.scope && (
             <>

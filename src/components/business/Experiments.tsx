@@ -24,7 +24,7 @@ import {
 } from '../../services/businessService';
 import { backendEvents } from '../../services/events';
 import { PlusIcon, TrashIcon } from '../icons';
-import { fromDateInput, rateText, toDateInput } from './helpers';
+import { fromDateInput, rateText, reveal, toDateInput } from './helpers';
 import { ASSIGNMENT_LABELS, EXPERIMENT_STATUS_LABELS } from './labels';
 
 const METRICS: Record<string, string> = {
@@ -34,6 +34,8 @@ const METRICS: Record<string, string> = {
   proposal_rate: 'Proposal rate',
   win_rate: 'Win rate',
 };
+
+const accounts = (n: number) => `${n} ${n === 1 ? 'account' : 'accounts'}`;
 
 function newContent(): ExperimentContent {
   return {
@@ -489,7 +491,7 @@ function ExperimentCard({ experiment: e, plan }: { experiment: Experiment; plan:
       </header>
       <p className="biz-experiment__hypothesis">{e.content.hypothesis}</p>
       <p className="biz-muted">
-        {e.content.channel} · {e.content.variants.map((v) => v.label).join(', ')} · {e.content.cohort.length} accounts ·{' '}
+        {e.content.channel} · {e.content.variants.map((v) => v.label).join(', ')} · {accounts(e.content.cohort.length)} ·{' '}
         {METRICS[e.content.primaryMetric] ?? e.content.primaryMetric}
         {e.content.successThreshold && ` · success: ${e.content.successThreshold}`}
         {e.frozenAt !== null && ` · frozen ${formatDate(e.frozenAt)}`}
@@ -541,6 +543,7 @@ function ExperimentCard({ experiment: e, plan }: { experiment: Experiment; plan:
       </div>
       {confirm && (
         <div
+          ref={reveal}
           className={confirm === 'delete' || confirm === 'cancelled' ? 'notice notice--danger biz-confirm' : 'notice biz-confirm'}
           role="alertdialog"
           aria-label="Confirm"
@@ -623,14 +626,16 @@ function Metrics({ experiment }: { experiment: Experiment }) {
             {rows.map((row, i) => (
               <tr key={row.variant ?? `all-${i}`} className={i === 0 ? 'biz-metrics__overall' : undefined}>
                 <td>{label(row)}</td>
-                <td className="biz-num">{row.accountsInCohort} accounts</td>
-                <td className="biz-num">{row.accountsContacted} accounts</td>
+                <td className="biz-num">{accounts(row.accountsInCohort)}</td>
+                <td className="biz-num">{accounts(row.accountsContacted)}</td>
                 <td className="biz-num">{rateText(row.replyRate)}</td>
                 <td className="biz-num">{rateText(row.positiveReplyRate)}</td>
                 <td className="biz-num">{rateText(row.meetingRate)}</td>
                 <td className="biz-num">{rateText(row.proposalRate)}</td>
                 <td className="biz-num">{rateText(row.winRate)}</td>
-                <td className="biz-num">{row.peopleContacted} people</td>
+                <td className="biz-num">
+                  {row.peopleContacted} {row.peopleContacted === 1 ? 'person' : 'people'}
+                </td>
               </tr>
             ))}
           </tbody>

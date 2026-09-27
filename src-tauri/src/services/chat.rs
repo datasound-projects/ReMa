@@ -926,6 +926,13 @@ async fn business_then_answer(
     };
     let progress = ChatProgress { web };
     let model_ref = Some((endpoint, model.model_id.as_str()));
+    // The step names what was researched (company prospects are not job
+    // postings to analyze).
+    let step_label = match intent {
+        Intent::Clients => "ReMa Business: clients",
+        Intent::Contracts => "ReMa Business: contract work",
+        Intent::Workspace => "ReMa Business",
+    };
     let (table, context, status) = match intent {
         Intent::Clients => {
             let all = state.db.call(|c| store::offers(c))?;
@@ -991,7 +998,7 @@ async fn business_then_answer(
         } else {
             ToolStatus::Completed
         },
-        "ReMa Business",
+        step_label,
         None,
     );
     on_delta(&table);

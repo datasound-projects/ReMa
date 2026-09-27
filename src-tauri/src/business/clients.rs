@@ -1307,12 +1307,18 @@ pub async fn find(
     // Evaluate.
     progress.status("Building evidence…");
     let roles = buyer_roles(content);
-    let suppressed_companies: Vec<String> = state
+    let suppressions = state
         .db
         .call(|c| store::suppressions(c))
-        .unwrap_or_default()
-        .into_iter()
+        .unwrap_or_default();
+    let suppressed_companies: Vec<String> = suppressions
+        .iter()
         .filter(|s| s.scope == "company")
+        .map(|s| s.key.clone())
+        .collect();
+    let suppressed_roles: Vec<String> = suppressions
+        .into_iter()
+        .filter(|s| s.scope == "person" && s.key.starts_with("role:"))
         .map(|s| s.key)
         .collect();
     let saved: HashMap<String, String> = merged
@@ -1372,7 +1378,8 @@ pub async fn find(
                 profile_url: None,
                 contact_page: inspection.contact_page.clone(),
                 source_url: None,
-                suppressed,
+                suppressed: suppressed
+                    || suppressed_roles.contains(&super::pipeline::role_contact_id(&key, role)),
             })
             .collect();
         let why: Vec<String> = assessment

@@ -1611,9 +1611,10 @@ pub fn redactions(c: &Connection) -> AppResult<Vec<Redaction>> {
 }
 
 /// Replaces every occurrence of a removed person's name in stored run
-/// results and assessments (B29: history keeps its metadata, not the
-/// removed personal data). Returns how many records changed.
-pub fn redact_text(c: &Connection, needle: &str) -> AppResult<usize> {
+/// results, assessments, drafts, plans, experiments, opportunity notes and
+/// activity history (B29: history keeps its metadata, not the removed
+/// personal data). Returns how many records changed.
+pub fn redact_text(c: &Connection, needle: &str, now: i64) -> AppResult<usize> {
     let needle = needle.trim();
     if needle.chars().count() < 3 {
         return Ok(0);
@@ -1625,7 +1626,10 @@ pub fn redact_text(c: &Connection, needle: &str) -> AppResult<usize> {
         ("business_assessments", "content"),
         ("business_drafts", "body"),
         ("business_drafts", "recipient"),
+        ("business_activities", "person"),
+        ("business_activities", "detail"),
         ("gtm_plans", "content"),
+        ("gtm_experiments", "content"),
     ] {
         changed += c.execute(
             &format!(
@@ -1635,5 +1639,17 @@ pub fn redact_text(c: &Connection, needle: &str) -> AppResult<usize> {
             params![needle, pattern],
         )?;
     }
+    // User-editable fields: bump the revision so an edit form opened
+    // before the redaction cannot write the name back.
+    changed += c.execute(
+        "UPDATE business_opportunities
+         SET notes = REPLACE(notes, ?1, '[removed]'),
+             next_step = REPLACE(next_step, ?1, '[removed]'),
+             evidence = REPLACE(evidence, ?1, '[removed]'),
+             updated_at = ?3,
+             revision = revision + 1
+         WHERE notes LIKE ?2 OR next_step LIKE ?2 OR evidence LIKE ?2",
+        params![needle, pattern, now],
+    )?;
     Ok(changed)
 }

@@ -21,7 +21,7 @@ import {
 import { CheckIcon, CloseIcon, PlusIcon, ReloadIcon } from '../icons';
 import { ChipInput } from '../profile/EntryList';
 import { Links, RunProgress, StatusBadge } from './common';
-import { emptyOfferContent, openLink, reviewBlockers } from './helpers';
+import { emptyOfferContent, hasUnreviewedChanges, openLink, reviewBlockers } from './helpers';
 import {
   FIELD_STATUS_LABELS,
   MATURITY_LABELS,
@@ -67,8 +67,9 @@ const SINGLE_FIELDS: { field: SingleField; label: string; required?: boolean }[]
   { field: 'deliveryModel', label: 'Delivery model' },
 ];
 
-function userClaim(text: string): Claim {
-  return { text, status: 'user_confirmed', sourceUrl: null, retrievedAt: null, excerpt: null, note: null };
+/** A row the user adds: unknown until they type it, then theirs. */
+function newClaim(): Claim {
+  return { text: '', status: 'unknown', sourceUrl: null, retrievedAt: null, excerpt: null, note: null };
 }
 
 function StatusTag({ status }: { status: FieldStatus }) {
@@ -157,7 +158,7 @@ function ClaimRow({
               Confirm
             </button>
           )}
-          {onReject && claim.text.trim() !== '' && (
+          {onReject && claim.sourceUrl && claim.text.trim() !== '' && (
             <button
               type="button"
               className="button button--ghost button--small"
@@ -348,7 +349,7 @@ export function OfferEditor({
   const refresh = useBusinessRun();
   const blockers = reviewBlockers(content);
   // A saved draft that is not a reviewed version yet.
-  const [hasUnreviewedDraft, setHasUnreviewedDraft] = useState(offer.draft !== null);
+  const [hasUnreviewedDraft, setHasUnreviewedDraft] = useState(() => hasUnreviewedChanges(offer));
 
   const update = (patch: Partial<OfferContent>) => {
     setContent((c) => ({ ...c, ...patch }));
@@ -394,7 +395,7 @@ export function OfferEditor({
       setContent(result.offer.draft ?? result.offer.reviewed ?? content);
       setRevision(result.offer.revision);
       setDirty(false);
-      setHasUnreviewedDraft(result.offer.draft !== null);
+      setHasUnreviewedDraft(hasUnreviewedChanges(result.offer));
       return result;
     });
   };
@@ -514,7 +515,7 @@ export function OfferEditor({
           <button
             type="button"
             className="button button--ghost button--small biz-field__add"
-            onClick={() => setList(field, [...content[field], userClaim('')])}
+            onClick={() => setList(field, [...content[field], newClaim()])}
           >
             <PlusIcon className="button__icon" />
             Add
@@ -538,7 +539,7 @@ export function OfferEditor({
           className="button button--ghost button--small biz-field__add"
           onClick={() =>
             update({
-              pricing: [...content.pricing, { amount: '', currency: 'EUR', unit: 'daily', claim: userClaim('') }],
+              pricing: [...content.pricing, { amount: '', currency: 'EUR', unit: 'daily', claim: newClaim() }],
             })
           }
         >

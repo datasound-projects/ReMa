@@ -18,13 +18,15 @@ import {
   type ActivityType,
   type Amount,
   type BusinessOverview,
+  type Experiment,
   type Opportunity,
   type PipelineStage,
+  type Suppression,
 } from '../../services/businessService';
 import { TrashIcon } from '../icons';
 import { Dialog } from '../ui/Dialog';
 import { Links, RunProgress, SourceNotes } from './common';
-import { occurredAt, toDateInput } from './helpers';
+import { occurredAt, reveal, toDateInput } from './helpers';
 import { DraftCard, NewDraftForm } from './Drafts';
 import { TermsFacts } from './FindContracts';
 import {
@@ -64,14 +66,17 @@ type Section = 'overview' | 'activity' | 'contacts' | 'drafts';
 export function OpportunityDetail({
   opportunity: o,
   overview,
+  suppressions,
   onClose,
 }: {
   opportunity: Opportunity;
   overview: BusinessOverview;
+  suppressions: Suppression[];
   onClose: () => void;
 }) {
   const [section, setSection] = useState<Section>('overview');
   const drafts = overview.drafts.filter((d) => d.opportunityId === o.id);
+  const blocked = new Set(suppressions.filter((s) => s.scope === 'person').map((s) => s.key));
   const experiments = overview.experiments.filter(
     (e) => e.status !== 'cancelled' && e.content.cohort.some((c) => c.opportunityId === o.id || c.accountKey === o.companyKey),
   );
@@ -120,10 +125,10 @@ export function OpportunityDetail({
           <>
             <StageForm key={`${o.stage}-${o.revision}`} o={o} />
             <ActivityForm o={o} experiments={experiments.map((e) => ({ id: e.id, label: e.content.hypothesis }))} />
-            <History o={o} />
+            <History o={o} experiments={overview.experiments} />
           </>
         )}
-        {section === 'contacts' && <Contacts o={o} />}
+        {section === 'contacts' && <Contacts o={o} blocked={blocked} />}
         {section === 'drafts' && (
           <div className="biz-opp__drafts">
             {o.doNotContact ? (
@@ -134,7 +139,7 @@ export function OpportunityDetail({
               <NewDraftForm
                 opportunityId={o.id}
                 planId={null}
-                contacts={o.contacts}
+                contacts={o.contacts.filter((c) => !blocked.has(c.id))}
                 defaultRole={o.contacts[0]?.role ?? ''}
                 experiments={experiments}
               />
@@ -358,7 +363,7 @@ function Overview({ o, overview, onDeleted }: { o: Opportunity; overview: Busine
           Delete opportunity
         </button>
         {confirm === 'dnc' && (
-          <div className="notice notice--warning biz-confirm" role="alertdialog" aria-label="Do not contact">
+          <div ref={reveal} className="notice notice--warning biz-confirm" role="alertdialog" aria-label="Do not contact">
             <span>
               Research and drafting will respect this; ReMa never lifts it on its own. Only you can lift it under
               Do not contact.
@@ -377,7 +382,7 @@ function Overview({ o, overview, onDeleted }: { o: Opportunity; overview: Busine
           </div>
         )}
         {confirm === 'delete' && (
-          <div className="notice notice--danger biz-confirm" role="alertdialog" aria-label="Delete opportunity">
+          <div ref={reveal} className="notice notice--danger biz-confirm" role="alertdialog" aria-label="Delete opportunity">
             <span>Delete this opportunity with its activity, contacts and drafts? This cannot be undone.</span>
             <button
               type="button"
@@ -403,7 +408,9 @@ function Overview({ o, overview, onDeleted }: { o: Opportunity; overview: Busine
 /** Moves the stage, recording what actually happened when the stage needs it. */
 function StageForm({ o }: { o: Opportunity }) {
   const targets = STAGES.filter((s) => s !== o.stage);
-  const [to, setTo] = useState<PipelineStage>(targets[0] ?? 'qualified');
+  // The next stage forward by default; after Won or Lost, the first one.
+  const next = RANK[o.stage] < 4 ? STAGES[STAGES.indexOf(o.stage) + 1] : o.stage === 'proposal' ? 'won' : undefined;
+  const [to, setTo] = useState<PipelineStage>(next ?? targets[0] ?? 'qualified');
   const [activity, setActivity] = useState<ActivityType | ''>('');
   const [today] = useState(() => toDateInput(Date.now()));
   const [date, setDate] = useState(today);
@@ -621,7 +628,9 @@ function ActivityForm({ o, experiments }: { o: Opportunity; experiments: { id: s
   );
 }
 
-function History({ o }: { o: Opportunity }) {
+function History({ o, experiments }: { o: Opportunity; experiments: Experiment[] }) {
+  const variantLabel = (experimentId: string | null, variant: string) =>
+    experiments.find((e) => e.id === experimentId)?.content.variants.find((v) => v.id === variant)?.label ?? variant;
   const action = useAction();
   const items = [...o.activities].sort((a, b) => b.occurredAt - a.occurredAt || b.recordedAt - a.recordedAt);
   return (
@@ -637,7 +646,7 @@ function History({ o }: { o: Opportunity }) {
                 ? `Stage: ${STAGE_LABELS[a.fromStage]} → ${STAGE_LABELS[a.toStage]}`
                 : ACTIVITY_LABELS[a.kind]}
               {a.person && ` · ${a.person}`}
-              {a.variant && ` · variant ${a.variant}`}
+              {a.variant && ` · variant ${variantLabel(a.experimentId, a.variant)}`}
               {a.detail && <span className="biz-muted"> — {a.detail}</span>}
             </span>
             <span className="biz-muted biz-history__source">{a.source === 'user_reported' ? 'user-reported' : a.source}</span>
@@ -664,7 +673,7 @@ function History({ o }: { o: Opportunity }) {
   );
 }
 
-function Contacts({ o }: { o: Opportunity }) {
+function Contacts({ o, blocked }: { o: Opportunity; blocked: Set<string> }) {
   const [confirm, setConfirm] = useState<{ id: string; kind: 'dnc' | 'delete' } | null>(null);
   const action = useAction();
   if (o.contacts.length === 0) {
@@ -677,6 +686,11 @@ function Contacts({ o }: { o: Opportunity }) {
           <li key={c.id}>
             <span className="biz-person">{c.name ?? c.role}</span>
             {c.name && <span className="biz-muted"> · {c.title ?? c.role}</span>}
+            {blocked.has(c.id) && (
+              <span className="badge badge--danger" title="Lift it yourself from the Do not contact list in the Pipeline.">
+                Do not contact
+              </span>
+            )}
             <Links
               links={[
                 c.profileUrl ? { label: 'Profile', url: c.profileUrl } : null,
@@ -684,15 +698,18 @@ function Contacts({ o }: { o: Opportunity }) {
               ].filter((l): l is { label: string; url: string } => l !== null)}
             />
             <span className="biz-contacts__actions">
-              <button type="button" className="button button--ghost button--small" onClick={() => setConfirm({ id: c.id, kind: 'dnc' })}>
-                Do not contact
-              </button>
+              {!blocked.has(c.id) && (
+                <button type="button" className="button button--ghost button--small" onClick={() => setConfirm({ id: c.id, kind: 'dnc' })}>
+                  Do not contact
+                </button>
+              )}
               <button type="button" className="button button--ghost button--small" onClick={() => setConfirm({ id: c.id, kind: 'delete' })}>
                 Delete
               </button>
             </span>
             {confirm?.id === c.id && (
               <div
+                ref={reveal}
                 className={confirm.kind === 'delete' ? 'notice notice--danger biz-confirm' : 'notice notice--warning biz-confirm'}
                 role="alertdialog"
                 aria-label={confirm.kind === 'delete' ? 'Delete contact' : 'Do not contact'}
