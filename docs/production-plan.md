@@ -162,17 +162,25 @@ configuration, never as a security boundary.
 
 ## 8. Checklist B
 
-| # | Item | Status |
-|---|---|---|
-| B1 | Root cause reproduced and documented | Done |
-| B2 | Deterministic build configuration, release gate, CI release check | Planned |
-| B3 | OAuth broker hardening, pages, concurrency, error taxonomy, logging | Planned |
-| B4 | Token manager (memory access tokens, per-account keys, single flight) | Planned |
-| B5 | Capability validation after sign-in; scheduled runs need no browser | Planned |
-| B6 | UI states, details, cloud-model disclosure, keychain resilience | Planned |
-| B7 | Tests (§70–§71 and the rest) | Planned |
-| B8 | Packaged release build, clean install, E2E with stand-ins | Planned |
-| B9 | Docs, provider checklists (§81–§82), blockers, commit, push, CI | Planned |
+| # | Item | Status | Evidence |
+|---|---|---|---|
+| B1 | Root cause reproduced and documented | Done | §6 |
+| B2 | Deterministic build configuration, release gate, CI release check | Verified | `cargo check --release` without registrations fails; build-config and release-check tests; the package logs `[connector] config google=ready microsoft=ready` ([validation §4.1](connectors/validation.md), §4.2 row 1) |
+| B3 | OAuth broker hardening, pages, concurrency, error taxonomy, logging | Verified | tests in validation §4.1; packaged rows 2, 5–7, 24 |
+| B4 | Token manager (memory access tokens, per-account keys, single flight) | Verified | tests; packaged rows 3, 9, 14, 20, 23 |
+| B5 | Capability validation after sign-in; scheduled runs need no browser | Verified | tests; packaged rows 2, 4, 6, 7, 14, 23 |
+| B6 | UI states, details, cloud-model disclosure, keychain resilience | Verified | Vitest; packaged rows 5, 8, 12, 20, 23, 25 |
+| B7 | Tests (§70–§71 and the rest) | Verified | 715 Rust (3 ignored), 121 Vitest |
+| B8 | Packaged release build, clean install, E2E with stand-ins | In progress | validation §4.2; final package re-check pending |
+| B9 | Docs, provider checklists (§81–§82), blockers, commit, push, CI | In progress | [connectors/registration.md](connectors/registration.md), §9 |
+
+The packaged run found five defects, all fixed with tests that fail without
+the fix ([connectors/implementation.md §5.9](connectors/implementation.md)):
+chat sent a question about the user's job mail to a public job search; a
+mailbox that failed inside a run was marked synced (and its restart point
+moved); an unusable Outlook cursor stopped Outlook sync for good; a run
+that read no mailbox said "Succeeded"; unreachable calendars were marked
+synced.
 
 ## 9. External blockers for B (need the publisher, the providers or other machines)
 
