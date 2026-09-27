@@ -1090,6 +1090,32 @@ fn contact_for_person(person: &crate::network::model::Person, role: &str) -> Buy
     }
 }
 
+/// What professional networks contribute to finding clients: nothing from
+/// their members, whatever is connected (the data policy's own reasons).
+pub fn network_note(linkedin_connected: bool) -> String {
+    let linkedin = policy::check(
+        policy::DataSource::LinkedinApi,
+        policy::DataClass::FirstDegreeConnection,
+        Purpose::ClientAcquisition,
+        Operation::Fetch,
+    );
+    let xing = policy::check(
+        policy::DataSource::XingApi,
+        policy::DataClass::ProfessionalProfile,
+        Purpose::ClientAcquisition,
+        Operation::Fetch,
+    );
+    debug_assert!(!linkedin.allowed && !xing.allowed);
+    let start = if linkedin_connected {
+        "LinkedIn is connected for your identity, but its connection list and member data are \
+         not used to find clients"
+    } else {
+        "No connection list or sales-data provider is used: clients come from public sources \
+         (company websites, Wikidata, job postings)"
+    };
+    format!("{start}. {} {}", linkedin.reason, xing.reason)
+}
+
 /// Runs a Find Clients search for a reviewed offer version.
 #[allow(clippy::too_many_arguments)]
 pub async fn find(
@@ -1144,6 +1170,18 @@ pub async fn find(
     if criteria.locations.radius_km.is_some() {
         notes.push("A radius is not applied: ReMa has no reliable coordinates for it.".to_string());
     }
+    // What professional networks contribute here, stated rather than
+    // implied (B28, B35 scenarios 1 and 5).
+    let linkedin_connected = crate::network::capabilities::all(state)
+        .await
+        .map(|all| {
+            all.iter().any(|p| {
+                p.provider == crate::models::connectors::ProviderId::Linkedin
+                    && p.access == crate::network::capabilities::ProviderAccess::Connected
+            })
+        })
+        .unwrap_or(false);
+    notes.push(network_note(linkedin_connected));
     let ctx = state
         .rema_mcp
         .ctx(&state.info.version, cancel, deadline, false);
@@ -1609,6 +1647,17 @@ mod tests {
             },
             c,
         )
+    }
+
+    #[test]
+    fn the_results_say_what_professional_networks_contribute() {
+        let signed_in = network_note(true);
+        assert!(signed_in.starts_with("LinkedIn is connected for your identity"));
+        assert!(signed_in.contains("does not authorize commercial lead enrichment"));
+        assert!(signed_in.contains("XING member data may not be used for client acquisition"));
+        let none = network_note(false);
+        assert!(none.starts_with("No connection list or sales-data provider is used"));
+        assert!(!none.to_lowercase().contains("no connections"));
     }
 
     fn company(name: &str, industry: Option<&str>, employees: Option<u32>, place: &str) -> Company {
