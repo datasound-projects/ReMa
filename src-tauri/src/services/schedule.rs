@@ -143,7 +143,7 @@ pub fn next_occurrence(
             let start = zoned(start_at, tz)?;
             let (first_date, time) = (start.date(), start.time());
             // Jump close to `after`, then step forward.
-            let mut k = match after {
+            let from = match after {
                 Some(a) if a > start_at => {
                     let days = first_date
                         .until(zoned(a, tz)?.date())
@@ -153,7 +153,7 @@ pub fn next_occurrence(
                 }
                 _ => 0,
             };
-            for _ in 0..1_000 {
+            for k in (from..).take(1_000) {
                 let date = first_date
                     .checked_add((k * every).days())
                     .map_err(|_| AppError::internal("date out of range"))?;
@@ -161,7 +161,6 @@ pub fn next_occurrence(
                 if is_candidate(t) {
                     return Ok(Some(t));
                 }
-                k += 1;
             }
             Ok(None)
         }

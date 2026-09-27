@@ -293,10 +293,8 @@ fn effective_status(
             requires_action = true;
             next_action = Some(format!("Check the interview details: {reason}"));
         }
-        (_, Some(InterviewCheck::Past(_))) => {
-            if status == ApplicationStatus::UpcomingInterview {
-                status = ApplicationStatus::InProcess;
-            }
+        (_, Some(InterviewCheck::Past(_))) if status == ApplicationStatus::UpcomingInterview => {
+            status = ApplicationStatus::InProcess;
         }
         _ => {}
     }
