@@ -544,6 +544,37 @@ describe('BusinessPage', () => {
     expect(within(dialog).getByText(/An engagement or order was accepted \(not money received\)/)).toBeTruthy();
   });
 
+  it('attributes a contact recorded by a stage move to the chosen experiment', async () => {
+    const inCohort = {
+      ...experiment,
+      content: { ...experiment.content, cohort: [{ accountKey: 'huber', accountName: 'Huber', opportunityId: 'opp_1', variant: 'v1' }] },
+    };
+    mocks.getBusinessOverview.mockResolvedValue(overviewWith({ plans: [plan], experiments: [inCohort] }));
+    mocks.changeStage.mockResolvedValue({ ...opportunity, stage: 'contacted' });
+    renderPage('pipeline', 'opp_1');
+    const dialog = await screen.findByRole('dialog', { name: 'Support Workspace for Huber' });
+    fireEvent.click(within(dialog).getByRole('tab', { name: /Stage & activity/ }));
+    const stage = within(within(dialog).getByRole('region', { name: 'Change stage' }));
+    fireEvent.change(stage.getByLabelText('Move to'), { target: { value: 'contacted' } });
+    fireEvent.change(stage.getByLabelText('Experiment (optional)'), { target: { value: 'exp_1' } });
+    fireEvent.click(stage.getByRole('button', { name: 'Move to Contacted' }));
+    await waitFor(() => expect(mocks.changeStage).toHaveBeenCalled());
+    expect(mocks.changeStage.mock.calls[0]?.[1]).toMatchObject({ to: 'contacted', experimentId: 'exp_1' });
+  });
+
+  it('says "Recorded." only until the form is changed', async () => {
+    mocks.recordActivity.mockResolvedValue({ opportunity, created: true });
+    renderPage('pipeline', 'opp_1');
+    const dialog = await screen.findByRole('dialog', { name: 'Support Workspace for Huber' });
+    fireEvent.click(within(dialog).getByRole('tab', { name: /Stage & activity/ }));
+    const form = within(within(dialog).getByRole('region', { name: 'Record activity' }));
+    fireEvent.change(form.getByLabelText('Person (optional)'), { target: { value: 'Head of Operations' } });
+    fireEvent.click(form.getByRole('button', { name: 'Record' }));
+    await form.findByText('Recorded.');
+    fireEvent.change(form.getByLabelText('Activity'), { target: { value: 'reply' } });
+    expect(form.queryByText('Recorded.')).toBeNull();
+  });
+
   it('keeps drafts local: copying records nothing and there is no send action', async () => {
     const writeText = vi.fn(() => Promise.resolve());
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });

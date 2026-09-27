@@ -688,6 +688,7 @@ impl BusinessTools {
                 occurred_at: at,
                 person: None,
                 amount: None,
+                experiment_id: None,
                 expected_revision: o.revision,
                 idempotency_key: key,
             },

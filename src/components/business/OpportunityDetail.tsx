@@ -123,7 +123,11 @@ export function OpportunityDetail({
         {section === 'overview' && <Overview key={o.revision} o={o} overview={overview} onDeleted={onClose} />}
         {section === 'activity' && (
           <>
-            <StageForm key={`${o.stage}-${o.revision}`} o={o} />
+            <StageForm
+              key={`${o.stage}-${o.revision}`}
+              o={o}
+              experiments={experiments.map((e) => ({ id: e.id, label: e.content.hypothesis }))}
+            />
             <ActivityForm o={o} experiments={experiments.map((e) => ({ id: e.id, label: e.content.hypothesis }))} />
             <History o={o} experiments={overview.experiments} />
           </>
@@ -406,7 +410,7 @@ function Overview({ o, overview, onDeleted }: { o: Opportunity; overview: Busine
 }
 
 /** Moves the stage, recording what actually happened when the stage needs it. */
-function StageForm({ o }: { o: Opportunity }) {
+function StageForm({ o, experiments }: { o: Opportunity; experiments: { id: string; label: string }[] }) {
   const targets = STAGES.filter((s) => s !== o.stage);
   // The next stage forward by default; after Won or Lost, the first one.
   const next = RANK[o.stage] < 4 ? STAGES[STAGES.indexOf(o.stage) + 1] : o.stage === 'proposal' ? 'won' : undefined;
@@ -418,6 +422,7 @@ function StageForm({ o }: { o: Opportunity }) {
   const [reason, setReason] = useState('');
   const [amountValue, setAmountValue] = useState('');
   const [currency, setCurrency] = useState('EUR');
+  const [experimentId, setExperimentId] = useState('');
   const [key] = useState(() => requestKey('stage'));
   const action = useAction();
   const backward = RANK[to] < RANK[o.stage] || RANK[o.stage] === 5;
@@ -469,6 +474,19 @@ function StageForm({ o }: { o: Opportunity }) {
               <span className="field__label">With (optional)</span>
               <input className="input" value={person} onChange={(e) => setPerson(e.target.value)} />
             </label>
+            {experiments.length > 0 && (
+              <label className="field">
+                <span className="field__label">Experiment (optional)</span>
+                <select className="input" value={experimentId} onChange={(e) => setExperimentId(e.target.value)}>
+                  <option value="">None</option>
+                  {experiments.map((e) => (
+                    <option key={e.id} value={e.id}>
+                      {e.label.slice(0, 60) || 'Experiment'}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
           </>
         )}
         {to === 'won' && (
@@ -517,6 +535,7 @@ function StageForm({ o }: { o: Opportunity }) {
                   to === 'won' && amountValue.trim()
                     ? { value: amountValue.trim(), currency: currency || null, basis: 'accepted', source: 'user_stated' }
                     : null,
+                experimentId: recorded ? null : experimentId || null,
                 expectedRevision: o.revision,
                 idempotencyKey: key,
               }),
@@ -541,13 +560,20 @@ function ActivityForm({ o, experiments }: { o: Opportunity; experiments: { id: s
   const [key, setKey] = useState(() => requestKey('activity'));
   const [done, setDone] = useState<string | null>(null);
   const action = useAction();
+  // "Recorded." speaks of the last submission only: any edit clears it.
+  const edited =
+    <T,>(set: (value: T) => void) =>
+    (value: T) => {
+      setDone(null);
+      set(value);
+    };
   return (
     <section className="biz-opp__block" aria-label="Record activity">
       <h4 className="biz-detail__title">Record what actually happened</h4>
       <div className="biz-form-grid">
         <label className="field">
           <span className="field__label">Activity</span>
-          <select className="input" value={kind} onChange={(e) => setKind(e.target.value as ActivityType)}>
+          <select className="input" value={kind} onChange={(e) => edited(setKind)(e.target.value as ActivityType)}>
             {RECORDABLE.map((k) => (
               <option key={k} value={k}>
                 {ACTIVITY_LABELS[k]}
@@ -557,16 +583,16 @@ function ActivityForm({ o, experiments }: { o: Opportunity; experiments: { id: s
         </label>
         <label className="field">
           <span className="field__label">When</span>
-          <input className="input" type="date" max={today} value={date} onChange={(e) => setDate(e.target.value)} />
+          <input className="input" type="date" max={today} value={date} onChange={(e) => edited(setDate)(e.target.value)} />
         </label>
         <label className="field">
           <span className="field__label">Person (optional)</span>
-          <input className="input" value={person} onChange={(e) => setPerson(e.target.value)} />
+          <input className="input" value={person} onChange={(e) => edited(setPerson)(e.target.value)} />
         </label>
         {experiments.length > 0 && (
           <label className="field">
             <span className="field__label">Experiment (optional)</span>
-            <select className="input" value={experimentId} onChange={(e) => setExperimentId(e.target.value)}>
+            <select className="input" value={experimentId} onChange={(e) => edited(setExperimentId)(e.target.value)}>
               <option value="">None</option>
               {experiments.map((e) => (
                 <option key={e.id} value={e.id}>
@@ -579,7 +605,7 @@ function ActivityForm({ o, experiments }: { o: Opportunity; experiments: { id: s
       </div>
       <label className="field">
         <span className="field__label">Detail (optional)</span>
-        <input className="input" value={detail} onChange={(e) => setDetail(e.target.value)} />
+        <input className="input" value={detail} onChange={(e) => edited(setDetail)(e.target.value)} />
       </label>
       <p className="form__hint">
         Recorded as user-reported. A scheduled meeting is not a meeting held; a proposal draft is not a proposal sent;

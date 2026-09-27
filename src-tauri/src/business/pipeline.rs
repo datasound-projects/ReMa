@@ -321,8 +321,41 @@ pub struct StageChange {
     pub person: Option<String>,
     /// For Won: the accepted value (not money received).
     pub amount: Option<Amount>,
+    /// The experiment the recorded activity belongs to; the variant comes
+    /// from the frozen assignment, never from the caller.
+    pub experiment_id: Option<String>,
     pub expected_revision: u32,
     pub idempotency_key: String,
+}
+
+/// The experiment an activity is attributed to, with the account's variant
+/// from the frozen assignment (B23): only for an account in its cohort.
+fn attribution(
+    state: &AppState,
+    opportunity: &Opportunity,
+    experiment_id: Option<&String>,
+) -> AppResult<(Option<String>, Option<String>)> {
+    let Some(eid) = experiment_id else {
+        return Ok((None, None));
+    };
+    let experiment = state
+        .db
+        .call(|c| store::experiment(c, eid))?
+        .ok_or_else(|| AppError::not_found("The experiment no longer exists."))?;
+    let account = super::experiments::account_key(opportunity);
+    let variant = super::experiments::assigned_variant(&experiment, &account);
+    if variant.is_none()
+        && !experiment
+            .content
+            .cohort
+            .iter()
+            .any(|e| e.account_key == account)
+    {
+        return Err(AppError::validation(
+            "This account is not in the experiment's cohort.",
+        ));
+    }
+    Ok((Some(eid.clone()), variant))
 }
 
 pub fn change_stage(state: &AppState, id: &str, change: StageChange) -> AppResult<Opportunity> {
@@ -389,6 +422,8 @@ pub fn change_stage(state: &AppState, id: &str, change: StageChange) -> AppResul
                 )))
             }
         };
+        let (experiment_id, variant) =
+            attribution(state, &opportunity, change.experiment_id.as_ref())?;
         Some(Activity {
             id: new_id("act"),
             opportunity_id: id.to_string(),
@@ -408,8 +443,8 @@ pub fn change_stage(state: &AppState, id: &str, change: StageChange) -> AppResul
             },
             from_stage: None,
             to_stage: None,
-            experiment_id: None,
-            variant: None,
+            experiment_id,
+            variant,
         })
     };
     let audit = Activity {
@@ -489,29 +524,7 @@ pub fn record_activity(
     if input.idempotency_key.trim().is_empty() {
         return Err(AppError::validation("A request key is required."));
     }
-    let (experiment_id, variant) = match &input.experiment_id {
-        Some(eid) => {
-            let experiment = state
-                .db
-                .call(|c| store::experiment(c, eid))?
-                .ok_or_else(|| AppError::not_found("The experiment no longer exists."))?;
-            let account = super::experiments::account_key(&opportunity);
-            let variant = super::experiments::assigned_variant(&experiment, &account);
-            if variant.is_none()
-                && !experiment
-                    .content
-                    .cohort
-                    .iter()
-                    .any(|e| e.account_key == account)
-            {
-                return Err(AppError::validation(
-                    "This account is not in the experiment's cohort.",
-                ));
-            }
-            (Some(eid.clone()), variant)
-        }
-        None => (None, None),
-    };
+    let (experiment_id, variant) = attribution(state, &opportunity, input.experiment_id.as_ref())?;
     let activity = Activity {
         id: new_id("act"),
         opportunity_id: opportunity_id.to_string(),

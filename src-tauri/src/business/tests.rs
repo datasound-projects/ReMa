@@ -652,6 +652,7 @@ async fn stages_rest_on_actual_activity_and_drafts_never_count() {
             occurred_at: Some(now_ms() - 86_400_000),
             person: Some("Anna Beispiel".into()),
             amount: None,
+            experiment_id: None,
             expected_revision: after.revision,
             idempotency_key: "stage-1".into(),
         },
@@ -673,6 +674,7 @@ async fn stages_rest_on_actual_activity_and_drafts_never_count() {
             occurred_at: None,
             person: None,
             amount: None,
+            experiment_id: None,
             expected_revision: contacted.revision,
             idempotency_key: "stage-2".into(),
         },
@@ -690,6 +692,7 @@ async fn stages_rest_on_actual_activity_and_drafts_never_count() {
             occurred_at: None,
             person: None,
             amount: None,
+            experiment_id: None,
             expected_revision: contacted.revision,
             idempotency_key: "stage-3".into(),
         },
@@ -724,6 +727,7 @@ async fn stages_rest_on_actual_activity_and_drafts_never_count() {
             basis: "per year".into(),
             source: "negotiated".into(),
         }),
+        experiment_id: None,
         expected_revision: contacted.revision,
         idempotency_key: "stage-won".into(),
     };
@@ -1313,6 +1317,7 @@ async fn contract_search_applies_strict_terms_and_saves_without_an_application()
             occurred_at: None,
             person: None,
             amount: None,
+            experiment_id: None,
             expected_revision: noted.revision,
             idempotency_key: "closed-qualified".into(),
         },
@@ -1489,6 +1494,45 @@ async fn scenario_four_experiment_metrics_come_from_recorded_activity_only() {
     assert!(amended.content.cohort.iter().all(|c| c.variant.is_none()));
     let original = experiments::get(&state, &running.id).unwrap();
     assert!(original.frozen_at.is_some());
+    // A contact recorded by moving the stage counts in the experiment too,
+    // with the account's assigned variant.
+    let sixth = state
+        .db
+        .call(|c| store::opportunity(c, &accounts[5].id))
+        .unwrap()
+        .unwrap();
+    let contacted = pipeline::change_stage(
+        &state,
+        &sixth.id,
+        pipeline::StageChange {
+            to: PipelineStage::Contacted,
+            reason: None,
+            activity: None,
+            occurred_at: Some(at),
+            person: None,
+            amount: None,
+            experiment_id: Some(running.id.clone()),
+            expected_revision: sixth.revision,
+            idempotency_key: "stage-sixth".into(),
+        },
+    )
+    .unwrap();
+    let contact = contacted
+        .activities
+        .iter()
+        .find(|a| a.kind == ActivityType::Contact)
+        .unwrap();
+    let assigned = original
+        .content
+        .cohort
+        .iter()
+        .find(|c| c.opportunity_id.as_deref() == Some(sixth.id.as_str()))
+        .and_then(|c| c.variant.clone());
+    assert_eq!(contact.experiment_id.as_deref(), Some(running.id.as_str()));
+    assert_eq!(contact.variant, assigned);
+    let after = experiments::metrics(&state, &running.id).unwrap();
+    assert_eq!(after.overall.accounts_contacted, 6);
+    assert_eq!(after.overall.reply_rate.display, "2 / 6 (33%)");
 }
 
 #[tokio::test]

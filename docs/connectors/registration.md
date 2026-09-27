@@ -1,6 +1,6 @@
 # Connectors — app registration (for whoever builds and publishes ReMa)
 
-ReMa signs users in with **its own** Google and Microsoft app registrations.
+ReMa signs users in with **its own** Google, Microsoft and LinkedIn app registrations.
 Users never create OAuth clients, never see a client ID or secret, and never
 open a cloud console. This page is for the publisher of a ReMa build.
 
@@ -21,9 +21,11 @@ The registrations are compiled into the app (`option_env!`, read in
 | `REMA_GOOGLE_CLIENT_SECRET` | with the Google client | the Desktop client's secret (Google does not treat it as confidential for installed apps; it is still never shown or logged) |
 | `REMA_MICROSOFT_CLIENT_ID` | for Outlook Mail / Calendar | Microsoft Entra application (client) ID |
 | `REMA_MICROSOFT_TENANT` | no (default `common`) | `common` (work, school and personal accounts), `consumers`, `organizations` or a tenant ID |
+| `REMA_LINKEDIN_CLIENT_ID` | for LinkedIn (Network Connect) | client ID of a LinkedIn app with native PKCE enabled; no secret exists or ships |
+| `REMA_LINKEDIN_APPROVED_SCOPES` | no | restricted scopes LinkedIn approved for that app, space-separated; only `r_1st_connections` is recognised |
 
 ```sh
-REMA_GOOGLE_CLIENT_ID=… REMA_GOOGLE_CLIENT_SECRET=… REMA_MICROSOFT_CLIENT_ID=… pnpm build:app
+REMA_GOOGLE_CLIENT_ID=… REMA_GOOGLE_CLIENT_SECRET=… REMA_MICROSOFT_CLIENT_ID=… REMA_LINKEDIN_CLIENT_ID=… pnpm build:app
 ```
 
 A build without a registration shows the provider's connectors as
@@ -31,9 +33,12 @@ A build without a registration shows the provider's connectors as
 these variables change.
 
 **Development only** (ignored by release builds): `REMA_DEV_GOOGLE_CLIENT_ID`,
-`REMA_DEV_GOOGLE_CLIENT_SECRET` and `REMA_DEV_MICROSOFT_CLIENT_ID` override the
-registration at run time; `REMA_GOOGLE_BASE_URL` and `REMA_MICROSOFT_BASE_URL`
-point the endpoints at a local mock (see [validation.md](validation.md)).
+`REMA_DEV_GOOGLE_CLIENT_SECRET`, `REMA_DEV_MICROSOFT_CLIENT_ID`,
+`REMA_DEV_LINKEDIN_CLIENT_ID` and `REMA_DEV_LINKEDIN_APPROVED_SCOPES` override
+the registration at run time; `REMA_GOOGLE_BASE_URL`, `REMA_MICROSOFT_BASE_URL`
+and `REMA_LINKEDIN_BASE_URL` point the endpoints at a local mock (see
+[validation.md](validation.md) and
+[network-connect/validation.md](../network-connect/validation.md)).
 
 ## Google (Gmail, Google Calendar)
 
@@ -81,3 +86,47 @@ tokens rotate: ReMa stores the new one after every refresh. Microsoft offers
 no token revocation for public clients; users remove ReMa at
 <https://account.microsoft.com/privacy/app-access> (linked from the connector
 details).
+
+## LinkedIn (Network Connect)
+
+Official guides: [Sign In with LinkedIn using OpenID Connect](https://learn.microsoft.com/linkedin/consumer/integrations/self-serve/sign-in-with-linkedin-v2),
+[Authorization Code Flow (Native PKCE)](https://learn.microsoft.com/linkedin/shared/authentication/authorization-code-flow-native),
+[Getting access to LinkedIn APIs](https://learn.microsoft.com/linkedin/shared/authentication/getting-access),
+[Connections API](https://learn.microsoft.com/linkedin/shared/integrations/people/connections-api).
+These pages were read through search excerpts only (the host was
+unreachable here); check them before registering.
+
+1. In the LinkedIn Developer Portal, create an app owned by the publisher's
+   LinkedIn Page, with privacy policy URL and logo.
+2. **Products**: add **Sign In with LinkedIn using OpenID Connect** (scopes
+   `openid`, `profile`, `email`, self-service).
+3. **Native PKCE**: LinkedIn enables the native (secret-less) PKCE flow per
+   app on request, through the developer's LinkedIn contact. Without it the
+   token request fails. ReMa never ships a client secret.
+4. **Redirect**: the native-PKCE guide says LinkedIn communicates only with
+   loopback IPs and the app listens on a random loopback port, which is what
+   ReMa does (`http://127.0.0.1:<random port>` per sign-in). Configure the
+   app's auth settings as that guide says; a live sign-in against LinkedIn
+   was not possible here, so confirm it before release.
+5. Put the client ID into `REMA_LINKEDIN_CLIENT_ID`.
+6. Only if LinkedIn approves the app for **first-degree connections**
+   (`r_1st_connections`, restricted to approved developers): add
+   `REMA_LINKEDIN_APPROVED_SCOPES=r_1st_connections`. ReMa then asks for it
+   and uses it only when the token actually grants it; otherwise the
+   Network Connect card says "Not available". Sales enrichment would need
+   the Sales Navigator Application Platform; ReMa does not use LinkedIn data
+   in Business at all.
+
+What ReMa sends: `response_type=code`, `code_challenge` (S256), a random
+`state`, `openid profile email` (plus an approved scope), no secret. A build
+without `REMA_LINKEDIN_CLIENT_ID` shows LinkedIn as unavailable in this
+build. Disconnecting deletes ReMa's tokens and drops any connection data
+from memory; users remove ReMa from their account in LinkedIn's settings
+(permitted services), linked from the connector details.
+
+## XING
+
+Nothing to register. XING's "Login with XING" is a website plugin bound to
+a registered domain, and XING's official API clients state that new API
+applications can no longer be registered. ReMa therefore shows XING as
+unavailable and never asks for a XING password or cookies.

@@ -3304,6 +3304,11 @@ export type StageChange = {
 	person: string | null,
 	/**  For Won: the accepted value (not money received). */
 	amount: Amount | null,
+	/**
+	 *  The experiment the recorded activity belongs to; the variant comes
+	 *  from the frozen assignment, never from the caller.
+	 */
+	experimentId: string | null,
 	expectedRevision: number,
 	idempotencyKey: string,
 };
