@@ -8,6 +8,7 @@ use std::sync::Mutex;
 use tauri::AppHandle;
 use tauri_specta::Event;
 
+use crate::business::model::{BusinessChanged, BusinessProgress};
 use crate::models::{
     agent::AgentsChanged,
     analytics::AnalyticsChanged,
@@ -43,6 +44,10 @@ pub trait EventSink: Send + Sync {
     fn mcp_changed(&self);
     /// A Network Connect request made progress (a status line).
     fn network_progress(&self, run_id: &str, text: &str);
+    /// A Business request made progress (a status line).
+    fn business_progress(&self, run_id: &str, text: &str);
+    /// Business records changed (offers, pipeline, plans, experiments).
+    fn business_changed(&self);
 }
 
 pub struct TauriEvents(pub AppHandle);
@@ -123,6 +128,18 @@ impl EventSink for TauriEvents {
         }
         .emit(&self.0);
     }
+
+    fn business_progress(&self, run_id: &str, text: &str) {
+        let _ = BusinessProgress {
+            run_id: run_id.to_string(),
+            text: text.to_string(),
+        }
+        .emit(&self.0);
+    }
+
+    fn business_changed(&self) {
+        let _ = BusinessChanged.emit(&self.0);
+    }
 }
 
 /// Collects events for assertions in tests.
@@ -147,6 +164,9 @@ pub struct RecordingEvents {
     pub mcp: Mutex<usize>,
     /// Network Connect status lines as (run id, text).
     pub network: Mutex<Vec<(String, String)>>,
+    /// Business status lines as (run id, text).
+    pub business: Mutex<Vec<(String, String)>>,
+    pub business_changes: Mutex<usize>,
 }
 
 impl EventSink for RecordingEvents {
@@ -218,5 +238,16 @@ impl EventSink for RecordingEvents {
             .lock()
             .unwrap()
             .push((run_id.to_string(), text.to_string()));
+    }
+
+    fn business_progress(&self, run_id: &str, text: &str) {
+        self.business
+            .lock()
+            .unwrap()
+            .push((run_id.to_string(), text.to_string()));
+    }
+
+    fn business_changed(&self) {
+        *self.business_changes.lock().unwrap() += 1;
     }
 }

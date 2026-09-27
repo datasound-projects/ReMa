@@ -53,6 +53,11 @@ pub enum AppError {
     #[error("{0}")]
     Permission(String),
 
+    /// The record changed since the caller read it (optimistic concurrency):
+    /// nothing was written; reload and apply the change again.
+    #[error("{0}")]
+    Conflict(String),
+
     /// An unexpected failure inside the application.
     #[error("{0}")]
     Internal(String),
@@ -72,6 +77,7 @@ pub enum ErrorCode {
     Billing,
     Network,
     Permission,
+    Conflict,
     Internal,
 }
 
@@ -115,6 +121,10 @@ impl AppError {
         Self::Permission(message.into())
     }
 
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self::Conflict(message.into())
+    }
+
     pub fn internal(message: impl Into<String>) -> Self {
         Self::Internal(message.into())
     }
@@ -131,6 +141,7 @@ impl AppError {
             Self::Billing(_) => ErrorCode::Billing,
             Self::Network(_) => ErrorCode::Network,
             Self::Permission(_) => ErrorCode::Permission,
+            Self::Conflict(_) => ErrorCode::Conflict,
             Self::Internal(_) => ErrorCode::Internal,
         }
     }

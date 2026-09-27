@@ -23,6 +23,7 @@
 pub mod accounts;
 pub mod analytics;
 pub mod browser;
+pub mod business;
 pub mod career_search;
 pub mod commands;
 pub mod connectors;
@@ -250,6 +251,7 @@ fn init_state(app: &App) -> Result<AppState, Box<dyn std::error::Error>> {
         db::conversations::mark_interrupted(conn)?;
         db::runs::mark_interrupted(conn, now)?;
         db::analytics::mark_interrupted_research(conn)?;
+        business::store::reconcile_interrupted(conn, now)?;
         Ok(())
     })?;
 
@@ -286,5 +288,6 @@ fn init_state(app: &App) -> Result<AppState, Box<dyn std::error::Error>> {
         rema_mcp: rema_mcp::RemaMcp::new(),
         career: Default::default(),
         network: Default::default(),
+        business: Default::default(),
     })
 }

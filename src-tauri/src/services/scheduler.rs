@@ -486,6 +486,204 @@ impl retrieval::Progress for ResearchStage {
     }
 }
 
+/// A scheduled Business research task: the task's prompt names the offer
+/// (and optionally its version, "Support Workspace v2"), the places and
+/// the constraints. The career Profile is not used (B5).
+#[allow(clippy::too_many_arguments)]
+async fn business_task(
+    state: &AppState,
+    task: &TaskRow,
+    started_at: i64,
+    recorder: &Arc<RunRecorder>,
+    endpoint: &crate::llm::Endpoint,
+    max_output_tokens: Option<u32>,
+    cancel: CancellationToken,
+) -> Result<Output, Failure> {
+    use crate::business::{
+        model::{ClientCriteria, ClientSearchInput, ContractSearchInput, RunStatus},
+        new_id, offers, render as business_render, service, store,
+        tools::{detect, Intent},
+    };
+    recorder.plan(&[
+        ("research", "Research with ReMa Business"),
+        ("answer", "Write the summary"),
+    ]);
+    recorder.update_context(|c| c.web_search = true);
+    let progress = ResearchStage(SearchStages {
+        recorder: recorder.clone(),
+        searches: Arc::new(WebStage {
+            recorder: recorder.clone(),
+            searches: AtomicU32::new(0),
+        }),
+        checking: AtomicU32::new(0),
+        read: AtomicU32::new(0),
+    });
+    let model = Some((endpoint, task.model.model_id.as_str()));
+    let task_failure = |message: String| Failure::new(RunErrorCategory::Task, message);
+    let (table, context, status, sources) = match detect(&task.prompt) {
+        Some(Intent::Clients) => {
+            let all = state
+                .db
+                .call(|c| store::offers(c))
+                .map_err(|e| Failure::from_error(&e, RunErrorCategory::Task))?;
+            let (offer_id, version) = offers::for_task(&all, &task.prompt).map_err(task_failure)?;
+            recorder.running("research", "Finding clients");
+            let results = service::find_clients(
+                state,
+                ClientSearchInput {
+                    run_id: new_id("run"),
+                    offer_id,
+                    offer_version: version,
+                    query: task.prompt.clone(),
+                    criteria: ClientCriteria::default(),
+                    find_people: false,
+                },
+                model,
+                &progress,
+                &cancel,
+            )
+            .await
+            .map_err(|e| Failure::from_error(&e, RunErrorCategory::Task))?;
+            recorder.done(
+                "research",
+                &format!(
+                    "Offer: {} v{} · {} · {} to verify",
+                    results.offer.name,
+                    results.offer.version,
+                    plural(
+                        results.confirmed.len(),
+                        "matching company",
+                        "matching companies"
+                    ),
+                    results.needs_verification.len()
+                ),
+            );
+            (
+                business_render::clients_markdown(&results),
+                business_render::clients_context(&results),
+                results.status,
+                results.sources.clone(),
+            )
+        }
+        _ => {
+            recorder.running("research", "Finding contract work");
+            let results = service::find_contracts(
+                state,
+                ContractSearchInput {
+                    run_id: new_id("run"),
+                    query: task.prompt.clone(),
+                    criteria: None,
+                },
+                model,
+                &progress,
+                &cancel,
+            )
+            .await
+            .map_err(|e| Failure::from_error(&e, RunErrorCategory::Task))?;
+            recorder.done(
+                "research",
+                &format!(
+                    "{} · {} to verify",
+                    plural(
+                        results.confirmed.len(),
+                        "confirmed listing",
+                        "confirmed listings"
+                    ),
+                    results.needs_verification.len()
+                ),
+            );
+            (
+                business_render::contracts_markdown(&results),
+                business_render::contracts_context(&results),
+                results.status,
+                results.sources.clone(),
+            )
+        }
+    };
+    recorder.update_context(|c| {
+        for source in &sources {
+            if !c.sources_consulted.contains(source) {
+                c.sources_consulted.push(source.clone());
+            }
+        }
+    });
+    match status {
+        RunStatus::Cancelled => return Ok(Output::cancelled()),
+        RunStatus::Failed | RunStatus::Offline => {
+            recorder.stage(
+                "research",
+                StageStatus::Failed,
+                "No source could be searched",
+            );
+            return Err(Failure::new(
+                RunErrorCategory::Search,
+                format!("{} {}", career_search::UNAVAILABLE, table),
+            ));
+        }
+        RunStatus::NoVerifiedMatches => {
+            recorder.skipped("answer", "Nothing verified to summarize");
+            return Ok(Output {
+                finish: Finish::Complete,
+                text: table,
+                report: None,
+            });
+        }
+        _ => {}
+    }
+    recorder.running("answer", "Writing the summary from the results");
+    let request = crate::llm::ChatRequest {
+        system: Some(format!(
+            "{} This request is a scheduled task running automatically. {}",
+            crate::services::chat::network_prompt(started_at),
+            business_render::ANSWER_RULES
+        )),
+        turns: vec![Turn {
+            role: MessageRole::User,
+            content: format!("{}\n\n{context}", task.prompt),
+        }],
+        max_output_tokens,
+        ..Default::default()
+    };
+    let mut answer = String::new();
+    let mut on_delta = |delta: &str| answer.push_str(delta);
+    let outcome = state
+        .llm
+        .stream_chat(
+            endpoint,
+            &task.model.model_id,
+            &request,
+            cancel,
+            &mut on_delta,
+        )
+        .await;
+    providers::note_outcome(state, &task.model.provider_id, &outcome);
+    let mut text = table;
+    match outcome {
+        Ok(Finish::Cancelled) => return Ok(Output::cancelled()),
+        Ok(_) => {
+            recorder.done("answer", "Summary written from the results");
+            text.push_str("\n\n");
+            text.push_str(answer.trim());
+        }
+        Err(error) => {
+            recorder.stage(
+                "answer",
+                StageStatus::Failed,
+                "The summary could not be written",
+            );
+            text.push_str(&format!(
+                "\n\n_ReMa could not add a summary: {}_",
+                runs::safe_message(&error.to_string())
+            ));
+        }
+    }
+    Ok(Output {
+        finish: Finish::Complete,
+        text,
+        report: None,
+    })
+}
+
 async fn run_task(
     state: &AppState,
     task: &TaskRow,
@@ -500,6 +698,28 @@ async fn run_task(
     let max_output_tokens =
         providers::max_output_tokens(state, &task.model).map_err(model_access)?;
     match task.kind {
+        TaskKind::Prompt
+            if matches!(
+                crate::business::tools::detect(&task.prompt),
+                Some(
+                    crate::business::tools::Intent::Clients
+                        | crate::business::tools::Intent::Contracts
+                )
+            ) =>
+        {
+            // Recurring Business research the user asked for (B26): one
+            // independent output per run; nothing joins the pipeline.
+            business_task(
+                state,
+                task,
+                started_at,
+                recorder,
+                &endpoint,
+                max_output_tokens,
+                cancel,
+            )
+            .await
+        }
         TaskKind::Prompt if crate::network::planner::detect(&task.prompt).is_some() => {
             // Company, people and hiring research (e.g. tracking a company):
             // Network Connect researches first, as in chat (NC §42).

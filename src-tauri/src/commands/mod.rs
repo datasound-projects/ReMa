@@ -9,6 +9,7 @@ pub mod agents;
 pub mod analytics;
 pub mod applications;
 pub mod browser;
+pub mod business;
 pub mod chat;
 pub mod connectors;
 pub mod mcp;

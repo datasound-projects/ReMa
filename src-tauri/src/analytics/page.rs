@@ -58,15 +58,34 @@ pub fn is_public(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => is_public_v4(v4),
         IpAddr::V6(v6) => {
-            let first = v6.segments()[0];
+            let s = v6.segments();
+            let first = s[0];
+            let embedded = |hi: u16, lo: u16| {
+                Ipv4Addr::new((hi >> 8) as u8, hi as u8, (lo >> 8) as u8, lo as u8)
+            };
             if let Some(v4) = v6.to_ipv4_mapped() {
                 return is_public_v4(v4);
             }
-            !(v6.is_loopback()
-                || v6.is_unspecified()
-                || v6.is_multicast()
+            if v6.is_loopback() || v6.is_unspecified() {
+                return false;
+            }
+            // Forms that carry an IPv4 address: IPv4-compatible (::a.b.c.d),
+            // NAT64 (64:ff9b::/96) and 6to4 (2002::/16) — judged by the
+            // address they carry.
+            if s[..6].iter().all(|x| *x == 0) {
+                return is_public_v4(embedded(s[6], s[7]));
+            }
+            if s[0] == 0x64 && s[1] == 0xff9b && s[2..6].iter().all(|x| *x == 0) {
+                return is_public_v4(embedded(s[6], s[7]));
+            }
+            if first == 0x2002 {
+                return is_public_v4(embedded(s[1], s[2]));
+            }
+            !(v6.is_multicast()
                 || (first & 0xfe00) == 0xfc00 // unique local
-                || (first & 0xffc0) == 0xfe80) // link local
+                || (first & 0xffc0) == 0xfe80 // link local
+                || (first & 0xffc0) == 0xfec0 // site local (deprecated)
+                || (first == 0x2001 && s[1] == 0x0db8)) // documentation
         }
     }
 }

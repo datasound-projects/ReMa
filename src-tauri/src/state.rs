@@ -63,6 +63,8 @@ pub struct AppState {
     pub career: Arc<crate::career_search::CareerSearch>,
     /// Network Connect's session memory (never written to disk).
     pub network: Arc<crate::network::NetworkSession>,
+    /// Running Business requests (their runs are stored).
+    pub business: Arc<crate::business::BusinessSession>,
 }
 
 #[cfg(test)]
@@ -123,6 +125,7 @@ pub mod testing {
             ),
             career: Default::default(),
             network: Default::default(),
+            business: Default::default(),
         };
         (state, events)
     }

@@ -61,6 +61,64 @@ export const commands = {
 	networkCancel: (runId: string) => __TAURI_INVOKE<boolean>("network_cancel", { runId }),
 	/**  The page's last result this session (nothing is kept on disk). */
 	networkLastResult: () => __TAURI_INVOKE<LastNetworkResult>("network_last_result"),
+	businessOverview: () => __TAURI_INVOKE<BusinessOverview>("business_overview"),
+	businessSaveProfile: (profile: BusinessProfile) => __TAURI_INVOKE<BusinessProfile>("business_save_profile", { profile }),
+	businessCreateOffer: (content: OfferContent, idempotencyKey: string) => __TAURI_INVOKE<Offer>("business_create_offer", { content, idempotencyKey }),
+	businessSaveOfferDraft: (offerId: string, content: OfferContent, expectedRevision: number) => __TAURI_INVOKE<Offer>("business_save_offer_draft", { offerId, content, expectedRevision }),
+	/**
+	 *  Saves the reviewed draft as the next immutable version (the user's
+	 *  explicit review).
+	 */
+	businessReviewOffer: (offerId: string, expectedRevision: number) => __TAURI_INVOKE<Offer>("business_review_offer", { offerId, expectedRevision }),
+	businessArchiveOffer: (offerId: string, archived: boolean, expectedRevision: number) => __TAURI_INVOKE<Offer>("business_archive_offer", { offerId, archived, expectedRevision }),
+	businessDeleteOffer: (offerId: string) => __TAURI_INVOKE<null>("business_delete_offer", { offerId }),
+	businessOfferVersion: (offerId: string, version: number) => __TAURI_INVOKE<OfferContent>("business_offer_version", { offerId, version }),
+	/**
+	 *  A product URL, description or document → a draft offer (or a refresh
+	 *  proposal for an existing one).
+	 */
+	businessDescribeOffer: (input: DescribeInput) => __TAURI_INVOKE<DescribeResult>("business_describe_offer", { input }),
+	businessFindClients: (input: ClientSearchInput) => __TAURI_INVOKE<ClientResults>("business_find_clients", { input }),
+	businessFindContracts: (input: ContractSearchInput) => __TAURI_INVOKE<ContractResults>("business_find_contracts", { input }),
+	businessCancel: (runId: string) => __TAURI_INVOKE<boolean>("business_cancel", { runId }),
+	businessLastResults: () => __TAURI_INVOKE<LastBusinessResults>("business_last_results"),
+	businessRuns: (limit: number) => __TAURI_INVOKE<BusinessRun[]>("business_runs", { limit }),
+	businessPipeline: () => __TAURI_INVOKE<Pipeline>("business_pipeline"),
+	businessSaveProspect: (runId: string, companyKey: string, useCase: string | null) => __TAURI_INVOKE<SavedOpportunity>("business_save_prospect", { runId, companyKey, useCase }),
+	businessSaveContract: (runId: string, key: string) => __TAURI_INVOKE<SavedOpportunity>("business_save_contract", { runId, key }),
+	businessCreateOpportunity: (input: ManualOpportunity) => __TAURI_INVOKE<Opportunity>("business_create_opportunity", { input }),
+	businessEditOpportunity: (id: string, edit: OpportunityEdit, expectedRevision: number) => __TAURI_INVOKE<Opportunity>("business_edit_opportunity", { id, edit, expectedRevision }),
+	businessChangeStage: (id: string, change: StageChange) => __TAURI_INVOKE<Opportunity>("business_change_stage", { id, change }),
+	businessRecordActivity: (id: string, activity: NewActivity) => __TAURI_INVOKE<SavedOpportunity>("business_record_activity", { id, activity }),
+	businessDeleteActivity: (id: string, activityId: string) => __TAURI_INVOKE<Opportunity>("business_delete_activity", { id, activityId }),
+	businessDoNotContact: (id: string, reason: string | null) => __TAURI_INVOKE<Opportunity>("business_do_not_contact", { id, reason }),
+	businessSuppressContact: (id: string, contactId: string, reason: string | null) => __TAURI_INVOKE<Opportunity>("business_suppress_contact", { id, contactId, reason }),
+	/**  Lifts a Do-not-contact entry (only ever the user's own action). */
+	businessLiftSuppression: (suppressionId: string) => __TAURI_INVOKE<null>("business_lift_suppression", { suppressionId }),
+	businessDeleteContact: (id: string, contactId: string, expectedRevision: number) => __TAURI_INVOKE<Opportunity>("business_delete_contact", { id, contactId, expectedRevision }),
+	businessDeleteOpportunity: (id: string) => __TAURI_INVOKE<null>("business_delete_opportunity", { id }),
+	businessRefreshListing: (id: string) => __TAURI_INVOKE<Opportunity>("business_refresh_listing", { id }),
+	businessReassess: (id: string, runId: string, offerVersion: number | null) => __TAURI_INVOKE<Opportunity>("business_reassess", { id, runId, offerVersion }),
+	businessRedactions: () => __TAURI_INVOKE<Redaction[]>("business_redactions"),
+	businessCreatePlan: (input: NewPlan) => __TAURI_INVOKE<GtmPlan>("business_create_plan", { input }),
+	businessSavePlan: (id: string, update: PlanUpdate) => __TAURI_INVOKE<GtmPlan>("business_save_plan", { id, update }),
+	businessDeletePlan: (id: string) => __TAURI_INVOKE<null>("business_delete_plan", { id }),
+	businessResearchPlan: (id: string, part: PlanPart, runId: string) => __TAURI_INVOKE<GtmPlan>("business_research_plan", { id, part, runId }),
+	businessTargetAccounts: (planId: string, segmentId: string, runId: string) => __TAURI_INVOKE<GtmPlan>("business_target_accounts", { planId, segmentId, runId }),
+	/**
+	 *  A positioning draft from reviewed capabilities (never changes the
+	 *  offer).
+	 */
+	businessPositioning: (planId: string, segmentId: string, alternative: number | null) => __TAURI_INVOKE<string>("business_positioning", { planId, segmentId, alternative }),
+	businessCreateDraft: (request: DraftRequest, runId: string) => __TAURI_INVOKE<Draft>("business_create_draft", { request, runId }),
+	businessUpdateDraft: (id: string, subject: string | null, body: string, expectedRevision: number) => __TAURI_INVOKE<Draft>("business_update_draft", { id, subject, body, expectedRevision }),
+	businessDeleteDraft: (id: string) => __TAURI_INVOKE<null>("business_delete_draft", { id }),
+	businessCreateExperiment: (input: NewExperiment) => __TAURI_INVOKE<Experiment>("business_create_experiment", { input }),
+	businessUpdateExperiment: (id: string, content: ExperimentContent, expectedRevision: number) => __TAURI_INVOKE<Experiment>("business_update_experiment", { id, content, expectedRevision }),
+	businessSetExperimentStatus: (id: string, status: ExperimentStatus, expectedRevision: number) => __TAURI_INVOKE<Experiment>("business_set_experiment_status", { id, status, expectedRevision }),
+	businessAmendExperiment: (id: string, idempotencyKey: string) => __TAURI_INVOKE<Experiment>("business_amend_experiment", { id, idempotencyKey }),
+	businessDeleteExperiment: (id: string) => __TAURI_INVOKE<null>("business_delete_experiment", { id }),
+	businessExperimentMetrics: (id: string) => __TAURI_INVOKE<ExperimentMetrics>("business_experiment_metrics", { id }),
 	getApplications: () => __TAURI_INVOKE<ApplicationsOverview>("get_applications"),
 	/**
 	 *  The in-app calendar: events of the connected calendars between `start`
@@ -274,6 +332,8 @@ export const events = {
 	analyticsChanged: makeEvent<AnalyticsChanged>("analytics-changed"),
 	applicationsChanged: makeEvent<ApplicationsChanged>("applications-changed"),
 	browserChanged: makeEvent<BrowserChanged>("browser-changed"),
+	businessChanged: makeEvent<BusinessChanged>("business-changed"),
+	businessProgress: makeEvent<BusinessProgress>("business-progress"),
 	chatEvent: makeEvent<ChatEvent>("chat-event"),
 	connectorsChanged: makeEvent<ConnectorsChanged>("connectors-changed"),
 	conversationsChanged: makeEvent<ConversationsChanged>("conversations-changed"),
@@ -288,6 +348,22 @@ export const events = {
 };
 
 /* Types */
+export type Activity = {
+	id: string,
+	opportunityId: string,
+	kind: ActivityType,
+	person: string | null,
+	occurredAt: number,
+	recordedAt: number,
+	/**  Always user reported in this version. */
+	source: string,
+	detail: string | null,
+	fromStage: PipelineStage | null,
+	toStage: PipelineStage | null,
+	experimentId: string | null,
+	variant: string | null,
+};
+
 /**  What an activity entry records. */
 export type ActivityKind = 
 /**  A tool on one of the user's MCP servers. */
@@ -316,6 +392,8 @@ export type ActivitySource = {
 	title: string,
 	url: string,
 };
+
+export type ActivityType = "contact" | "reply" | "positive_reply" | "meeting_held" | "proposal_sent" | "won" | "lost" | "stage_change" | "note";
 
 /**  The outcome of adding several files at once. */
 export type AddDocumentsResult = {
@@ -349,6 +427,30 @@ export type AgentInput = {
 
 /**  Agents were created, changed or deleted. */
 export type AgentsChanged = null;
+
+export type Alternative = {
+	name: string,
+	/**
+	 *  "direct product", "adjacent product", "internal development",
+	 *  "agency or service", "doing nothing / manual process".
+	 */
+	kind: string,
+	summary: string,
+	/**  As published, with its billing unit; "unknown" when not found. */
+	pricing: string,
+	evidence: SourceNote[],
+	unknowns: string[],
+};
+
+export type Amount = {
+	/**  "12,000", "700–850". */
+	value: string,
+	currency: string | null,
+	/**  "per day", "one-time", "per year". */
+	basis: string,
+	/**  "advertised", "estimate", "user target", "negotiated". */
+	source: string,
+};
 
 /**  Job data or research changed (ingestion, background details, research). */
 export type AnalyticsChanged = null;
@@ -469,6 +571,20 @@ export type ApprovalDecision = "allow" |
 /**  Allow this tool for the rest of the conversation (until ReMa quits). */
 "allow_for_chat" | "deny";
 
+export type Assignment = 
+/**  Randomized by account, frozen before contact. */
+"random_by_account" | "manual" | "sequential";
+
+/**
+ *  Who might care about the offer at a company (B11). Never purchase
+ *  authority by title alone.
+ */
+export type Authority = 
+/**  A source states the person is responsible for this area. */
+"verified_responsibility" | 
+/**  Their function matches the offer's buyer role. */
+"likely_functional_contact" | "unknown_authority";
+
 /**  What ReMa Auto Fill did. Nothing is ever submitted. */
 export type AutofillResult = {
 	filled: FilledField[],
@@ -525,6 +641,68 @@ export type BrowserStatus = {
 export type BuiltinTask = 
 /**  "Job Mail & Interview Sync". */
 "job_mail_sync";
+
+/**  Business records changed (offers, pipeline, plans). */
+export type BusinessChanged = null;
+
+export type BusinessOverview = {
+	profile: BusinessProfile,
+	offers: Offer[],
+	plans: GtmPlan[],
+	experiments: Experiment[],
+	drafts: Draft[],
+};
+
+/**
+ *  What the user is prepared to sell, beyond any one offer. Every field is
+ *  optional; research works without them.
+ */
+export type BusinessProfile = {
+	businessName: string,
+	website: string,
+	serviceArea: string,
+	languages: string[],
+	capacity: string,
+	availability: string,
+	constraints: string,
+	updatedAt: number,
+};
+
+/**  A status line of a running Business request (for the page). */
+export type BusinessProgress = {
+	runId: string,
+	text: string,
+};
+
+/**  A research run as the page lists it (its result is loaded separately). */
+export type BusinessRun = {
+	id: string,
+	kind: RunKind,
+	offer: OfferRef | null,
+	query: string,
+	status: RunStatus,
+	/**  "OpenAI · gpt-…" (never a key or token). */
+	model: string | null,
+	sources: string[],
+	failures: string[],
+	startedAt: number,
+	finishedAt: number | null,
+};
+
+export type BuyerContact = {
+	/**  A named person when a permitted source names one. */
+	name: string | null,
+	title: string | null,
+	/**  The buyer role this contact stands for. */
+	role: string,
+	authority: Authority,
+	reason: string,
+	profileUrl: string | null,
+	/**  The company's own contact page when no person could be named. */
+	contactPage: string | null,
+	sourceUrl: string | null,
+	suppressed: boolean,
+};
 
 /**  One entry of the in-app calendar. */
 export type CalendarEntry = {
@@ -660,6 +838,21 @@ export type CellState = "matched" | "partial" | "missing" | "unknown" | "not_req
 /**  ReMa has no requirement data for this job. */
 "no_data";
 
+export type ChannelPlan = {
+	name: string,
+	audience: string,
+	why: string,
+	entryPoint: string,
+	/**  Access or promotion rules when retrievable; "unknown" otherwise. */
+	rules: string,
+	effort: string,
+	costs: string,
+	unknowns: string[],
+	test: string,
+	available: boolean,
+	evidence: SourceNote[],
+};
+
 /**  Streaming updates for an assistant message, emitted by the backend. */
 export type ChatEvent = 
 /**  New text appended to a streaming message. */
@@ -676,11 +869,95 @@ export type CheckResult = {
 	detail: string,
 };
 
+/**  One statement about the offer, with its source. */
+export type Claim = {
+	text: string,
+	status: FieldStatus,
+	sourceUrl: string | null,
+	retrievedAt: number | null,
+	/**  The words on the page that support it (data, never instructions). */
+	excerpt: string | null,
+	/**  How to read it ("a marketing claim, not a proven result"). */
+	note: string | null,
+};
+
 export type ClassCount = {
 	class: FrequencyClass,
 	requirements: number,
 	/**  Lower bound of the class in percent. */
 	threshold: number | null,
+};
+
+export type ClientCriteria = {
+	locations: Locations,
+	industries: string[],
+	minEmployees: number | null,
+	maxEmployees: number | null,
+	/**  Companies or industries to leave out. */
+	exclusions: string[],
+	limit: number | null,
+};
+
+export type ClientProspect = {
+	companyKey: string,
+	companyName: string,
+	website: string | null,
+	locations: string[],
+	industry: string | null,
+	size: string | null,
+	whyItFits: string[],
+	/**  What was observed (a posting, a technology), never read as intent. */
+	observedSignals: string[],
+	/**  Always "none observed" unless the user records otherwise. */
+	verifiedBuyingIntent: string,
+	/**  ReMa does not decide whether contacting is lawful or welcome. */
+	permissionToContact: string,
+	contacts: BuyerContact[],
+	assessment: FitAssessment,
+	missing: string[],
+	suppressed: boolean,
+	/**  The saved opportunity, when this prospect is in the pipeline. */
+	opportunityId: string | null,
+	links: string[],
+};
+
+export type ClientResults = {
+	runId: string,
+	status: RunStatus,
+	offer: OfferRef,
+	criteria: ClientCriteria,
+	/**  Plain-words ICP hypothesis this search used. */
+	icp: string[],
+	confirmed: ClientProspect[],
+	/**  Required facts unknown: to verify. */
+	needsVerification: ClientProspect[],
+	/**  Hard criteria failed (kept apart, never mixed in). */
+	excluded: ClientProspect[],
+	notes: string[],
+	sources: string[],
+	failures: string[],
+	retrievedAt: number,
+	policyVersion: string,
+	scoringPolicy: string,
+};
+
+export type ClientSearchInput = {
+	runId: string,
+	offerId: string,
+	/**  A reviewed version (the newest when not given). */
+	offerVersion: number | null,
+	query: string,
+	criteria: ClientCriteria,
+	/**  Look for named, permitted professional contacts (slower). */
+	findPeople: boolean,
+};
+
+export type CohortEntry = {
+	accountKey: string,
+	accountName: string,
+	opportunityId: string | null,
+	/**  Frozen once the experiment runs. */
+	variant: string | null,
 };
 
 /**
@@ -711,6 +988,10 @@ export type Company = {
 	evidence: Evidence[],
 	lastVerifiedAt: number,
 };
+
+export type Comparison = 
+/**  Strictly above. */
+"above" | "at_least";
 
 export type Confidence = "low" | "medium" | "high";
 
@@ -833,6 +1114,104 @@ export type ConnectorsOverview = {
 	background: BackgroundSettings,
 };
 
+/**  A person or role at the buyer (permitted public professional data only). */
+export type ContactRef = {
+	id: string,
+	name: string | null,
+	title: string | null,
+	role: string,
+	profileUrl: string | null,
+	sourceUrl: string | null,
+};
+
+export type ContractCriteria = {
+	skills: string,
+	locations: Locations,
+	remoteOk: boolean,
+	minRate: number | null,
+	rateComparison: Comparison,
+	currency: string | null,
+	rateUnit: RateUnit,
+	/**
+	 *  The user's own hours-per-day basis; without it hourly and daily
+	 *  rates are not compared.
+	 */
+	hoursPerDay: number | null,
+	durationMinMonths: number | null,
+	durationMaxMonths: number | null,
+	postedWithinDays: number | null,
+};
+
+export type ContractResult = {
+	key: string,
+	title: string,
+	company: string | null,
+	location: string | null,
+	url: string,
+	source: string,
+	postedAt: number | null,
+	verified: string,
+	terms: ContractTerms,
+	status: MatchStatus,
+	/**  Why it is not confirmed (each criterion). */
+	reasons: string[],
+	scope: string | null,
+	opportunityId: string | null,
+};
+
+export type ContractResults = {
+	runId: string,
+	status: RunStatus,
+	criteria: ContractCriteria,
+	/**
+	 *  The criteria as ReMa applies them ("rate strictly above EUR 700 per
+	 *  day").
+	 */
+	normalized: string[],
+	confirmed: ContractResult[],
+	needsVerification: ContractResult[],
+	notMatching: ContractResult[],
+	notes: string[],
+	sources: string[],
+	failures: string[],
+	retrievedAt: number,
+};
+
+export type ContractSearchInput = {
+	runId: string,
+	query: string,
+	/**  The edited criteria; read from the query when not given. */
+	criteria: ContractCriteria | null,
+};
+
+/**  A contract's terms as the listing states them. */
+export type ContractTerms = {
+	engagement: Engagement,
+	rateMin: number | null,
+	rateMax: number | null,
+	/**  "up to" states a ceiling only. */
+	rateIsCeiling: boolean,
+	currency: string | null,
+	rateUnit: RateUnit | null,
+	/**  As written ("EUR 700–850 per day"). */
+	rateText: string | null,
+	durationMin: number | null,
+	durationMax: number | null,
+	durationUnit: DurationUnit | null,
+	durationText: string | null,
+	extensionPossible: boolean | null,
+	start: string | null,
+	workload: string | null,
+	workMode: string | null,
+	/**  Stated eligibility ("EU only", "Germany"): unknown stays empty. */
+	eligibility: string[],
+	agency: string | null,
+	/**  None: the end client is not disclosed. */
+	endClient: string | null,
+	skills: string[],
+	languages: string[],
+};
+
 export type Conversation = {
 	id: number,
 	title: string,
@@ -916,6 +1295,19 @@ export type Criteria = {
 	stages: Stage[],
 };
 
+/**  One soft criterion of the fit policy (B10). */
+export type CriterionScore = {
+	id: string,
+	label: string,
+	weight: number | null,
+	applicable: boolean,
+	/**  0..1, or None when unknown (unknown is not zero). */
+	value: number | null,
+	reason: string,
+	/**  Indexes into the assessment's evidence. */
+	evidence: number[],
+};
+
 /**  A field the user defines, e.g. "Research profile" → URL. */
 export type CustomField = {
 	label: string,
@@ -992,6 +1384,33 @@ export type DatasetSummary = {
 	notes: string[],
 };
 
+/**
+ *  What to describe an offer from (B4): a public URL, pasted text or a
+ *  document the user picks (read like Profile documents).
+ */
+export type DescribeInput = {
+	name: string,
+	kind: OfferKind | null,
+	url: string | null,
+	text: string | null,
+	documentPath: string | null,
+	/**  Update this offer's draft instead of creating a new offer. */
+	offerId: string | null,
+	runId: string,
+	idempotencyKey: string | null,
+};
+
+export type DescribeResult = {
+	runId: string,
+	status: RunStatus,
+	offer: Offer,
+	pages: IngestPage[],
+	/**  Required or useful information still missing. */
+	missing: string[],
+	notes: string[],
+	diff: OfferDiff | null,
+};
+
 /**  Progress of the background job-details reader for one job. */
 export type DetailsStatus = "pending" | "done" | "failed" | "skipped";
 
@@ -1005,6 +1424,39 @@ export type DocumentBlock = { type: "heading"; level: number; text: string } | {
 export type DocumentFormat = "pdf" | "docx" | "text" | "markdown" | "png" | "jpeg" | "webp";
 
 export type DocumentKind = "cv" | "certificate" | "portfolio" | "other";
+
+/**  A local message draft. There is no sending action. */
+export type Draft = {
+	id: string,
+	opportunityId: string | null,
+	planId: string | null,
+	experimentId: string | null,
+	variant: string | null,
+	offer: OfferRef | null,
+	/**  A named person or a role ("Head of Operations"). */
+	recipient: string,
+	channel: string,
+	subject: string | null,
+	body: string,
+	evidence: SourceNote[],
+	createdAt: number,
+	updatedAt: number,
+	revision: number,
+};
+
+export type DraftRequest = {
+	opportunityId: string | null,
+	planId: string | null,
+	experimentId: string | null,
+	variant: string | null,
+	/**  A contact on the opportunity (its id), or a role to address. */
+	contactId: string | null,
+	role: string | null,
+	channel: string,
+	idempotencyKey: string,
+};
+
+export type DurationUnit = "week" | "month";
 
 export type Education = {
 	school: string,
@@ -1027,8 +1479,12 @@ export type EndCondition = { kind: "never" } |
 /**  Stop after this many scheduled runs. */
 { kind: "after_runs"; count: number };
 
+export type Engagement = "freelance" | "contract" | "b2b" | "interim" | "project" | "fixed_term_employee" | "permanent_employee" | 
+/**  Salaried employment whose term is not stated. */
+"employment" | "needs_verification";
+
 /**  Stable, machine-readable error kind sent to the frontend. */
-export type ErrorCode = "validation" | "not_found" | "io" | "database" | "configuration" | "authentication" | "provider" | "billing" | "network" | "permission" | "internal";
+export type ErrorCode = "validation" | "not_found" | "io" | "database" | "configuration" | "authentication" | "provider" | "billing" | "network" | "permission" | "conflict" | "internal";
 
 /**  Wire format of every backend error. */
 export type ErrorPayload = {
@@ -1080,6 +1536,57 @@ export type Experience = {
 	description: string,
 };
 
+export type Experiment = {
+	id: string,
+	planId: string,
+	offer: OfferRef,
+	segmentId: string | null,
+	version: number,
+	status: ExperimentStatus,
+	content: ExperimentContent,
+	/**  When variants and assignments were frozen (before any contact). */
+	frozenAt: number | null,
+	createdAt: number,
+	updatedAt: number,
+	revision: number,
+};
+
+export type ExperimentContent = {
+	hypothesis: string,
+	channel: string,
+	variants: Variant[],
+	assignment: Assignment,
+	cohort: CohortEntry[],
+	/**  "reply_rate", "positive_reply_rate", "meeting_rate", … */
+	primaryMetric: string,
+	successThreshold: string | null,
+	plannedStart: number | null,
+	plannedEnd: number | null,
+	observationDays: number,
+	sampleTarget: number | null,
+	budget: string | null,
+	effortBudget: string | null,
+	stopConditions: string[],
+	exclusions: string[],
+	outcomeSummary: string | null,
+	limitations: string[],
+};
+
+export type ExperimentMetrics = {
+	experimentId: string,
+	windowStart: number | null,
+	windowEnd: number | null,
+	overall: VariantMetrics,
+	variants: VariantMetrics[],
+	/**  "User-reported activity", "small cohort", "non-random assignment". */
+	limitations: string[],
+	/**  Activities not counted and why. */
+	unattributed: string[],
+	computedAt: number,
+};
+
+export type ExperimentStatus = "draft" | "planned" | "running" | "paused" | "completed" | "cancelled";
+
 export type FacetValue = {
 	value: string,
 	count: number,
@@ -1097,6 +1604,15 @@ export type Facets = {
 	certifications: FacetValue[],
 	currencies: FacetValue[],
 };
+
+/**  Where a value stands (B4). */
+export type FieldStatus = 
+/**  Seen on a source; not yet reviewed. */
+"observed" | "user_confirmed" | 
+/**  An assumption to test, not a fact. */
+"hypothesis" | "unknown" | 
+/**  Sources (or the user and a source) disagree. */
+"conflicting";
 
 /**  A file upload field on the page. */
 export type FileField = {
@@ -1152,6 +1668,24 @@ export type FilterOp =
 /**  The value is known (e.g. "has a salary"). */
 "known" | "unknown";
 
+export type FitAssessment = {
+	id: string,
+	companyKey: string,
+	companyName: string,
+	offer: OfferRef,
+	policyVersion: string,
+	hard: HardCheck[],
+	criteria: CriterionScore[],
+	/**  Sum of the weights of criteria with a known value (0..1). */
+	coverage: number | null,
+	/**  0..100; None when coverage is zero. */
+	score: number | null,
+	/**  Whether the score may be shown (coverage at or above the threshold). */
+	scoreShown: boolean,
+	evidence: SourceNote[],
+	createdAt: number,
+};
+
 export type FrequencyClass = "very_common" | "common" | "occasional" | "rare";
 
 export type GapMatrix = {
@@ -1176,9 +1710,38 @@ export type GapPriority = {
 	reasons: string[],
 };
 
+export type GtmPlan = {
+	id: string,
+	offer: OfferRef,
+	name: string,
+	geography: string,
+	content: PlanContent,
+	createdAt: number,
+	updatedAt: number,
+	revision: number,
+};
+
+export type HardCheck = {
+	name: string,
+	result: HardResult,
+	detail: string,
+};
+
+export type HardResult = "pass" | "fail" | "unknown";
+
 export type HealthState = "healthy" | "degraded" | "temporarily_unavailable";
 
 export type Importance = "required" | "preferred";
+
+/**  One page ReMa tried to read for an offer. */
+export type IngestPage = {
+	url: string,
+	title: string | null,
+	status: PageStatus,
+	detail: string | null,
+	characters: number,
+	retrievedAt: number,
+};
 
 export type IntervalUnit = "minutes" | "hours";
 
@@ -1295,6 +1858,12 @@ export type Language = {
 	level: string,
 };
 
+/**  The page's last results (kept with their runs). */
+export type LastBusinessResults = {
+	clients: ClientResults | null,
+	contracts: ContractResults | null,
+};
+
 /**  The page's last result this session, if any. */
 export type LastNetworkResult = {
 	result: NetworkResult | null,
@@ -1385,10 +1954,40 @@ export type LinkedRun = {
 	jobs: number,
 };
 
+/**  Places a search covers: within a list, any may match (OR). */
+export type Locations = {
+	/**
+	 *  Canonical English country names; "DACH" expands to Germany,
+	 *  Austria and Switzerland.
+	 */
+	countries: string[],
+	regions: string[],
+	cities: string[],
+	/**
+	 *  A radius needs reliable coordinates ReMa does not have: stated,
+	 *  never applied by guessing.
+	 */
+	radiusKm: number | null,
+};
+
+/**  An opportunity the user adds by hand. */
+export type ManualOpportunity = {
+	kind: OpportunityKind,
+	name: string,
+	companyName: string | null,
+	offerId: string | null,
+	useCase: string,
+	sourceUrl: string | null,
+	amount: Amount | null,
+	idempotencyKey: string,
+};
+
 /**  How the user's Profile relates to one requirement. */
 export type MatchState = "matched" | "partial" | "missing" | 
 /**  The Profile neither shows nor rules out the requirement. */
 "unknown";
+
+export type MatchStatus = "confirmed" | "needs_verification" | "not_matching";
 
 export type MatrixRow = {
 	jobId: number,
@@ -1397,6 +1996,9 @@ export type MatrixRow = {
 	coverage: number | null,
 	cells: CellState[],
 };
+
+/**  The user's own choice; never inferred from marketing language. */
+export type Maturity = "not_stated" | "prototype" | "pilot_ready" | "generally_available";
 
 /**  Authentication for remote servers. */
 export type McpAuth = "none" | 
@@ -1586,6 +2188,35 @@ export type NetworkResult = {
 	policyVersion: string,
 };
 
+/**  Actual activity the user reports (B23). */
+export type NewActivity = {
+	kind: ActivityType,
+	person: string | null,
+	occurredAt: number,
+	detail: string | null,
+	/**
+	 *  The experiment this contact belongs to; the variant comes from the
+	 *  frozen assignment, never from the caller.
+	 */
+	experimentId: string | null,
+	idempotencyKey: string,
+};
+
+export type NewExperiment = {
+	planId: string,
+	segmentId: string | null,
+	content: ExperimentContent,
+	idempotencyKey: string,
+};
+
+export type NewPlan = {
+	offerId: string,
+	offerVersion: number | null,
+	name: string,
+	geography: string,
+	idempotencyKey: string,
+};
+
 export type NotificationItem = {
 	id: number,
 	kind: string,
@@ -1599,7 +2230,137 @@ export type NotificationItem = {
 /**  A notification was added or read. */
 export type NotificationsChanged = null;
 
+export type Offer = {
+	id: string,
+	name: string,
+	kind: OfferKind,
+	/**  The newest reviewed version (None until reviewed). */
+	currentVersion: number | null,
+	/**  The content being edited or reviewed. */
+	draft: OfferContent | null,
+	/**  The newest reviewed content. */
+	reviewed: OfferContent | null,
+	reviewedAt: number | null,
+	archived: boolean,
+	createdAt: number,
+	updatedAt: number,
+	revision: number,
+};
+
+/**  An offer's content (one version, or the draft under review). */
+export type OfferContent = {
+	name: string,
+	kind: OfferKind,
+	maturity: Maturity,
+	/**  What it does. */
+	summary: Claim,
+	problem: Claim,
+	outcomes: Claim[],
+	features: Claim[],
+	useCases: Claim[],
+	customerTypes: Claim[],
+	buyerRoles: Claim[],
+	pricing: PricePoint[],
+	deliveryModel: Claim,
+	geography: Claim[],
+	languages: Claim[],
+	requirements: Claim[],
+	integrations: Claim[],
+	deploymentConstraints: Claim[],
+	exclusions: Claim[],
+	/**
+	 *  Claims the user rejected (kept, so a refresh does not bring them
+	 *  back as new).
+	 */
+	unsupportedClaims: Claim[],
+	limitations: Claim[],
+	websiteUrls: string[],
+};
+
+/**
+ *  What a refresh found compared with the draft (B5): a proposal, never
+ *  an overwrite.
+ */
+export type OfferDiff = {
+	/**  "features: Salesforce integration". */
+	added: string[],
+	/**  Claims from the website that the pages no longer show. */
+	notFound: string[],
+	/**  The website now disagrees with what you confirmed. */
+	conflicts: string[],
+	/**
+	 *  Claims you rejected earlier that the website still makes (kept
+	 *  rejected).
+	 */
+	stillRejected: string[],
+};
+
+export type OfferKind = "service" | "digital_product" | "hybrid";
+
+/**  "Offer: Support Workspace v2". */
+export type OfferRef = {
+	offerId: string,
+	version: number,
+	name: string,
+};
+
+export type Opportunity = {
+	id: string,
+	kind: OpportunityKind,
+	name: string,
+	companyKey: string | null,
+	/**  None: the end client is not disclosed. */
+	companyName: string | null,
+	offer: OfferRef | null,
+	canonicalJobId: string | null,
+	sourceUrl: string | null,
+	useCase: string,
+	stage: PipelineStage,
+	archived: boolean,
+	doNotContact: boolean,
+	contacts: ContactRef[],
+	evidence: SourceNote[],
+	amount: Amount | null,
+	contract: ContractTerms | null,
+	/**  "open", "closed", "not reachable" (for saved listings). */
+	listingStatus: string | null,
+	nextStep: string,
+	notes: string,
+	createdAt: number,
+	updatedAt: number,
+	lastResearchedAt: number | null,
+	lastCommercialActivityAt: number | null,
+	revision: number,
+	/**  The latest fit assessment (clients). */
+	assessment: FitAssessment | null,
+	assessments: number,
+	activities: Activity[],
+};
+
+/**
+ *  The fields a user edits (B24): everything else is research-owned or
+ *  changes through its own action (stage, activity, do-not-contact).
+ */
+export type OpportunityEdit = {
+	name: string,
+	useCase: string,
+	nextStep: string,
+	notes: string,
+	amount: Amount | null,
+	archived: boolean,
+};
+
+export type OpportunityKind = "product" | "service" | "contract";
+
 export type PageSize = "a4" | "letter";
+
+export type PageStatus = "read" | 
+/**  Read up to ReMa's size limit. */
+"truncated" | 
+/**  robots.txt or ReMa's network policy does not allow it. */
+"blocked" | "failed" | 
+/**  Outside the product's own site (or redirected there). */
+"out_of_scope";
 
 export type PermissionView = {
 	capability: Capability,
@@ -1648,6 +2409,15 @@ export type Person = {
 	caveat: string | null,
 };
 
+export type Pipeline = {
+	opportunities: Opportunity[],
+	/**  Per stage, archived excluded. */
+	counts: ([PipelineStage, number])[],
+	suppressions: Suppression[],
+};
+
+export type PipelineStage = "new_lead" | "qualified" | "contacted" | "discussion" | "proposal" | "won" | "lost";
+
 export type PipelineStatus = {
 	jobs: number,
 	runs: number,
@@ -1657,6 +2427,29 @@ export type PipelineStatus = {
 	useModel: boolean,
 	/**  The model that reads descriptions, if one is set up. */
 	model: string | null,
+};
+
+export type PlanContent = {
+	segments: Segment[],
+	alternatives: Alternative[],
+	/**  The positioning draft (never changes the offer's capabilities). */
+	positioning: string,
+	/**  Differentiation the user claims but has not tested. */
+	untestedClaims: string[],
+	channels: ChannelPlan[],
+	/**  Target accounts from Find Clients (company keys and names). */
+	targetAccounts: TargetAccount[],
+	notes: string[],
+};
+
+/**  Which part of a plan to research. */
+export type PlanPart = "segments" | "alternatives" | "channels";
+
+export type PlanUpdate = {
+	name: string,
+	geography: string,
+	content: PlanContent,
+	expectedRevision: number,
 };
 
 /**  Portfolio documents were created, changed or deleted. */
@@ -1737,6 +2530,20 @@ export type PortfolioStart =
 "blank" | 
 /**  A one-time copy of the Custom Profile and credentials. */
 "custom_profile";
+
+export type PricePoint = {
+	/**  "49", "700–900", "from 1,200". */
+	amount: string,
+	currency: string | null,
+	unit: PriceUnit,
+	claim: Claim,
+};
+
+/**
+ *  How a price is billed. A monthly subscription and a daily rate are
+ *  never compared as if they were the same (B3).
+ */
+export type PriceUnit = "hourly" | "daily" | "project" | "seat_month" | "organization_month" | "annual" | "one_time" | "custom_quote";
 
 export type PriorityLevel = "high" | "medium" | "low";
 
@@ -1944,6 +2751,17 @@ export type RankedJob = {
 	details: DetailsStatus,
 };
 
+/**  numerator / denominator, None when the denominator is zero (B23). */
+export type Rate = {
+	numerator: number,
+	denominator: number,
+	value: number | null,
+	/**  "3 / 20 (15%)" or "Not available". */
+	display: string,
+};
+
+export type RateUnit = "hour" | "day" | "month" | "project";
+
 export type Readiness = 
 /**  Searching works (ReMa's own job sources need no setup). */
 "ready" | 
@@ -1953,6 +2771,15 @@ export type Readiness =
 "error" | 
 /**  Turned off. */
 "disabled";
+
+/**  A record that data was removed, without the removed data (B29). */
+export type Redaction = {
+	id: string,
+	opportunityId: string | null,
+	kind: string,
+	detail: string,
+	createdAt: number,
+};
 
 /**  A file that could not be added, and why. */
 export type RejectedFile = {
@@ -2160,6 +2987,8 @@ export type RunErrorCategory =
 /**  The task cannot run as it is set up. */
 "task" | "internal";
 
+export type RunKind = "offer_ingest" | "clients" | "contracts" | "gtm";
+
 export type RunOutput = {
 	id: number,
 	kind: RunOutputKind,
@@ -2203,6 +3032,9 @@ export type RunProgressEvent = {
 /**  How a search run reached ReMa. */
 export type RunSource = "chat" | "task" | "manual" | "tool";
 
+/**  Distinguishable outcomes (B27): a failure is never a zero-result search. */
+export type RunStatus = "queued" | "running" | "complete" | "partial" | "no_verified_matches" | "needs_review" | "capability_unavailable" | "offline" | "failed" | "cancelled";
+
 export type SalaryCoverage = {
 	/**  Jobs stating a salary. */
 	known: number,
@@ -2210,6 +3042,12 @@ export type SalaryCoverage = {
 	comparable: number,
 	/**  Currency salary comparisons use. */
 	currency: string | null,
+};
+
+export type SavedOpportunity = {
+	opportunity: Opportunity,
+	/**  False when the opportunity already existed (saved again). */
+	created: boolean,
 };
 
 /**
@@ -2270,6 +3108,30 @@ export type ScopeKind =
 "all" | "searches" | "jobs";
 
 export type SectionKind = "summary" | "experience" | "projects" | "education" | "skills" | "languages" | "certifications" | "links" | "custom";
+
+export type Segment = {
+	id: string,
+	name: string,
+	organizationType: string,
+	geography: string,
+	sizeBand: string,
+	useCase: string,
+	painHypothesis: string,
+	prerequisites: string[],
+	buyerRoles: string[],
+	likelyObjections: string[],
+	observableSignals: string[],
+	disqualifiers: string[],
+	supportingEvidence: SourceNote[],
+	counterevidence: SourceNote[],
+	unknowns: string[],
+	validationQuestions: string[],
+	status: SegmentStatus,
+	/**  Chosen by the user for target-account discovery. */
+	selected: boolean,
+};
+
+export type SegmentStatus = "hypothesis" | "under_test" | "supported_by_observations" | "rejected";
 
 export type SendMessageInput = {
 	/**  `None` starts a new conversation. */
@@ -2378,6 +3240,16 @@ export type SourceHealth = {
 	lastFailureAt: number | null,
 };
 
+/**  A source line behind an assessment. */
+export type SourceNote = {
+	label: string,
+	url: string | null,
+	excerpt: string | null,
+	retrievedAt: number,
+	/**  Supporting or contrary. */
+	contrary: boolean,
+};
+
 export type SourceSummary = {
 	name: string,
 	/**  "API", "Feed", "Page", "Links only". */
@@ -2388,6 +3260,25 @@ export type SourceSummary = {
 };
 
 export type Stage = "companies" | "jobs" | "people" | "connections";
+
+/**  A stage change the user makes. */
+export type StageChange = {
+	to: PipelineStage,
+	/**  Required for moving back, reopening or switching Won/Lost. */
+	reason: string | null,
+	/**
+	 *  What actually happened, when the stage needs it and none is
+	 *  recorded yet (e.g. a meeting for Discussion).
+	 */
+	activity: ActivityType | null,
+	/**  When it happened (not in the future). */
+	occurredAt: number | null,
+	person: string | null,
+	/**  For Won: the accepted value (not money received). */
+	amount: Amount | null,
+	expectedRevision: number,
+	idempotencyKey: string,
+};
 
 /**  What one stage did (shown under the results). */
 export type StageReport = {
@@ -2415,6 +3306,34 @@ export type StateShare = {
 export type Supports = "company_identity" | "company_website" | "company_location" | "company_industry" | "company_size" | "company_hiring" | "job_is_open" | "current_title" | "person_relevance" | 
 /**  The posting names this person (as contact, recruiter or manager). */
 "named_on_posting" | "profile_link" | "relationship";
+
+export type Suppression = {
+	id: string,
+	scope: string,
+	key: string,
+	label: string,
+	reason: string | null,
+	createdAt: number,
+};
+
+export type TargetAccount = {
+	/**  The Find Clients run it came from (saving uses it). */
+	runId: string | null,
+	segmentId: string | null,
+	companyKey: string,
+	companyName: string,
+	why: string,
+	buyerRole: string,
+	contact: string | null,
+	link: string | null,
+	trigger: string | null,
+	angle: string,
+	fit: number | null,
+	coverage: number | null,
+	question: string,
+	opportunityId: string | null,
+	suppressed: boolean,
+};
 
 /**  Create or edit a task. Dates and times are local to `timezone`. */
 export type TaskInput = {
@@ -2598,6 +3517,31 @@ export type UpdateSource = "gmail" | "outlook" | "google_calendar" | "outlook_ca
 "user" | 
 /**  Changed by the assistant with the user's approval. */
 "assistant";
+
+export type Variant = {
+	id: string,
+	label: string,
+	message: string,
+};
+
+export type VariantMetrics = {
+	/**  None: all variants together. */
+	variant: string | null,
+	accountsInCohort: number,
+	accountsContacted: number,
+	accountsReplied: number,
+	accountsPositiveReply: number,
+	accountsMet: number,
+	accountsProposed: number,
+	accountsWon: number,
+	replyRate: Rate,
+	positiveReplyRate: Rate,
+	meetingRate: Rate,
+	proposalRate: Rate,
+	winRate: Rate,
+	/**  People contacted and messages, counted separately (with units). */
+	peopleContacted: number,
+};
 
 /**  `service: None` turns the service off (and removes its key). */
 export type WebSearchInput = {

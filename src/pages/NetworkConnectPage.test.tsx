@@ -217,9 +217,11 @@ describe('NetworkConnectPage', () => {
     fireEvent.change(box, { target: { value: result.query } });
     fireEvent.click(screen.getByRole('button', { name: 'Search' }));
     await screen.findByText('Lukas Gruber');
-    const call = mocks.researchNetwork.mock.calls[0][0] as { query: string; runId: string };
-    expect(call.query).toBe(result.query);
-    expect(call.runId).toMatch(/^nc-/);
+    const call = mocks.researchNetwork.mock.calls[0]?.[0] as
+      | { query: string; runId: string }
+      | undefined;
+    expect(call?.query).toBe(result.query);
+    expect(call?.runId).toMatch(/^nc-/);
     expect(screen.getByText('Named contact on the posting')).toBeTruthy();
     expect(screen.getByText('High')).toBeTruthy();
     expect(screen.getByText('Partial: some sources could not be searched')).toBeTruthy();

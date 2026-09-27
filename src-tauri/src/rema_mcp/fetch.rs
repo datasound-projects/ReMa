@@ -287,10 +287,43 @@ impl Fetcher {
         deadline: Instant,
         cancel: &CancellationToken,
     ) -> Result<Response, FetchError> {
+        self.get_with_redirects(
+            url,
+            accept,
+            limit,
+            validators,
+            MAX_REDIRECTS,
+            deadline,
+            cancel,
+        )
+        .await
+    }
+
+    /// [`Fetcher::get`] with a tighter redirect limit.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn get_with_redirects(
+        &self,
+        url: &str,
+        accept: Accept,
+        limit: usize,
+        validators: Option<&Validators>,
+        max_redirects: usize,
+        deadline: Instant,
+        cancel: &CancellationToken,
+    ) -> Result<Response, FetchError> {
+        let max_redirects = max_redirects.min(MAX_REDIRECTS);
         let mut attempt = 0;
         loop {
             match self
-                .get_once(url, accept, limit, validators, deadline, cancel)
+                .get_once(
+                    url,
+                    accept,
+                    limit,
+                    validators,
+                    max_redirects,
+                    deadline,
+                    cancel,
+                )
                 .await
             {
                 Err((error, wait)) if attempt == 0 && wait.is_some() => {
@@ -313,19 +346,21 @@ impl Fetcher {
     }
 
     /// An error, and how long to wait before one retry when it is transient.
+    #[allow(clippy::too_many_arguments)]
     async fn get_once(
         &self,
         url: &str,
         accept: Accept,
         limit: usize,
         validators: Option<&Validators>,
+        max_redirects: usize,
         deadline: Instant,
         cancel: &CancellationToken,
     ) -> Result<Response, (FetchError, Option<Duration>)> {
         let fail = |e: FetchError| (e, None);
         let mut current =
             Url::parse(url).map_err(|_| fail(FetchError::Blocked("not a web address".into())))?;
-        for _ in 0..=MAX_REDIRECTS {
+        for _ in 0..=max_redirects {
             self.check(&current).map_err(fail)?;
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
@@ -583,6 +618,11 @@ mod tests {
             "http://0x7f.0.0.1/".into(),
             "http://2130706433/".into(),
             "http://169.254.169.254/latest/meta-data/".into(),
+            // IPv6 forms that carry a private IPv4 address.
+            "http://[::7f00:1]/".into(),
+            "http://[64:ff9b::a00:8]/".into(),
+            "http://[2002:a9fe:a9fe::]/".into(),
+            "http://[fec0::1]/".into(),
             "http://10.0.0.8/".into(),
             "http://localhost/".into(),
             "http://metadata.local/".into(),

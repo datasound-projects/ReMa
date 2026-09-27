@@ -901,6 +901,152 @@ fn network_summary(r: &crate::network::model::NetworkResult) -> String {
     parts.join(" · ")
 }
 
+/// A Business research request (clients for the user's reviewed offer, or
+/// advertised contract work): the orchestrator researches first, the
+/// result table is shown, then the model adds a short summary from the
+/// data the policy lets it see. The career Profile is not used: a request
+/// about an offer authorizes that offer only (B5).
+#[allow(clippy::too_many_arguments)]
+async fn business_then_answer(
+    state: &AppState,
+    conversation: &Conversation,
+    model: &ModelRef,
+    endpoint: &Endpoint,
+    turns: Vec<Turn>,
+    text: &str,
+    intent: crate::business::tools::Intent,
+    web: Arc<ChatWeb>,
+    cancel: &CancellationToken,
+    on_delta: DeltaSink<'_>,
+) -> AppResult<Finish> {
+    use crate::business::{
+        model::{ClientCriteria, ClientSearchInput, ContractSearchInput, RunStatus},
+        new_id, offers, render as business_render, service, store,
+        tools::Intent,
+    };
+    let progress = ChatProgress { web };
+    let model_ref = Some((endpoint, model.model_id.as_str()));
+    let (table, context, status) = match intent {
+        Intent::Clients => {
+            let all = state.db.call(|c| store::offers(c))?;
+            let offer = match offers::pick(&all, text) {
+                Ok(offer) => offer.clone(),
+                Err(question) => {
+                    on_delta(&question);
+                    return Ok(Finish::Complete);
+                }
+            };
+            retrieval::Progress::status(&progress, "Finding clients with ReMa Business…");
+            let results = service::find_clients(
+                state,
+                ClientSearchInput {
+                    run_id: new_id("run"),
+                    offer_id: offer.id.clone(),
+                    offer_version: None,
+                    query: text.to_string(),
+                    criteria: ClientCriteria::default(),
+                    find_people: text.to_lowercase().contains("decision-maker")
+                        || text.to_lowercase().contains("contact"),
+                },
+                model_ref,
+                &progress,
+                cancel,
+            )
+            .await?;
+            (
+                business_render::clients_markdown(&results),
+                business_render::clients_context(&results),
+                results.status,
+            )
+        }
+        Intent::Contracts => {
+            retrieval::Progress::status(&progress, "Finding contract work with ReMa Business…");
+            let results = service::find_contracts(
+                state,
+                ContractSearchInput {
+                    run_id: new_id("run"),
+                    query: text.to_string(),
+                    criteria: None,
+                },
+                model_ref,
+                &progress,
+                cancel,
+            )
+            .await?;
+            (
+                business_render::contracts_markdown(&results),
+                business_render::contracts_context(&results),
+                results.status,
+            )
+        }
+        Intent::Workspace => return Err(AppError::internal("not a research request")),
+    };
+    if status == RunStatus::Cancelled {
+        progress.step(ToolStatus::Denied, "Research stopped", None);
+        return Ok(Finish::Cancelled);
+    }
+    progress.step(
+        if matches!(status, RunStatus::Failed | RunStatus::Offline) {
+            ToolStatus::Failed
+        } else {
+            ToolStatus::Completed
+        },
+        "ReMa Business",
+        None,
+    );
+    on_delta(&table);
+    if matches!(
+        status,
+        RunStatus::Failed | RunStatus::Offline | RunStatus::NoVerifiedMatches
+    ) {
+        return Ok(Finish::Complete);
+    }
+    let system = with_agents(
+        state,
+        format!(
+            "{} {}",
+            identity(now_ms()),
+            crate::business::render::ANSWER_RULES
+        ),
+        &conversation.agent_ids,
+    )?;
+    let mut turns = turns;
+    match turns.last_mut() {
+        Some(last) if last.role == MessageRole::User => {
+            last.content = format!("{}\n\n{context}", last.content);
+        }
+        _ => turns.push(Turn {
+            role: MessageRole::User,
+            content: context,
+        }),
+    }
+    let request = ChatRequest {
+        system: Some(system),
+        turns,
+        max_output_tokens: providers::max_output_tokens(state, model)?,
+        ..ChatRequest::default()
+    };
+    on_delta("\n\n");
+    match state
+        .llm
+        .stream_chat(
+            endpoint,
+            &model.model_id,
+            &request,
+            cancel.clone(),
+            on_delta,
+        )
+        .await
+    {
+        Ok(Finish::Cancelled) => Ok(Finish::Cancelled),
+        Ok(_) => Ok(Finish::Complete),
+        Err(error) => {
+            on_delta(&format!("_ReMa could not add a summary: {error}_"));
+            Ok(Finish::Complete)
+        }
+    }
+}
+
 /// A Network Connect request (companies, jobs, people, the user's own
 /// connections): ReMa researches first; the model only writes a short
 /// answer from the results the data policy lets it see (NC §32).
@@ -1169,7 +1315,31 @@ async fn generate(
             .filter(|t| t.role == MessageRole::User)
             .map(|t| t.content.clone())
             .unwrap_or_default();
-        if !about_own_data(&network_text)
+        // The user's own offers, contract work and pipeline: Business,
+        // before Network Connect and job search (B26).
+        let business = crate::business::tools::detect(&network_text)
+            .filter(|_| !connector_tools::wants_private_data(&network_text));
+        if let Some(
+            intent @ (crate::business::tools::Intent::Clients
+            | crate::business::tools::Intent::Contracts),
+        ) = business
+        {
+            return business_then_answer(
+                state,
+                &conversation,
+                &model,
+                &endpoint,
+                turns,
+                &network_text,
+                intent,
+                web_observer.clone(),
+                &cancel,
+                &mut on_delta,
+            )
+            .await;
+        }
+        if business.is_none()
+            && !about_own_data(&network_text)
             && crate::network::planner::detect(&network_text).is_some()
         {
             return network_then_answer(
@@ -1189,6 +1359,7 @@ async fn generate(
         let job = turns
             .last()
             .filter(|t| t.role == MessageRole::User)
+            .filter(|_| business.is_none())
             .and_then(|t| retrieval::detect(&t.content));
         if let Some(query) = job {
             return search_then_answer(
@@ -1215,6 +1386,7 @@ async fn generate(
         // and applications are not a web question.
         if plan.requirement == Requirement::Required
             && plan.scopes.any()
+            && business.is_none()
             && !about_own_data(&latest_text)
         {
             return research_then_answer(
@@ -1373,6 +1545,27 @@ async fn generate(
                 }),
             });
         }
+        // The user's pipeline, drafts, experiments and offers: Business tools.
+        let business_tools = !private_answer && !cannot_use_tools(&model_key) && business.is_some();
+        if business_tools {
+            let mut specs = crate::business::tools::specs();
+            if let Some(existing) = &tools {
+                specs.extend(existing.specs.clone());
+            }
+            tools = Some(ToolBox {
+                specs,
+                executor: Arc::new(crate::business::tools::BusinessTools {
+                    state: state.clone(),
+                    endpoint: endpoint.clone(),
+                    model_id: model.model_id.clone(),
+                    conversation_id,
+                    message_id,
+                    observer: Some(web_observer.clone()),
+                    next: tools.as_ref().map(|t| t.executor.clone()),
+                    cancel: cancel.clone(),
+                }),
+            });
+        }
         // Career questions stay on career sites, at the request's place.
         let hints = if plan.scopes.any() {
             career_search::plan::hints(&plan, &[])
@@ -1410,6 +1603,9 @@ async fn generate(
         }
         if network_tools {
             system.push_str(crate::network::tools::PROMPT);
+        }
+        if business_tools {
+            system.push_str(crate::business::tools::PROMPT);
         }
         if web_tools {
             system.push_str(
