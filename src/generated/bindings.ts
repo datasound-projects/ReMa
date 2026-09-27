@@ -1878,6 +1878,12 @@ export type Language = {
 export type LastBusinessResults = {
 	clients: ClientResults | null,
 	contracts: ContractResults | null,
+	/**
+	 *  The latest client search, whatever its outcome: when it did not
+	 *  finish, the results above are from an earlier one.
+	 */
+	clientsRun: BusinessRun | null,
+	contractsRun: BusinessRun | null,
 };
 
 /**  The page's last result this session, if any. */

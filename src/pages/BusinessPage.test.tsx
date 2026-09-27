@@ -601,4 +601,53 @@ describe('BusinessPage', () => {
     expect(saved?.features[0]?.status).toBe('user_confirmed');
     expect(mocks.reviewOffer).toHaveBeenCalledWith('off_1', 4);
   });
+
+  it('says when the latest search did not finish instead of passing earlier results off as its own', async () => {
+    mocks.getLastBusinessResults.mockResolvedValue({
+      clients: clientResults,
+      contracts: null,
+      clientsRun: {
+        id: 'run-later',
+        kind: 'clients',
+        offer: ref,
+        query: 'Find Austrian manufacturers',
+        status: 'failed',
+        model: null,
+        sources: [],
+        failures: ['Interrupted: ReMa closed before this run finished.'],
+        startedAt: T + 60_000,
+        finishedAt: T + 120_000,
+      },
+      contractsRun: null,
+    });
+    renderPage('clients');
+    const notice = await screen.findByText(/did not finish\. Interrupted: ReMa closed before this run finished\./);
+    expect(notice.textContent).toMatch(/Shown below: the results from/);
+    // The results shown are the earlier, complete ones.
+    expect(screen.getByText('Offer: Support Workspace v2')).toBeTruthy();
+  });
+
+  it('opens an offer entered by hand without presenting anything as read', async () => {
+    const byHand: Offer = {
+      ...offer,
+      id: 'off_2',
+      name: 'AI Automation Consulting',
+      kind: 'service',
+      currentVersion: null,
+      reviewed: null,
+      draft: content({ name: 'AI Automation Consulting', kind: 'service' }),
+    };
+    // The backend's change event refreshes the overview; here it already lists the new offer.
+    mocks.getBusinessOverview.mockResolvedValue(overviewWith({ offers: [offer, byHand] }));
+    mocks.createOffer.mockResolvedValue(byHand);
+    renderPage('clients');
+    fireEvent.click(await screen.findByRole('button', { name: 'Business Profile' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'New offer' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'By hand' }));
+    fireEvent.change(screen.getByLabelText('Offer name'), { target: { value: 'AI Automation Consulting' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create offer' }));
+    await screen.findByText('Not reviewed yet: research cannot use it until you save a reviewed version.');
+    expect(screen.queryByRole('region', { name: 'What ReMa read' })).toBeNull();
+    expect(mocks.createOffer).toHaveBeenCalledTimes(1);
+  });
 });

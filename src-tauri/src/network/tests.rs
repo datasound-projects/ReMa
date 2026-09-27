@@ -571,6 +571,28 @@ async fn identity_only_linkedin_never_claims_no_connections() {
     );
 }
 
+#[tokio::test]
+async fn second_degree_connections_are_never_simulated() {
+    let site = sources().await;
+    let state = state_for(&site);
+    connect_linkedin(&state, &["openid", "profile", "email", "r_1st_connections"]).await;
+    let result = research(&state, "Show me second-degree connections at Nordlicht AI.").await;
+    assert!(
+        result
+            .notes
+            .iter()
+            .any(|n| n.contains("cannot look up second-degree connections")),
+        "{:?}",
+        result.notes
+    );
+    // Only the member's own (first-degree) list exists to check.
+    for member in &result.connections {
+        assert!(["Jane Example", "Max Muster"].contains(&member.name.as_str()));
+    }
+    let text = super::render::markdown(&result);
+    assert!(!text.to_lowercase().contains("no connections"), "{text}");
+}
+
 #[test]
 fn no_authenticated_scraping_path_exists() {
     // Network Connect reads LinkedIn only through its API root and never

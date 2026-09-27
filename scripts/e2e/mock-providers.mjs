@@ -364,6 +364,11 @@ function careerSource(p, q, res) {
           website: { value: `http://localhost:${port}/sites/stahl/` }, employees: { value: '5000' }, hqLabel: { value: 'Vienna' }, industryLabel: { value: 'manufacturing' } },
       ]
       : [];
+    // POST /__e2e/delay {ms} also slows this source (to interrupt a Business run).
+    if (replyDelay > 0) {
+      setTimeout(() => send(res, 200, { results: { bindings } }), replyDelay);
+      return;
+    }
     return send(res, 200, { results: { bindings } });
   }
   if (s === '/wikipedia/en/w/api.php' && /nordlicht/i.test(q.get('titles') ?? '')) {

@@ -509,7 +509,10 @@ async fn saving_twice_is_idempotent_and_research_never_overwrites_the_user() {
         .unwrap()
         .company_key
         .clone();
-    let (saved, created) = pipeline::save_prospect(&state, &first.run_id, &huber, None).unwrap();
+    // Saved with a use case, as the page saves it.
+    let use_case = Some("Knowledge base search for service desks");
+    let (saved, created) =
+        pipeline::save_prospect(&state, &first.run_id, &huber, use_case).unwrap();
     assert!(created);
     assert_eq!(
         saved.stage,
@@ -522,7 +525,7 @@ async fn saving_twice_is_idempotent_and_research_never_overwrites_the_user() {
         &saved.id,
         store::OpportunityEdit {
             name: saved.name.clone(),
-            use_case: String::new(),
+            use_case: saved.use_case.clone(),
             next_step: "Ask about their service desk".into(),
             notes: "Met them at a fair".into(),
             amount: None,
@@ -547,7 +550,8 @@ async fn saving_twice_is_idempotent_and_research_never_overwrites_the_user() {
         Some(saved.id.clone()),
         "results show the existing opportunity"
     );
-    let (again, created) = pipeline::save_prospect(&state, &second.run_id, &huber, None).unwrap();
+    let (again, created) =
+        pipeline::save_prospect(&state, &second.run_id, &huber, use_case).unwrap();
     assert!(!created);
     assert_eq!(again.id, saved.id);
     assert_eq!(again.notes, "Met them at a fair");
@@ -1338,6 +1342,21 @@ async fn interrupted_runs_are_reconciled_honestly() {
         .unwrap();
     assert_eq!(run.status, RunStatus::Failed);
     assert!(run.failures.iter().any(|f| f.contains("Interrupted")));
+    // The view learns that its latest search did not finish; there are no
+    // results from it to show.
+    let last = state
+        .db
+        .call(|c| store::last_run(c, RunKind::Clients))
+        .unwrap()
+        .unwrap();
+    assert_eq!(last.id, "run-open");
+    assert_eq!(last.status, RunStatus::Failed);
+    assert!(last.failures.iter().any(|f| f.contains("ReMa closed")));
+    assert!(
+        service::latest::<super::model::ClientResults>(&state, RunKind::Clients)
+            .unwrap()
+            .is_none()
+    );
     // A late finish cannot turn it into a success.
     let changed = state
         .db

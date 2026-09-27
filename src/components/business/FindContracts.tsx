@@ -7,6 +7,7 @@ import {
   findContracts,
   getLastBusinessResults,
   saveContract,
+  type BusinessRun,
   type Comparison,
   type ContractCriteria,
   type ContractResult,
@@ -17,8 +18,8 @@ import {
 } from '../../services/businessService';
 import { ChevronDownIcon, ChevronRightIcon, SearchIcon } from '../icons';
 import { Switch } from '../ui/Switch';
-import { Chips, Links, LocationsField, RunProgress, SearchedDetails, StatusBadge } from './common';
-import { DEFAULT_CONTRACT_CRITERIA, durationSummary, RATE_UNITS, rateSummary } from './helpers';
+import { Chips, Links, LocationsField, RunProgress, SearchedDetails, StatusBadge, UnfinishedRun } from './common';
+import { DEFAULT_CONTRACT_CRITERIA, durationSummary, RATE_UNITS, rateSummary, unfinished } from './helpers';
 import { ENGAGEMENT_LABELS, MATCH_LABELS } from './labels';
 
 const EXAMPLES = [
@@ -41,13 +42,17 @@ export function FindContracts({ onOpenOpportunity }: { onOpenOpportunity: (id: s
   const [criteria, setCriteria] = useState<ContractCriteria>(DEFAULT_CONTRACT_CRITERIA);
   const [useCriteria, setUseCriteria] = useState(false);
   const [results, setResults] = useState<ContractResults | null>(null);
+  // The latest search as stored: when it did not finish, say so (B31).
+  const [lastRun, setLastRun] = useState<BusinessRun | null>(null);
   const run = useBusinessRun();
 
   useEffect(() => {
     let active = true;
     void getLastBusinessResults()
       .then((last) => {
-        if (active && last.contracts) setResults((current) => current ?? last.contracts);
+        if (!active) return;
+        if (last.contracts) setResults((current) => current ?? last.contracts);
+        setLastRun(last.contractsRun ?? null);
       })
       .catch(() => {});
     return () => {
@@ -57,6 +62,7 @@ export function FindContracts({ onOpenOpportunity }: { onOpenOpportunity: (id: s
 
   const search = (text: string, withCriteria: boolean) => {
     if (run.running || (!text.trim() && !withCriteria)) return;
+    setLastRun(null);
     void run.start(async (runId) => {
       const found = await findContracts({ runId, query: text.trim(), criteria: withCriteria ? criteria : null });
       setResults(found);
@@ -263,6 +269,9 @@ export function FindContracts({ onOpenOpportunity }: { onOpenOpportunity: (id: s
         <p className="form-error" role="alert">
           {run.error}
         </p>
+      )}
+      {unfinished(lastRun, results?.runId ?? null) && (
+        <UnfinishedRun run={lastRun} shownAt={results?.retrievedAt ?? null} />
       )}
       {results && <ContractResultsView results={results} onSaved={markSaved} onOpenOpportunity={onOpenOpportunity} />}
     </div>

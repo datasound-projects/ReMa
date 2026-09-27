@@ -7,6 +7,7 @@ import {
   findClients,
   getLastBusinessResults,
   saveProspect,
+  type BusinessRun,
   type ClientCriteria,
   type ClientProspect,
   type ClientResults,
@@ -15,8 +16,18 @@ import {
 import { ChevronDownIcon, ChevronRightIcon, SearchIcon } from '../icons';
 import { ChipInput } from '../profile/EntryList';
 import { Switch } from '../ui/Switch';
-import { Chips, FitCell, Links, LocationsField, RunProgress, SearchedDetails, SourceNotes, StatusBadge } from './common';
-import { EMPTY_LOCATIONS, isEmptyLocations } from './helpers';
+import {
+  Chips,
+  FitCell,
+  Links,
+  LocationsField,
+  RunProgress,
+  SearchedDetails,
+  SourceNotes,
+  StatusBadge,
+  UnfinishedRun,
+} from './common';
+import { EMPTY_LOCATIONS, isEmptyLocations, unfinished } from './helpers';
 import { AUTHORITY_LABELS, fitLabel } from './labels';
 
 const EXAMPLES = [
@@ -71,13 +82,17 @@ export function FindClients({
   const [showCriteria, setShowCriteria] = useState(false);
   const [findPeople, setFindPeople] = useState(true);
   const [results, setResults] = useState<ClientResults | null>(null);
+  // The latest search as stored: when it did not finish, say so (B31).
+  const [lastRun, setLastRun] = useState<BusinessRun | null>(null);
   const run = useBusinessRun();
 
   useEffect(() => {
     let active = true;
     void getLastBusinessResults()
       .then((last) => {
-        if (active && last.clients) setResults((current) => current ?? last.clients);
+        if (!active) return;
+        if (last.clients) setResults((current) => current ?? last.clients);
+        setLastRun(last.clientsRun ?? null);
       })
       .catch(() => {});
     return () => {
@@ -89,6 +104,7 @@ export function FindClients({
 
   const search = (text: string) => {
     if (!offer || !reviewed || run.running) return;
+    setLastRun(null);
     void run.start(async (runId) => {
       const found = await findClients({
         runId,
@@ -268,6 +284,9 @@ export function FindClients({
         <p className="form-error" role="alert">
           {run.error}
         </p>
+      )}
+      {unfinished(lastRun, results?.runId ?? null) && (
+        <UnfinishedRun run={lastRun} shownAt={results?.retrievedAt ?? null} />
       )}
       {results && (
         <ClientResultsView

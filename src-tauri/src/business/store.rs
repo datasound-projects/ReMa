@@ -505,27 +505,43 @@ pub fn runs(c: &Connection, limit: u32) -> AppResult<Vec<BusinessRun>> {
     let rows: Vec<(RunRecord, String, String)> = stmt
         .query_map([limit], run_row)?
         .collect::<rusqlite::Result<_>>()?;
-    rows.into_iter()
-        .map(|row| {
-            let run = run_from(row)?;
-            let offer = match (&run.offer_id, run.offer_version) {
-                (Some(id), Some(v)) => Some(offer_ref(c, id, v)?),
-                _ => None,
-            };
-            Ok(BusinessRun {
-                id: run.id,
-                kind: run.kind,
-                offer,
-                query: run.query,
-                status: run.status,
-                model: run.model,
-                sources: run.sources,
-                failures: run.failures,
-                started_at: run.started_at,
-                finished_at: run.finished_at,
-            })
-        })
-        .collect()
+    rows.into_iter().map(|row| business_run(c, row)).collect()
+}
+
+/// The most recent run of a kind, whatever its outcome (an interrupted or
+/// stopped run included), so a view can say that it did not finish.
+pub fn last_run(c: &Connection, kind: RunKind) -> AppResult<Option<BusinessRun>> {
+    c.query_row(
+        &format!(
+            "SELECT {RUN_COLUMNS} FROM business_research_runs
+             WHERE kind = ?1 ORDER BY started_at DESC LIMIT 1"
+        ),
+        [kind.as_str()],
+        run_row,
+    )
+    .optional()?
+    .map(|row| business_run(c, row))
+    .transpose()
+}
+
+fn business_run(c: &Connection, row: (RunRecord, String, String)) -> AppResult<BusinessRun> {
+    let run = run_from(row)?;
+    let offer = match (&run.offer_id, run.offer_version) {
+        (Some(id), Some(v)) => Some(offer_ref(c, id, v)?),
+        _ => None,
+    };
+    Ok(BusinessRun {
+        id: run.id,
+        kind: run.kind,
+        offer,
+        query: run.query,
+        status: run.status,
+        model: run.model,
+        sources: run.sources,
+        failures: run.failures,
+        started_at: run.started_at,
+        finished_at: run.finished_at,
+    })
 }
 
 /// Runs that were queued or running when ReMa stopped: marked as
@@ -838,10 +854,18 @@ pub fn opportunity(c: &Connection, id: &str) -> AppResult<Option<Opportunity>> {
     row.map(|r| opportunity_from(c, r)).transpose()
 }
 
-pub fn opportunity_by_key(c: &Connection, key: &str) -> AppResult<Option<String>> {
+/// A client opportunity already saved for this company and offer, whatever
+/// use case it was saved with (the most recently changed one).
+pub fn client_opportunity(
+    c: &Connection,
+    company_key: &str,
+    offer_id: &str,
+) -> AppResult<Option<String>> {
     Ok(c.query_row(
-        "SELECT id FROM business_opportunities WHERE idempotency_key = ?1",
-        [key],
+        "SELECT id FROM business_opportunities
+         WHERE company_key = ?1 AND offer_id = ?2 AND kind != 'contract'
+         ORDER BY updated_at DESC LIMIT 1",
+        params![company_key, offer_id],
         |r| r.get(0),
     )
     .optional()?)

@@ -81,9 +81,9 @@ export function BusinessProfileView({
       <OfferList
         offers={overview.offers}
         onEdit={setEditing}
-        onCreated={(result) => {
+        onCreated={(offerId, result) => {
           setReport(result);
-          setEditing(result.offer.id);
+          setEditing(offerId);
         }}
       />
     </div>
@@ -176,7 +176,7 @@ function OfferList({
 }: {
   offers: Offer[];
   onEdit: (id: string) => void;
-  onCreated: (result: DescribeResult) => void;
+  onCreated: (offerId: string, result: DescribeResult | null) => void;
 }) {
   const [adding, setAdding] = useState(offers.length === 0);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
@@ -262,8 +262,18 @@ function OfferList({
   );
 }
 
-/** A new offer from a website, a description, a document or by hand (B4). */
-function NewOffer({ onCreated, onCancel }: { onCreated: (result: DescribeResult) => void; onCancel: (() => void) | null }) {
+/**
+ * A new offer from a website, a description, a document or by hand (B4).
+ * Only a read produces a report: an offer entered by hand has nothing that
+ * ReMa read.
+ */
+function NewOffer({
+  onCreated,
+  onCancel,
+}: {
+  onCreated: (offerId: string, result: DescribeResult | null) => void;
+  onCancel: (() => void) | null;
+}) {
   const [source, setSource] = useState<Source>('url');
   const [name, setName] = useState('');
   const [kind, setKind] = useState<OfferKind>('service');
@@ -288,14 +298,14 @@ function NewOffer({ onCreated, onCancel }: { onCreated: (result: DescribeResult)
     if (source === 'manual') {
       void action.run(async () => {
         const offer = await createOffer(emptyOfferContent(name.trim(), kind), key);
-        onCreated({ runId: '', status: 'needs_review', offer, pages: [], missing: [], notes: [], diff: null });
+        onCreated(offer.id, null);
       });
       return;
     }
     void run.start(async (runId) => {
       const result =
         source === 'document' ? await describeOfferFromDocument(input(runId)) : await describeOffer(input(runId));
-      if (result) onCreated(result);
+      if (result) onCreated(result.offer.id, result);
       return result;
     });
   };

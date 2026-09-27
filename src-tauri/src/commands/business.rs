@@ -33,6 +33,10 @@ use crate::{
 pub struct LastBusinessResults {
     pub clients: Option<ClientResults>,
     pub contracts: Option<ContractResults>,
+    /// The latest client search, whatever its outcome: when it did not
+    /// finish, the results above are from an earlier one.
+    pub clients_run: Option<BusinessRun>,
+    pub contracts_run: Option<BusinessRun>,
 }
 
 #[derive(Debug, Clone, Serialize, Type)]
@@ -266,6 +270,8 @@ pub fn business_last_results(state: State<'_, AppState>) -> AppResult<LastBusine
     Ok(LastBusinessResults {
         clients: service::latest(&state, RunKind::Clients)?,
         contracts: service::latest(&state, RunKind::Contracts)?,
+        clients_run: state.db.call(|c| store::last_run(c, RunKind::Clients))?,
+        contracts_run: state.db.call(|c| store::last_run(c, RunKind::Contracts))?,
     })
 }
 

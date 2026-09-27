@@ -724,7 +724,13 @@ pub fn assess(
                         company.last_verified_at,
                         false,
                     ));
-                    Evaluation::known(1.0, &format!("{listed} matches \"{}\"", t.text), vec![r])
+                    // Only the industry is claimed: the customer type may
+                    // also name a size, which the scale criterion checks.
+                    Evaluation::known(
+                        1.0,
+                        &format!("Listed as {listed}, the industry in \"{}\"", t.text),
+                        vec![r],
+                    )
                 }
                 None => Evaluation::known(
                     0.0,
@@ -1362,13 +1368,13 @@ pub async fn find(
     let saved: HashMap<String, String> = merged
         .iter()
         .filter_map(|c| {
-            let key = identity_key(&resolve::company_key(&c.name), &offer.offer_id, "");
+            let key = resolve::company_key(&c.name);
             state
                 .db
-                .call(|db| store::opportunity_by_key(db, &key))
+                .call(|db| store::client_opportunity(db, &key, &offer.offer_id))
                 .ok()
                 .flatten()
-                .map(|id| (resolve::company_key(&c.name), id))
+                .map(|id| (key, id))
         })
         .collect();
     let mut prospects: Vec<(Group, ClientProspect)> = Vec::new();
@@ -1722,6 +1728,33 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("knowledge base search"));
+    }
+
+    #[test]
+    fn a_company_outside_the_size_band_is_not_said_to_match_it() {
+        let (r, c) = offer();
+        let large = company("Stahl Nord AG", Some("manufacturing"), Some(5000), "Vienna");
+        let (a, _) = assess(
+            &large,
+            &Inspection::default(),
+            &r,
+            &c,
+            &criteria("Austria"),
+            &Locations::default(),
+            true,
+            1,
+        );
+        let industry = &a.criteria[2];
+        assert_eq!(industry.value, Some(1.0));
+        assert_eq!(
+            industry.reason,
+            "Listed as manufacturing, the industry in \"Manufacturing companies with 50-500 employees\""
+        );
+        let scale = &a.criteria[3];
+        assert_eq!(scale.value, Some(0.0), "{scale:#?}");
+        assert!(scale
+            .reason
+            .contains("About 5000 employees; the offer targets 50"));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 import { useState } from 'react';
 
 import { formatDateTime } from '../../lib/format';
-import type { Locations, RunStatus, SourceNote } from '../../services/businessService';
+import type { BusinessRun, Locations, RunStatus, SourceNote } from '../../services/businessService';
 import { AlertIcon, ChevronDownIcon, ChevronRightIcon, ExternalIcon } from '../icons';
 import { ChipInput } from '../profile/EntryList';
 import { openLink } from './helpers';
@@ -58,6 +58,23 @@ export function StatusBadge({ status }: { status: RunStatus }) {
   const tone = runStatusTone(status);
   const className = tone === 'neutral' ? 'badge' : `badge badge--${tone}`;
   return <span className={className}>{RUN_STATUS_LABELS[status]}</span>;
+}
+
+/**
+ * The latest search did not finish (stopped, failed, or interrupted when
+ * ReMa closed): say so instead of passing earlier results off as its own.
+ */
+export function UnfinishedRun({ run, shownAt }: { run: BusinessRun; shownAt: number | null }) {
+  const reason =
+    run.failures[run.failures.length - 1] ?? (run.status === 'cancelled' ? 'It was stopped.' : 'It did not finish.');
+  return (
+    <div className="notice notice--warning" role="status">
+      <span>
+        The last search ({formatDateTime(run.startedAt)}) did not finish. {reason}{' '}
+        {shownAt === null ? 'It left no results.' : `Shown below: the results from ${formatDateTime(shownAt)}.`}
+      </span>
+    </div>
+  );
 }
 
 /** The backend's own status line while a request runs, with Stop. */

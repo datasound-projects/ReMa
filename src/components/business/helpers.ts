@@ -1,4 +1,5 @@
 import type {
+  BusinessRun,
   Claim,
   Offer,
   ContractCriteria,
@@ -194,4 +195,9 @@ export function hasUnreviewedChanges(offer: Offer): boolean {
   if (offer.draft === null) return false;
   if (offer.reviewed === null) return true;
   return JSON.stringify(offer.draft) !== JSON.stringify(offer.reviewed);
+}
+
+/** Whether the latest run ended without results of its own (not the ones shown). */
+export function unfinished(run: BusinessRun | null, shownRunId: string | null): run is BusinessRun {
+  return !!run && run.id !== shownRunId && (run.status === 'failed' || run.status === 'cancelled');
 }
