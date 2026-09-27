@@ -61,6 +61,7 @@ Shared components have one owning phase:
 | XING desktop sign-in and API access (no new applications) | XING | NC §11–§12 |
 | Live verification of official documentation hosts that are blocked here (platform.openai.com, learn.microsoft.com, dev.xing.com) | Re-check before release | CS §64, NC §63, B40 (verified here through the official OpenAI SDK type definitions, platform.claude.com, Unsloth's published package and search summaries of the official pages) |
 | Live no-key routes (job boards, ATS APIs, Wikidata) are unreachable from this build environment | Re-run the health test on a normal network | CS §50, §60 |
+| Privacy and legal review of the Business defaults (retention of prospect data, lawful basis for public professional data about people, national rules on unsolicited electronic marketing, platform terms) | The publisher's privacy/legal review | B29, B36 (last item), B40 |
 
 ## 5. Phase 1 — Run History (RH)
 
@@ -146,43 +147,48 @@ validation: [career-search/validation.md](career-search/validation.md).
 
 ## 7. Phase 3 — Network Connect (NC §1–§63) and Business (Appendix B)
 
-Planned layout: `src-tauri/src/network/` and `src-tauri/src/business/`,
-migrations after 0010, pages `NetworkConnectPage.tsx` and the Business pages.
+Layout: `src-tauri/src/network/` and `src-tauri/src/business/`, migrations
+0011 and 0012, pages `NetworkConnectPage.tsx` and `BusinessPage.tsx`.
+Records: [network-connect/implementation.md](network-connect/implementation.md),
+[network-connect/validation.md](network-connect/validation.md),
+[business/implementation.md](business/implementation.md),
+[business/validation.md](business/validation.md).
 
-| Req | Requirement | Planned location | Status | Evidence / blocker |
+| Req | Requirement | Location | Status | Evidence / blocker |
 |---|---|---|---|---|
-| NC §1, §6, §51, §52 | Capability registry and honest capability states | `network/capabilities.rs`; UI | Not started | |
-| NC §2, §3, B1 | Navigation (Network Connect, Business) and purpose | `src/app/pages.ts` | Not started | |
-| NC §4, §19, §35, §36 | Professional graph, people schema, entity resolution, confidence | `network/entities.rs` | Not started | |
-| NC §5, §33, §34, §37 | One research layer on CareerSearch; source strategy; evidence; freshness | `network/research.rs` | Not started | |
-| NC §7, §8, §53 | Account connection UX; LinkedIn OpenID Connect with PKCE; shared connectors | `connectors/linkedin.rs` | Not started | Blocked for live sign-in (LinkedIn enablement) |
-| NC §9, §10, §22, §23 | LinkedIn network and people lookup only as permitted | capability registry | Not started | Member-network data needs LinkedIn approval |
-| NC §11, §12 | XING authentication and retention | `connectors/xing.rs`, policy | Not started | No desktop sign-in or new API apps |
-| NC §13, §14 | Public discovery separate; Jobs MCP stays the job layer | `network/research.rs` | Not started | |
-| NC §15–§18, §24–§27 | Company, hiring activity, job → people, hiring manager vs contact, recruiters, technology, Profile-aware research | `network/research.rs`, planner | Not started | |
-| NC §20, §48, §49 | Multi-hop planner; query examples | `network/planner.rs` | Not started | |
-| NC §28–§31 | UI, result modes, drill-down, direct links | `src/pages/NetworkConnectPage.tsx` | Not started | |
-| NC §32, §47 | Chat integration; tool contracts | `network/tools.rs`, `services/chat.rs` | Not started | |
-| NC §38, §39, §40 | Privacy boundary; provider data policy; temporary vs persistent | `network/policy.rs` | Not started | |
-| NC §41, §42 | Networking CRM; tracking companies (scheduled) | `network/`, scheduler | Not started | |
-| NC §43–§46 | No outreach, no authenticated automation, security, prompt injection | tools, fetcher | Not started | |
-| NC §50 | Result quality rules | research | Not started | |
-| NC §54–§59 | Backend architecture, interfaces, data flows | `network/` | Not started | |
-| NC §60, §61 | Tests; acceptance criteria | `docs/network-connect/validation.md` | Not started | |
-| B0–B2 | Additive scope; Business navigation; shared architecture, separate commercial state | `business/` | Not started | |
-| B3–B5 | Business Profile, offers, website → reviewed offer, context versioning | `business/profile.rs`, `business/offers.rs` | Not started | |
-| B6, B7 | Search infrastructure and scope; location and eligibility | CareerSearch | Not started | |
-| B8–B11 | Find Clients: workflow, ICP, reproducible fit, buyers | `business/clients.rs` | Not started | |
-| B12–B14 | Find Contract Work: classification, filters, rate logic, results | `business/contracts.rs` | Not started | |
-| B15, B16 | Business Pipeline; opportunity identity | `business/pipeline.rs` | Not started | |
-| B17–B23 | Go-to-Market Studio: segments, competitors, channels, target accounts, drafts, experiments, metrics | `business/gtm.rs` | Not started | |
-| B24, B25 | Domain model and storage; tool contracts and permissions | migrations, `business/tools.rs` | Not started | |
-| B26 | Chat, scheduling and run history | scheduler, Phase 1 runs | Not started | |
-| B27 | UI states and progressive results | Business pages | Not started | |
-| B28–B31 | Provider purpose; privacy and retention; fetching and injection; reliability | policy, fetcher | Not started | |
-| B32, B33 | Boundaries; sequence | — | Not started | |
-| B34, B35, B36 | Tests; manual scenarios; final checklist | `docs/business/validation.md` | Not started | |
-| B37 | Completion report | `docs/business/implementation.md` | Not started | |
+| NC §1, §6, §51, §52 | Capability registry and honest capability states | `network/capabilities.rs`; capability cards | Verified | Capability tests; NC validation 2.1, 2.3, 2.9 |
+| NC §2, §3, B1 | Navigation (Network Connect, Business) and purpose | `src/app/pages.ts`, sidebar | Verified | Both pages in the app |
+| NC §4, §19, §35, §36 | Professional graph, people schema, entity resolution, confidence | `network/model.rs`, `resolve.rs`, `evidence.rs` | Verified | Resolution and confidence tests (subsidiaries kept apart); NC validation 2.5 |
+| NC §5, §33, §34, §37 | One research layer on CareerSearch; source strategy; evidence; freshness | `network/service.rs`, `companies.rs`, `people.rs` | Verified | Research tests; retrieval times on every claim (NC 2.6) |
+| NC §7, §8, §53 | Account connection UX; LinkedIn OpenID Connect with PKCE; shared connectors | `connectors/linkedin.rs`, Settings → Connectors | Verified (stand-in) | NC 2.3, 2.12; live sign-in needs LinkedIn's native-PKCE enablement and a client id (§4) |
+| NC §9, §10, §22, §23 | LinkedIn network and people lookup only as permitted | `network/capabilities.rs`, `relationships.rs` | Verified (stand-in) | NC 2.9–2.11; live first-degree access needs LinkedIn's approval of `r_1st_connections` (§4) |
+| NC §11, §12 | XING authentication and retention | `connectors/xing.rs`, `network/policy.rs` | Verified | Shown unavailable with its reason; member data denied for every purpose (tests) |
+| NC §13, §14 | Public discovery separate; Jobs MCP stays the job layer | `network/companies.rs` | Verified | `a_network_request_becomes_a_job_search`, `jobs_group_into_their_employers` |
+| NC §15–§18, §24–§27 | Company, hiring activity, job → people, hiring manager vs contact, recruiters, technology, Profile-aware research | `network/people.rs`, `planner.rs` | Verified | People tests; NC 2.5, 2.10b |
+| NC §20, §48, §49 | Multi-hop planner; query examples | `network/planner.rs` | Verified | Planner tests; example requests on the page |
+| NC §28–§31 | UI, result modes, drill-down, direct links | `NetworkConnectPage.tsx` | Verified | Vitest; NC 2.5–2.7 |
+| NC §32, §47 | Chat integration; tool contracts | `network/tools.rs`, `services/chat.rs` | Verified | Chat tests; NC 2.11 |
+| NC §38, §39, §40 | Privacy boundary; provider data policy; temporary vs persistent | `network/policy.rs` | Verified | Policy tests; SQLite checks (NC 2.11, 2.12) |
+| NC §41, §42 | Networking CRM; tracking companies (scheduled) | `network/`, `services/scheduler.rs` | Verified | No CRM without a permitted source (§41); **Track this company…** (NC 2.8) |
+| NC §43–§46 | No outreach, no authenticated automation, security, prompt injection | tools, fetcher, render | Verified | `no_authenticated_scraping_path_exists`; injection audit (NC 2.11) |
+| NC §50 | Result quality rules | `network/service.rs`, `render.rs` | Verified | Nothing invented; unknowns stated (tests, NC 2.5) |
+| NC §54–§59 | Backend architecture, interfaces, data flows | `network/` | Verified | [network-connect/implementation.md](network-connect/implementation.md) |
+| NC §60, §61 | Tests; acceptance criteria | `docs/network-connect/validation.md` | Verified | §1 and §4 of that report |
+| NC §62, §63 | Official documentation | NC record §5 | Verified (search excerpts) | learn.microsoft.com and dev.xing.com unreachable here; re-check before release (§4) |
+| B0–B2 | Additive scope; Business navigation; shared architecture, separate commercial state | `business/`, migration 0012 | Verified | Business validation §4 |
+| B3–B5 | Business Profile, offers, website → reviewed offer, context versioning | `business/offers.rs`, `ingest.rs`, `store.rs` | Verified | Offer tests; B35 scenario 2 |
+| B6, B7 | Search infrastructure and scope; location and eligibility | career search, `business/locations.rs` | Verified | Location tests |
+| B8–B11 | Find Clients: workflow, ICP, reproducible fit, buyers | `business/clients.rs`, `fit.rs` | Verified | Client and fit tests; B35 scenarios 1, 2, 5 |
+| B12–B14 | Find Contract Work: classification, filters, rate logic, results | `business/contracts.rs` | Verified | Contract tests; B35 scenario 3 |
+| B15, B16 | Business Pipeline; opportunity identity | `business/pipeline.rs` | Verified | Pipeline tests; B35 scenario 6 |
+| B17–B23 | Go-to-Market Studio: segments, competitors, channels, target accounts, drafts, experiments, metrics | `business/gtm.rs`, `experiments.rs` | Verified | GTM and experiment tests; B35 scenario 4 |
+| B24, B25 | Domain model and storage; tool contracts and permissions | migration 0012, `business/model.rs`, `tools.rs` | Verified | `there_is_no_sending_tool_and_changes_need_approval` |
+| B26 | Chat, scheduling and run history | `services/chat.rs`, `services/scheduler.rs` | Verified | Chat and scheduler tests; scheduled Business task in the app |
+| B27 | UI states and progressive results | Business pages | Verified | Vitest; unfinished-run notice (B35 scenario 6) |
+| B28–B31 | Provider purpose; privacy and retention; fetching and injection; reliability | `network/policy.rs`, fetcher, `pipeline.rs` | Verified | Business validation §1; scenario 7 |
+| B32, B33 | Boundaries; sequence | — | Verified | No sending, payment, ads or proposal submission |
+| B34, B35, B36 | Tests; manual scenarios; final checklist | `docs/business/validation.md` | Verified | §1, §2, §4 of that report (local stand-ins) |
+| B37 | Completion report | `docs/business/implementation.md` | Verified | Written; legal review open (B40, §4) |
 
 ## 8. Phase reports
 
@@ -249,3 +255,83 @@ files and migrations, acceptance verified, commands and results, limitations).
   this environment (stand-ins used; Check now on a normal network before
   release); Bundesagentur für Arbeit not added (terms for third-party use
   unconfirmed); Codex has no domain filter (guidance in its brief).
+
+### Phase 3 — Network Connect and Business: gate passed
+
+- **Implemented**: Network Connect researches companies, their current
+  jobs and the relevant people. It works from public, permitted sources:
+  ReMa's job layer, Wikidata, the companies' own pages, and pages the
+  model's search reported.
+  - It adds the user's first-degree LinkedIn connections only when
+    LinkedIn granted `r_1st_connections`. They are shown for the session
+    only, never stored and never sent to a model; a chat and its model get
+    only their count.
+  - Every capability comes from the granted scopes, and a missing permission
+    is said, never reported as "no connections".
+  - It is available on its page, in Chat (and as tools), and as a daily
+    tracking task.
+
+  ReMa Business adds:
+  - reviewed, versioned offers (manual, from a URL or from a document);
+  - Find Clients with a reproducible fit measure;
+  - Find Contract Work with strict terms;
+  - one commercial Pipeline, separate from Applications, with Do not
+    contact and deletion;
+  - Go-to-Market Studio: hypotheses, positioning, local drafts,
+    experiments, metrics from recorded activity;
+  - Chat and scheduled research.
+
+  Nothing sends, pays or submits anything. Records:
+  [network-connect/implementation.md](network-connect/implementation.md),
+  [business/implementation.md](business/implementation.md).
+- **Files and migrations**: migrations `0011_network_connect.sql` (LinkedIn
+  and XING in the connector tables) and `0012_business.sql` (Business
+  tables); `network/`, `business/`, `connectors/{linkedin,xing}.rs`,
+  `commands/{network,business}.rs`, `services/{chat,scheduler}.rs`,
+  `NetworkConnectPage.tsx`, `BusinessPage.tsx`, `components/business/`,
+  Settings → Connectors (professional networks); the E2E stand-in's
+  LinkedIn, company sites, product site and contract listings.
+- **Acceptance**: NC §61 criteria 1–30
+  ([network-connect/validation.md](network-connect/validation.md) §4) and
+  the B36 checklist ([business/validation.md](business/validation.md) §4)
+  are verified with local stand-ins. The B35 scenarios 1–7 were run in the
+  app, and 7 was re-run on the final build. Problems found in the app were
+  fixed and are listed in both reports.
+- **Commands** (final run, commit `2c3697f` plus these documents):
+  - `cargo fmt --check` and `cargo clippy --all-targets --locked -- -D
+    warnings` are clean.
+  - `cargo test --locked`: 650 passed, 0 failed, 3 ignored (the
+    explicit-only bindings export, measurement and live Codex tests).
+  - `pnpm lint` and `pnpm typecheck` are clean. `pnpm test` (Vitest): 116
+    passed in 23 files. `pnpm build` succeeds.
+- **Limitations and external blockers**:
+  - Providers were exercised against local stand-ins only.
+  - A live LinkedIn sign-in needs a LinkedIn app with native PKCE enabled
+    and its client ID (§4). Live connection lists need LinkedIn's approval
+    of `r_1st_connections`. XING offers no integration.
+  - The official pages on learn.microsoft.com and dev.xing.com were read
+    through search excerpts; re-check them on a normal network.
+  - The Business defaults need the privacy and legal review listed in §4.
+  - Prompt injection is handled by structure (delimited data, no tools on
+    answers, exact quotes, review), not by a classifier.
+
+### Final integration verification
+
+- **One system**: Chat, Scheduled Tasks, the Network Connect page and
+  Business use one career-search router, one Jobs MCP, one connector
+  registry and credential store, one scheduler with Phase 1 run history,
+  and one migration chain (0001–0012). There are no duplicate search,
+  credential or scheduling services. Chat tells job, network and business
+  requests apart (tests in `business/tools.rs`, `services/chat.rs`).
+- **Automated**: the full Rust and Vitest suites and the production build
+  pass (numbers above). They include every Phase 1 and Phase 2 test.
+- **In the app** (debug build, final code):
+  - Phase 1: Run now on the scheduled Business task "Weekly AI automation
+    prospects" produced a succeeded manual run with its two stages and
+    result next to the scheduled run.
+  - Phase 2: "Find senior AI engineering jobs in Vienna" in Chat listed six
+    current postings with their sources (Arbeitnow, Greenhouse, The Muse,
+    the employer's page) and "Not shown: 1 closed".
+  - Phase 3: the Network Connect and Business runs in the two validation
+    reports.
+  - The Business and Network Connect pages were checked in both themes.
