@@ -1658,7 +1658,10 @@ async fn generate(
         // Private data in this answer or earlier in the chat: no web access
         // and no tools that reach the web.
         let private_answer = connector.is_some() || private_history;
-        if private_history && !asks_private && can_search_web(&endpoint) {
+        // Said whenever the model would otherwise reach the web: its
+        // provider's search, or ReMa's web tools for a local model.
+        let would_reach_web = can_search_web(&endpoint) || !cannot_use_tools(&model_key);
+        if private_history && !asks_private && would_reach_web {
             notices.push(ToolActivity {
                 id: "web:private".into(),
                 server_id: None,
@@ -1667,8 +1670,8 @@ async fn generate(
                 status: ToolStatus::Unavailable,
                 arguments: String::new(),
                 detail: Some(
-                    "Off in this chat: it contains your mail, calendar or application data. \
-                     Start a new chat to search the web."
+                    "This chat contains your mail, calendar or application data, so the \
+                     model's web access is off. Start a new chat for answers from the web."
                         .into(),
                 ),
                 read_only: true,
@@ -3461,11 +3464,21 @@ mod tests {
             .status_message
             .unwrap()
             .contains("rejected the credentials"));
+        // A restart forgets what the runtime learned, not the rejected key.
+        let restart = |state: &AppState| {
+            state
+                .accounts
+                .set_health("openai", ConnectionStatus::Connected, None)
+        };
+        restart(&state);
+        assert_eq!(status(&state).status, ConnectionStatus::ReauthRequired);
 
         let sent = send_message(&state, send(None, "Hello again"))
             .await
             .unwrap();
         wait_until_done(&state, sent.assistant_message.id).await;
+        assert_eq!(status(&state).status, ConnectionStatus::Connected);
+        restart(&state);
         assert_eq!(status(&state).status, ConnectionStatus::Connected);
     }
 
@@ -3526,6 +3539,20 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("web access and web tools are off for the rest of it"));
+        assert!(done.activity.iter().any(|a| a.id == "web:private"));
+
+        // A local model loses ReMa's web tools there, and is told why too.
+        let local = local_model_of(&state, "private-chat-model").await;
+        let mut input = send(Some(first.conversation.id), "Explain the STAR method again");
+        input.model = local;
+        let before = llm.requests.lock().unwrap().len();
+        let local_answer = send_message(&state, input).await.unwrap();
+        let done = wait_until_done(&state, local_answer.assistant_message.id).await;
+        let (_, request) = llm.requests.lock().unwrap()[before].clone();
+        assert!(request
+            .tool_specs()
+            .iter()
+            .all(|t| !t.name.starts_with("rema_")));
         assert!(done.activity.iter().any(|a| a.id == "web:private"));
 
         // A new chat has the web again.

@@ -32,6 +32,18 @@
 // http://127.0.0.1:8777/unsloth/v1 plays Unsloth Studio. Every model
 // request is logged with its step, tools, domain filter and location.
 //
+// Gemini runs add REMA_GEMINI_BASE_URL=http://127.0.0.1:8777/gemini/v1beta
+// (any API key; `POST /__e2e/gemini {rejectKey: true}` makes it answer like
+// Google does for a key it no longer accepts: 400 API_KEY_INVALID). The
+// stand-in holds ReMa to Gemini's rules: Gemini 3 combines Google Search
+// with functions only with toolConfig.includeServerSideToolInvocations,
+// Gemini 2.5 not at all, and a later round must send the model's turn back
+// as it came (its search call and result, its call ids and thought
+// signatures). A question that mentions "ReMa job tools" makes it search
+// and call mcp_rema_search_jobs. An OpenAI-compatible server at
+// http://127.0.0.1:8777/ollama/v1 answers like Ollama with a model that
+// cannot use tools (400 "… does not support tools" whenever tools are sent).
+//
 // Business runs use the same variables: a product website (/sites/acme/),
 // Wikidata's query service with two Austrian manufacturers whose websites
 // are served here (one on 127.0.0.1, one on localhost, so they are two
@@ -115,7 +127,7 @@ let historyId = 1000;
 const gmail = [];
 function addGmail(id, thread, from, subject, body, hoursAgo, labels = ['INBOX']) {
   historyId += 1;
-  gmail.push({ id, thread, from, subject, body, at: Date.now() - hoursAgo * HOUR, labels, history: historyId });
+  gmail.push({ id, thread, from, subject, body, at: Math.round(Date.now() - hoursAgo * HOUR), labels, history: historyId });
 }
 const globexBody = `Hi Ana, we are happy to confirm your technical interview on ${longDate(globexDay)} from 14:00 to 15:00 (Europe/Vienna time). Join here: https://meet.example.com/globex-1 . Kind regards, Globex Talent Team`;
 const soylentBody = `Hi Ana, your interview for the ML Engineer role is confirmed for ${longDate(soylentDay)} from 10:00 to 11:00 (Europe/Vienna time). Meeting link: https://meet.example.com/soylent-7 . Best, Soylent People Team`;
@@ -734,6 +746,93 @@ function unslothCompletions(req, body, res) {
   res.end('data: [DONE]\n\n');
 }
 
+// Gemini's streamGenerateContent (alt=sse), with its rules on tools.
+let geminiMode = { rejectKey: false };
+const GEMINI_SIGNATURE = 'c2lnbmF0dXJlLWUyZQ==';
+function geminiReject(res, message, extra = {}) {
+  log({ model: 'gemini', rejected: message, ...extra });
+  return send(res, 400, { error: { code: 400, message, status: 'INVALID_ARGUMENT' } });
+}
+function geminiStream(req, model, body, res) {
+  if (geminiMode.rejectKey) {
+    log({ model: 'gemini', rejected: 'API_KEY_INVALID' });
+    return send(res, 400, { error: { code: 400, message: 'API key not valid. Please pass a valid API key.', status: 'INVALID_ARGUMENT',
+      details: [{ '@type': 'type.googleapis.com/google.rpc.ErrorInfo', reason: 'API_KEY_INVALID', domain: 'googleapis.com' }] } });
+  }
+  const tools = body.tools ?? [];
+  const functions = tools.flatMap((t) => t.functionDeclarations ?? []);
+  const search = tools.some((t) => t.google_search || t.googleSearch);
+  const serverSide = body.toolConfig?.includeServerSideToolInvocations === true;
+  const gemini3 = /^gemini-3/.test(model);
+  const contents = body.contents ?? [];
+  const modelTurns = contents.filter((c) => c.role === 'model');
+  const responses = contents.flatMap((c) => c.parts ?? []).filter((p) => p.functionResponse);
+  const calls = modelTurns.flatMap((c) => c.parts ?? []).filter((p) => p.functionCall);
+  const system = (body.systemInstruction?.parts ?? []).map((p) => p.text ?? '').join('\n');
+  const whole = JSON.stringify(body);
+  const lastUser = [...contents].reverse().find((c) => c.role === 'user' && (c.parts ?? []).some((p) => p.text));
+  const question = (lastUser?.parts ?? []).map((p) => p.text ?? '').join(' ');
+  log({ model: 'gemini', id: model, key: req.headers['x-goog-api-key'] ? 'yes' : 'no', step: modelStep(system),
+    functions: functions.map((f) => f.name), google_search: search, server_side_invocations: serverSide,
+    function_calling: body.toolConfig?.functionCallingConfig?.mode ?? null, rounds: responses.length,
+    returned_tool_call: modelTurns.some((c) => (c.parts ?? []).some((p) => p.toolCall)),
+    returned_tool_response: modelTurns.some((c) => (c.parts ?? []).some((p) => p.toolResponse)),
+    returned_signature: calls.length > 0 && calls.every((p) => p.thoughtSignature === GEMINI_SIGNATURE),
+    response_ids_match: responses.every((r) => calls.some((c) => c.functionCall.id && c.functionCall.id === r.functionResponse.id)),
+    claims_web: /search the web|web search/i.test(system), leaked: leakCheck(whole), private_mail: whole.includes('PRIVATE-') });
+  // Gemini's own rules, as its API enforces them.
+  if (search && functions.length > 0 && !gemini3) {
+    return geminiReject(res, 'Built-in tools ({google_search}) and Function Calling cannot be combined in the same request. Please remove one of them.');
+  }
+  if (search && functions.length > 0 && !serverSide) {
+    return geminiReject(res, 'Please enable tool_config.include_server_side_tool_invocations to use Built-in tools with Function calling.');
+  }
+  if (calls.some((p) => p.thoughtSignature !== GEMINI_SIGNATURE)) {
+    return geminiReject(res, 'Function call is missing a thought_signature in functionCall parts. This is required for tools to work correctly.');
+  }
+  if (serverSide && responses.length > 0 && !modelTurns.some((c) => (c.parts ?? []).some((p) => p.toolCall))) {
+    return geminiReject(res, 'The model turn is missing its tool call and tool response parts.');
+  }
+  res.writeHead(200, { 'content-type': 'text/event-stream' });
+  const sse = (data) => res.write(`data: ${JSON.stringify(data)}\r\n\r\n`);
+  const chunk = (parts, finishReason) => sse({ candidates: [{ content: { role: 'model', parts }, ...(finishReason ? { finishReason } : {}), index: 0 }],
+    usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5, totalTokenCount: 15 }, modelVersion: model });
+  const jobTools = functions.find((f) => /search_jobs$/.test(f.name));
+  if (jobTools && /ReMa job tools/i.test(question) && responses.length === 0 && body.toolConfig?.functionCallingConfig?.mode !== 'NONE') {
+    const parts = [];
+    if (search && serverSide) {
+      parts.push({ toolCall: { toolType: 'GOOGLE_SEARCH_WEB', args: { queries: ['AI engineer jobs Vienna'] }, id: 'gs_e2e_1' }, thoughtSignature: GEMINI_SIGNATURE });
+      parts.push({ toolResponse: { toolType: 'GOOGLE_SEARCH_WEB', response: { search_suggestions: 'AI engineer jobs Vienna' }, id: 'gs_e2e_1' } });
+    }
+    parts.push({ functionCall: { id: 'fc_e2e_1', name: jobTools.name, args: { query: 'AI engineer', locations: [{ city: 'Vienna', country: 'AT' }] } }, thoughtSignature: GEMINI_SIGNATURE });
+    chunk(parts, 'STOP');
+    return res.end();
+  }
+  const jobs = responses.map((r) => JSON.stringify(r.functionResponse.response)).join(' ');
+  const text = responses.length > 0
+    ? `Gemini read ReMa's job search (${jobs.length} characters of results) and answered.`
+    : 'Mock answer from Gemini.';
+  chunk([{ text: text.slice(0, 20) }]);
+  chunk([{ text: text.slice(20) }], 'STOP');
+  res.end();
+}
+
+// Ollama with a model that cannot use tools (its OpenAI-compatible API).
+function ollamaCompletions(body, res) {
+  const system = body.messages?.find((m) => m.role === 'system')?.content ?? '';
+  const text = typeof system === 'string' ? system : JSON.stringify(system);
+  log({ model: 'ollama-no-tools', tools: (body.tools ?? []).map((t) => t.function?.name ?? t.type),
+    claims_web: /search the web|rema_career_search/i.test(text), step: modelStep(text) });
+  if ((body.tools ?? []).length > 0) {
+    return send(res, 400, { error: { message: `registry.ollama.ai/library/${body.model} does not support tools`, type: 'api_error', param: null, code: null } });
+  }
+  res.writeHead(200, { 'content-type': 'text/event-stream' });
+  const sse = (data) => res.write(`data: ${JSON.stringify(data)}\n\n`);
+  sse({ choices: [{ index: 0, delta: { content: 'Mock answer from a model without tools.' } }] });
+  sse({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] });
+  res.end('data: [DONE]\n\n');
+}
+
 // ── HTTP helpers ──────────────────────────────────────────────────────
 const idToken = (claims) => `h.${b64url(JSON.stringify(claims))}.s`;
 const codes = new Map();
@@ -823,6 +922,23 @@ function route(req, url, body, res) {
     log({ accounts_check: accountsCheck });
     return send(res, 200, accountsCheck);
   }
+  if (p === '/gemini/v1beta/models') {
+    if (geminiMode.rejectKey) {
+      return send(res, 400, { error: { code: 400, message: 'API key not valid. Please pass a valid API key.', status: 'INVALID_ARGUMENT' } });
+    }
+    return send(res, 200, { models: [
+      { name: 'models/gemini-3-flash', displayName: 'Gemini 3 Flash', supportedGenerationMethods: ['generateContent', 'countTokens'], outputTokenLimit: 65536 },
+      { name: 'models/gemini-2.5-flash', displayName: 'Gemini 2.5 Flash', supportedGenerationMethods: ['generateContent', 'countTokens'], outputTokenLimit: 65536 },
+    ] });
+  }
+  const gemini = p.match(/^\/gemini\/v1beta\/models\/([^:]+):streamGenerateContent$/);
+  if (gemini) return geminiStream(req, gemini[1], JSON.parse(body || '{}'), res);
+  if (p === '/__e2e/gemini' && req.method === 'POST') {
+    geminiMode = { ...geminiMode, ...JSON.parse(body || '{}') };
+    return send(res, 200, geminiMode);
+  }
+  if (p === '/ollama/v1/models') return send(res, 200, { object: 'list', data: [{ id: 'gemma2:2b', object: 'model', owned_by: 'library' }] });
+  if (p === '/ollama/v1/chat/completions') return ollamaCompletions(JSON.parse(body || '{}'), res);
   if (p === '/ddg/html/') return duckduckgoResults(q, res);
   if (p === '/unsloth/v1/models') return send(res, 200, { object: 'list', data: [{ id: 'unsloth/Qwen3-8B-GGUF', object: 'model', owned_by: 'unsloth-studio' }] });
   if (p === '/unsloth/v1/chat/completions') return unslothCompletions(req, JSON.parse(body || '{}'), res);
@@ -965,7 +1081,12 @@ function route(req, url, body, res) {
     const after = Number((q.get('q') ?? '').match(/after:(\d+)/)?.[1] ?? 0) * 1000;
     const before = Number((q.get('q') ?? '').match(/before:(\d+)/)?.[1] ?? Infinity) * 1000;
     const found = gmail.filter((m) => m.at >= after && m.at < before).sort((a, b) => b.at - a.at);
-    return send(res, 200, { messages: found.map((m) => ({ id: m.id, threadId: m.thread })), resultSizeEstimate: found.length });
+    // Pages like Gmail: maxResults (default 100, at most 500) and a page token.
+    const size = Math.min(Number(q.get('maxResults') ?? 100) || 100, 500);
+    const start = Number(q.get('pageToken') ?? 0) || 0;
+    const next = start + size < found.length ? String(start + size) : undefined;
+    return send(res, 200, { messages: found.slice(start, start + size).map((m) => ({ id: m.id, threadId: m.thread })),
+      resultSizeEstimate: found.length, ...(next ? { nextPageToken: next } : {}) });
   }
   let match = p.match(/^\/gmail\/v1\/users\/me\/messages\/([^/]+)$/);
   if (match) {
@@ -1096,6 +1217,18 @@ function route(req, url, body, res) {
   if (p === '/__e2e/oauth' && req.method === 'POST') {
     oauthMode = { ...oauthMode, ...JSON.parse(body) };
     return send(res, 200, { ok: true, oauthMode });
+  }
+  // {count, days}: that many application acknowledgements spread over the
+  // last `days` days (more job mail than one run reads).
+  if (p === '/__e2e/bulk' && req.method === 'POST') {
+    const { count = 230, days = 25 } = JSON.parse(body || '{}');
+    for (let i = 0; i < count; i += 1) {
+      const hoursAgo = 1 + (i * days * 24) / count;
+      addGmail(`bulk${i}`, `bulk-t${i}`, `Careers <jobs@company${i}.example>`, `Application received - Engineer ${i}`,
+        `Thank you for applying to the Engineer ${i} role at Company ${i}. We will review your application.`, hoursAgo);
+    }
+    historyId += 100;
+    return send(res, 200, { ok: true, total: gmail.length, historyId });
   }
   if (p === '/__e2e/next' && req.method === 'POST') {
     deliverNext();

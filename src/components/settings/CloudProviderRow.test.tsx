@@ -62,7 +62,9 @@ describe('Settings → a cloud provider connected with an API key', () => {
 
     expect(screen.getByText('Reauthentication required')).toBeTruthy();
     expect(screen.queryByText(/^Connected/)).toBeNull();
-    expect(screen.getByRole('alert').textContent).toBe('OpenAI rejected the API key. Replace it in Settings.');
+    expect(screen.getByRole('alert').textContent).toBe(
+      'OpenAI no longer accepts this API key. Replace it to keep using OpenAI.',
+    );
 
     fireEvent.click(screen.getByRole('button', { name: 'Replace key' }));
     const key = screen.getByLabelText('OpenAI API key') as HTMLInputElement;
@@ -76,17 +78,24 @@ describe('Settings → a cloud provider connected with an API key', () => {
 
   it('explains a rejected key even without a message from the provider', () => {
     render(<CloudProviderRow provider={openai({ status: 'reauth_required' })} defaultModel={null} />);
-    expect(screen.getByText('OpenAI no longer accepts this API key. Replace it to keep using OpenAI.')).toBeTruthy();
+    expect(screen.getByRole('alert').textContent).toBe(
+      'OpenAI no longer accepts this API key. Replace it to keep using OpenAI.',
+    );
   });
 
   it('offers a reconnect, not a key, when an account sign-in stopped working', () => {
     render(
       <CloudProviderRow
-        provider={openai({ connection: 'chatgpt_account', status: 'reauth_required' })}
+        provider={openai({
+          connection: 'chatgpt_account',
+          status: 'reauth_required',
+          statusMessage: 'This computer is no longer signed in to ChatGPT.',
+        })}
         defaultModel={null}
       />,
     );
     expect(screen.getByRole('button', { name: 'Reconnect' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Replace key' })).toBeNull();
+    expect(screen.getByRole('alert').textContent).toBe('This computer is no longer signed in to ChatGPT.');
   });
 });

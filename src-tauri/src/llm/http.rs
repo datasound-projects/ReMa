@@ -238,9 +238,20 @@ fn billing_error(detail: &str) -> Option<AppError> {
     None
 }
 
+/// Google answers a key it does not (or no longer) accept with a 400
+/// (`INVALID_ARGUMENT`, reason `API_KEY_INVALID`), not a 401.
+fn rejected_key(status: StatusCode, detail: &str) -> bool {
+    let lower = detail.to_lowercase();
+    status == StatusCode::BAD_REQUEST
+        && (lower.contains("api key not valid") || lower.contains("api key expired"))
+}
+
 pub fn status_error(status: StatusCode, provider: &str, detail: &str) -> AppError {
     if let Some(error) = billing_error(detail) {
         return error;
+    }
+    if rejected_key(status, detail) {
+        return AppError::authentication(format!("{provider} rejected the API key: {detail}"));
     }
     match status {
         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => AppError::authentication(format!(
@@ -323,6 +334,21 @@ mod tests {
         let limited = status_error(StatusCode::TOO_MANY_REQUESTS, "Anthropic", "slow down");
         assert!(matches!(limited, AppError::Provider(_)));
         assert!(limited.to_string().contains("slow down"));
+
+        // Gemini's answer to a key it does not accept.
+        for detail in [
+            "API key not valid. Please pass a valid API key.",
+            "API key expired. Please renew the API key.",
+        ] {
+            let gemini = status_error(StatusCode::BAD_REQUEST, "Gemini", detail);
+            assert!(matches!(gemini, AppError::Authentication(_)), "{detail}");
+            assert_eq!(
+                gemini.to_string(),
+                format!("Gemini rejected the API key: {detail}")
+            );
+        }
+        let malformed = status_error(StatusCode::BAD_REQUEST, "Gemini", "Invalid JSON payload");
+        assert!(matches!(malformed, AppError::Provider(_)));
 
         assert_eq!(
             scrub("key=abcd1234 end", &["abcd1234"]),

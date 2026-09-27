@@ -74,10 +74,13 @@ fn view(
             enabled: m.enabled,
         })
         .collect();
-    let (status, status_message) = state
-        .accounts
-        .health(&row.id)
-        .unwrap_or((ConnectionStatus::Connected, None));
+    // A key the provider rejected stays "reauth required" across restarts
+    // (account sign-ins are checked with their runtime at start instead).
+    let stored = match repo::get_setting(conn, &rejected_key(&row.id))? {
+        Some(message) => (ConnectionStatus::ReauthRequired, Some(message)),
+        None => (ConnectionStatus::Connected, None),
+    };
+    let (status, status_message) = state.accounts.health(&row.id).unwrap_or(stored);
     Ok(ProviderView {
         id: row.id.clone(),
         kind: row.kind,
@@ -118,6 +121,10 @@ fn credits_key(provider_id: &str) -> String {
     format!("provider.{provider_id}.out_of_credits")
 }
 
+fn rejected_key(provider_id: &str) -> String {
+    format!("provider.{provider_id}.key_rejected")
+}
+
 /// Remembers from a model request's outcome whether the provider's account
 /// ran out of credits, and whether it rejected its credentials (an API key
 /// that was revoked, a sign-in that ended), so Settings says so until a
@@ -149,19 +156,39 @@ pub fn note_outcome<T>(state: &AppState, provider_id: &str, outcome: &AppResult<
         state.events.providers_changed();
     }
     let key = credits_key(provider_id);
+    let rejected = rejected_key(provider_id);
     let changed = state.db.call(|conn| {
         let flagged = repo::get_setting(conn, &key)?.is_some();
-        match outcome {
+        let credits_changed = match outcome {
             Err(AppError::Billing(_)) if !flagged => {
                 repo::set_setting(conn, &key, "1")?;
-                Ok(true)
+                true
             }
             Ok(_) if flagged => {
                 repo::delete_setting(conn, &key)?;
-                Ok(true)
+                true
             }
-            _ => Ok(false),
-        }
+            _ => false,
+        };
+        // An API key the provider rejected is remembered until a request
+        // succeeds or the key is replaced, also after a restart.
+        let stored = repo::get_setting(conn, &rejected)?;
+        let key_changed = match outcome {
+            Err(AppError::Authentication(message)) => {
+                let api_key = repo::get(conn, provider_id)?
+                    .is_some_and(|row| row.connection == ConnectionMethod::ApiKey);
+                if api_key && stored.as_ref() != Some(message) {
+                    repo::set_setting(conn, &rejected, message)?;
+                }
+                false
+            }
+            Ok(_) if stored.is_some() => {
+                repo::delete_setting(conn, &rejected)?;
+                true
+            }
+            _ => false,
+        };
+        Ok(credits_changed || key_changed)
     });
     match changed {
         Ok(true) => state.events.providers_changed(),
@@ -274,6 +301,7 @@ pub fn save_connection(
         sync_models(&tx, id, fetched, fresh, None)?;
         ensure_default_model(&tx)?;
         repo::delete_setting(&tx, &credits_key(id))?;
+        repo::delete_setting(&tx, &rejected_key(id))?;
         tx.commit()?;
         Ok(())
     })?;
@@ -295,6 +323,7 @@ pub async fn disconnect(state: &AppState, provider_id: &str) -> AppResult<()> {
         let tx = conn.transaction()?;
         repo::delete(&tx, provider_id)?;
         repo::delete_setting(&tx, &credits_key(provider_id))?;
+        repo::delete_setting(&tx, &rejected_key(provider_id))?;
         ensure_default_model(&tx)?;
         tx.commit()?;
         Ok(())
@@ -389,6 +418,7 @@ pub async fn save_custom(state: &AppState, input: CustomProviderInput) -> AppRes
         // Only the configured model is enabled; others can be enabled later.
         sync_models(&tx, &id, &fetched, false, Some(&model))?;
         ensure_default_model(&tx)?;
+        repo::delete_setting(&tx, &rejected_key(&id))?;
         tx.commit()?;
         Ok(())
     })?;

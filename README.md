@@ -56,6 +56,16 @@ Rules:
 - **Rust is the source of truth.** IPC types, commands and events are generated from Rust. The frontend never hand-writes copies of them.
 - **Streaming via events.** Replies stream as typed `ChatEvent`s. Generation runs in the background, so switching chats does not interrupt it.
 
+How a model call behaves (`src-tauri/src/llm/mod.rs`, `services/chat.rs`):
+
+- **History.** A chat sends its newest turns that fit a budget (about 200,000 characters for hosted models, 16,000 for OpenAI-compatible endpoints, which often run small context windows). Older turns are left out, and the model is told so.
+- **Tool loop.** A model may call tools in up to 8 rounds (and resume a provider's `pause_turn` up to 4 times). After the 8th round it is asked once more with tools off (`tool_choice: none`, Gemini `functionCallingConfig: NONE`), so the answer is kept instead of lost. Calls a provider sends without ids get ids no other call in the answer has. Each round sends the model's turn back as it came: Anthropic content blocks, Gemini parts (thought signatures, search calls and results), OpenAI reasoning items (`encrypted_content`).
+- **Temporary errors.** 408, 429, 5xx and 529 answers, and failed connections, are asked again twice before anything streamed (1 s, then 3 s, or the provider's `retry-after` up to 20 s). An empty quota is never asked again.
+- **Output limit.** An answer cut off at the model's output limit keeps its text and ends with a note that it was cut off, in chat and in scheduled tasks. Job Mail & Interview Sync treats a cut-off reply as failed and retries it in the next run. Claude 5-series models think by default, so their small internal requests get room for thinking on top of the answer.
+- **Models without tool support.** When an endpoint refuses tools ("does not support tools"), ReMa asks again with no tools and no web access, with a system prompt that says so, and remembers it for that model while ReMa runs. Scheduled prompt tasks do the same.
+- **Inline reasoning.** `<think>…</think>` text that some local models put into their answer is left out of the reply.
+- **Credential health.** When a provider rejects its key or sign-in (401/403, or Google's `API_KEY_INVALID`), Settings shows the provider as needing attention (**Replace key** for API keys, **Reconnect** for accounts; custom endpoints say to edit the key) until a request succeeds.
+
 ## Data and credentials
 
 - **Database**: SQLite at `<app data dir>/rema.db`. On macOS that is `~/Library/Application Support/cloud.datasound.rema/`. Schema changes are versioned migrations in `src-tauri/src/db/migrations/`.
@@ -125,7 +135,7 @@ Settings → Connectors has four cards: **Gmail** and **Google Calendar** (by Go
 
 **Tokens.** Access and refresh tokens live only in the OS credential store and in Rust memory: never in SQLite, settings, logs, the interface or a model's context. Access tokens are refreshed silently five minutes before they expire (Microsoft refresh tokens rotate). A revoked or expired grant marks the account "Reconnect needed" and sends one notification; ReMa never opens a sign-in on its own. **Disconnect** stops syncing; the account's last connector also signs out: Google access is revoked at Google, Microsoft tokens are deleted (and the details link to your Microsoft account's app permissions). Your tracked applications and their history are kept.
 
-**Sync** (only when Job Mail & Interview Sync runs). Gmail: the first run records the mailbox `historyId` and reads the lookback's job mail with a narrow dated search; later runs read `users.history.list` changes only; an expired history id leads to a bounded resync. Outlook: Microsoft Graph delta queries on the Inbox, bounded by the lookback, with the stored `@odata.deltaLink`; an invalid delta token leads to a bounded resync. A longer lookback reads the added days once (a dated search, a `receivedDateTime` range). At most one sync per connector runs at a time.
+**Sync** (only when Job Mail & Interview Sync runs). Gmail: the first run records the mailbox `historyId` and reads the lookback's job mail with a narrow dated search; later runs read `users.history.list` changes only; an expired history id leads to a bounded resync. Outlook: Microsoft Graph delta queries on the Inbox, bounded by the lookback, with the stored `@odata.deltaLink`; an invalid delta token leads to a bounded resync. A longer lookback reads the added days once (a dated search, a `receivedDateTime` range). At most one sync per connector runs at a time. One run reads at most 200 Gmail messages for a first sync or a longer lookback, and at most 2,000 Outlook changes; a mailbox with more is read from its newest mail, the run says so, and the next runs continue (Outlook from the page where it stopped, older mail by date) until the lookback is covered.
 
 **From email to tracker.**
 
@@ -138,7 +148,7 @@ Settings → Connectors has four cards: **Gmail** and **Google Calendar** (by Go
 
 **Background.** Mail is read only by Job Mail & Interview Sync, on its schedule, while ReMa runs. Two options are off until you turn them on: **Run ReMa in background** (closing the window keeps ReMa in the system tray, whose menu can also run Job Mail & Interview Sync) and **Start ReMa at login** (starts in the tray). When ReMa is not running, nothing syncs; no system service is installed. A second launch shows the running ReMa.
 
-**In chat.** A question about your mail, calendar or applications gets ReMa's connector tools (`mail_search`, `mail_get_message`, `mail_get_thread`, `calendar_list_events`, `calendar_check_availability`, `calendar_create_event`, `calendar_update_event`, `applications_find_match`, `applications_update_status`, `applications_append_timeline_event`) and no web access in that answer. Mail tools return job-related mail only, marked as untrusted private data. Changes wait for your approval every time, and once an answer has read private data, every MCP tool call needs approval too.
+**In chat.** A question about your mail, calendar or applications gets ReMa's connector tools (`mail_search`, `mail_get_message`, `mail_get_thread`, `calendar_list_events`, `calendar_check_availability`, `calendar_create_event`, `calendar_update_event`, `applications_find_match`, `applications_update_status`, `applications_append_timeline_event`) and no web access in that answer. Mail tools return job-related mail only, marked as untrusted private data. Changes wait for your approval every time, and once an answer has read private data, every MCP tool call needs approval too. The model's web access and web tools stay off for the rest of that chat (later answers could otherwise carry private data into a web search), and the chat says so; job and company searches ReMa runs in it use only the words of the new message, never the chat's history. A new chat has the web again.
 
 Details, compliance and validation: [docs/connectors/](docs/connectors/implementation.md).
 
@@ -306,7 +316,7 @@ Every job search runs two routes at the same time (`src-tauri/src/career_search/
 | OpenAI · API key | Responses API `web_search` with `external_web_access: true`, `filters.allowed_domains` (the career sites of the request's scope and region, at most 20), `user_location`, `tool_choice: "required"` for the search step, sources included; `url_citation`s read. |
 | OpenAI · ChatGPT account | Codex web search, turned on per thread (`config: {"web_search": "live"}`, or the best mode the account allows: `modelProvider/capabilities/read`, `configRequirements/read`); the career sites go into its brief. |
 | Anthropic · Claude Console or API key | Server tools `web_search` and `web_fetch` (`_20260209` on Claude 4.6+ and 5-series models, `web_search_20250305` before), with `allowed_domains` and `user_location`, up to 8 uses; `pause_turn` resumed; in-band errors reported; citations kept. |
-| Gemini · API key | Grounding with Google Search. |
+| Gemini · API key | Grounding with Google Search. Next to function tools (MCP, ReMa's own tools), Gemini 3 models get Google Search with `toolConfig.includeServerSideToolInvocations: true` and their search calls go back verbatim in later rounds; Gemini 2.x cannot combine the two, so it gets ReMa's `rema_career_search` and `rema_read_page` tools instead. |
 | Unsloth Studio | Its own `web_search` tool, and only that one: `enable_tools: true`, `enabled_tools: ["web_search"]`, `permission_mode: "off"`, `X-Unsloth-Events: 1` (recognised by its model list; leaving `enabled_tools` out would also enable its code-execution tools). |
 | Other local and compatible endpoints (Ollama, LM Studio, vLLM…) | None: ReMa Jobs answers, and in normal chat the model gets ReMa's `rema_career_search` and `rema_read_page` tools. |
 

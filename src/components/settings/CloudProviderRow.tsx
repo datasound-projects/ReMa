@@ -233,16 +233,19 @@ export function CloudProviderRow({
         </div>
       )}
 
-      {problem && provider.statusMessage && !running && !choosing && (
+      {problem && connection === 'api_key' && !choosing && (
+        <p className="notice notice--danger" role="alert">
+          {provider.name} no longer accepts this API key. Replace it to keep using {provider.name}.
+        </p>
+      )}
+      {problem && connection !== 'api_key' && provider.statusMessage && !running && !choosing && (
         <p className="notice notice--danger" role="alert">
           {provider.statusMessage}
         </p>
       )}
-      {problem && !provider.statusMessage && !running && !choosing && (
+      {problem && connection !== 'api_key' && !provider.statusMessage && !running && !choosing && (
         <p className="form__hint">
-          {connection === 'api_key'
-            ? `${provider.name} no longer accepts this API key. Replace it to keep using ${provider.name}.`
-            : provider.status === 'expired'
+          {provider.status === 'expired'
               ? 'The sign-in expired and could not be renewed. Reconnect to keep using this account.'
               : 'This computer is no longer signed in. Reconnect to keep using this account.'}
         </p>
