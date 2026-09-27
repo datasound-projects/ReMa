@@ -35,6 +35,9 @@ the audit environment). Validation: [validation.md](validation.md).
 | 19 | Scheduled tasks on local models ignored the optional search service | `services/scheduler.rs` | Low | Hard-coded `None`. |
 | 20 | The chat view buffered other conversations' stream events | `src/hooks/useChat.ts` | Low | No conversation filter. |
 | 21 | A Gemini key Google no longer accepts was a generic error, never shown in Settings (found during repair) | `llm/http.rs` | Medium | Google answers with 400 `INVALID_ARGUMENT` / `API_KEY_INVALID`, not 401/403. |
+| 22 | After a restart, Settings showed a rejected API key as "Connected" again (found in the app run) | `services/providers.rs` | Medium | Provider health lived only in memory. |
+| 23 | A local model in a chat that read private data lost ReMa's web tools without a word (found in the app run) | `services/chat.rs` | Low | The notice was tied to the provider's own web search, which compatible endpoints do not have. |
+| 24 | Settings told an API-key user to "Reconnect … in Settings" (found in the app run) | `CloudProviderRow.tsx`, `llm/http.rs` | Low | One generic backend message for keys and account sign-ins. |
 
 Checked and found working: Anthropic web tool versions and `pause_turn`
 handling, OpenAI web search parameters, the locked-down Codex runtime,
@@ -78,7 +81,10 @@ says older turns were left out. A cut-off answer ends with a note. When a
 model refuses tools, the system prompt is rebuilt with web access off and
 a notice is shown; the provider is not marked as refusing web search. Once
 a chat has read private data (connector activity), later answers in it
-have no web access, MCP calls need approval, and the chat says so.
+have no web access or web tools, MCP calls need approval, and the chat says
+so, also for local models (23). Job, company, network and business
+searches in such a chat are built from the new message only; their answer
+steps get the history but no web access or tools.
 
 **Scheduler (5, 7, 19).** Prompt tasks share the chat's no-tools fallback
 and honest prompt, pass the configured optional search service, and add the
@@ -91,13 +97,24 @@ stopped at 200 messages. `sync_mailbox` records coverage only as far back
 as it read, reports why, and later runs backfill the rest by date.
 `jobs::ask` treats a cut-off reply as an error, so the email is retried.
 
-**Provider state (14).** `providers::note_outcome` records authentication
-failures as `ReauthRequired` with the reason and clears them after the next
-successful request (or a saved endpoint). Settings shows **Replace key**
-for API keys; custom endpoints say to edit the key.
+**Provider state (14, 22, 24).** `providers::note_outcome` records
+authentication failures as `ReauthRequired` with the reason and clears them
+after the next successful request (or a saved endpoint). For API-key
+connections the rejection is also stored (`provider.<id>.key_rejected`, the
+message only, never the key), so it survives a restart until a request
+succeeds, the key is replaced or the provider is removed; account sign-ins
+are checked with their runtime at start instead. Settings shows **Replace
+key** and "no longer accepts this API key" for API keys; custom endpoints
+say to edit the key. Gemini's rejection keeps Google's reason ("Gemini
+rejected the API key: API key not valid. …").
 
 **Frontend (20).** `useChat` ignores stream events of other conversations
 once its own id is known.
+
+**Harness.** The E2E stand-ins enforce the documented provider rules
+(Gemini's tool combinations and verbatim turns, an Ollama-like server that
+refuses tools, Gmail list paging) and give Gmail messages whole-millisecond
+`internalDate` values like the real API.
 
 ## Files
 

@@ -56,7 +56,7 @@ Rules:
 - **Rust is the source of truth.** IPC types, commands and events are generated from Rust. The frontend never hand-writes copies of them.
 - **Streaming via events.** Replies stream as typed `ChatEvent`s. Generation runs in the background, so switching chats does not interrupt it.
 
-How a model call behaves (`src-tauri/src/llm/mod.rs`, `services/chat.rs`):
+How a model call behaves (`src-tauri/src/llm/mod.rs`, `services/chat.rs`; audit record: [docs/audit/implementation.md](docs/audit/implementation.md)):
 
 - **History.** A chat sends its newest turns that fit a budget (about 200,000 characters for hosted models, 16,000 for OpenAI-compatible endpoints, which often run small context windows). Older turns are left out, and the model is told so.
 - **Tool loop.** A model may call tools in up to 8 rounds (and resume a provider's `pause_turn` up to 4 times). After the 8th round it is asked once more with tools off (`tool_choice: none`, Gemini `functionCallingConfig: NONE`), so the answer is kept instead of lost. Calls a provider sends without ids get ids no other call in the answer has. Each round sends the model's turn back as it came: Anthropic content blocks, Gemini parts (thought signatures, search calls and results), OpenAI reasoning items (`encrypted_content`).
@@ -64,7 +64,7 @@ How a model call behaves (`src-tauri/src/llm/mod.rs`, `services/chat.rs`):
 - **Output limit.** An answer cut off at the model's output limit keeps its text and ends with a note that it was cut off, in chat and in scheduled tasks. Job Mail & Interview Sync treats a cut-off reply as failed and retries it in the next run. Claude 5-series models think by default, so their small internal requests get room for thinking on top of the answer.
 - **Models without tool support.** When an endpoint refuses tools ("does not support tools"), ReMa asks again with no tools and no web access, with a system prompt that says so, and remembers it for that model while ReMa runs. Scheduled prompt tasks do the same.
 - **Inline reasoning.** `<think>…</think>` text that some local models put into their answer is left out of the reply.
-- **Credential health.** When a provider rejects its key or sign-in (401/403, or Google's `API_KEY_INVALID`), Settings shows the provider as needing attention (**Replace key** for API keys, **Reconnect** for accounts; custom endpoints say to edit the key) until a request succeeds.
+- **Credential health.** When a provider rejects its key or sign-in (401/403, or Google's `API_KEY_INVALID`), Settings shows the provider as needing attention (**Replace key** for API keys, **Reconnect** for accounts; custom endpoints say to edit the key) until a request succeeds. A rejected API key stays marked after a restart (only the message is stored, never the key).
 
 ## Data and credentials
 
