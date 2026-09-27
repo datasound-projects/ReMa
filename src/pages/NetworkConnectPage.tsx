@@ -317,7 +317,7 @@ function ProviderCard({ caps }: { caps: ProviderCapabilities }) {
       )}
       {caps.access !== 'not_available' && (
         <div className="nc-provider__list">
-          <span className="nc-provider__list-title">Not available to this ReMa integration</span>
+          <span className="nc-provider__list-title">Not available to ReMa now</span>
           <ul>
             {caps.unavailable
               .filter((c) => caps.access === 'connected' || c.capability === 'read_first_degree_connections')
@@ -327,6 +327,10 @@ function ProviderCard({ caps }: { caps: ProviderCapabilities }) {
                     –
                   </span>
                   {c.label}
+                  {/* The one a user can act on: what it takes (sign in, grant, or LinkedIn's approval). */}
+                  {c.capability === 'read_first_degree_connections' && (
+                    <span className="nc-provider__reason">— {c.reason}</span>
+                  )}
                 </li>
               ))}
           </ul>

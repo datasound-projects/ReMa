@@ -81,6 +81,10 @@
   color: var(--color-text-tertiary);
 }
 
+.nc-provider__reason {
+  font-size: var(--text-xs);
+}
+
 .nc-provider__icon {
   width: 14px;
   height: 14px;

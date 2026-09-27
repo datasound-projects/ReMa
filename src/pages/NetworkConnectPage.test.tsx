@@ -201,8 +201,10 @@ describe('NetworkConnectPage', () => {
     const card = await screen.findByRole('region', { name: 'LinkedIn' });
     expect(within(card).getByText('Connected as Ana Example')).toBeTruthy();
     expect(within(card).getByText('Identity')).toBeTruthy();
-    expect(within(card).getByText('Not available to this ReMa integration')).toBeTruthy();
+    expect(within(card).getByText('Not available to ReMa now')).toBeTruthy();
     expect(within(card).getByText('Connection-list access')).toBeTruthy();
+    // What it would take is said, not left to a tooltip.
+    expect(within(card).getByText('— LinkedIn has not granted ReMa access to connection lists.')).toBeTruthy();
     // Technical scope names only under advanced details.
     expect(within(card).queryByText(/openid/)).toBeNull();
     fireEvent.click(within(card).getByRole('button', { name: 'Advanced details' }));

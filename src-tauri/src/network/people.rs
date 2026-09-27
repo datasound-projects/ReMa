@@ -625,13 +625,14 @@ pub fn assess(
             RelevanceType::TeamLead,
             format!("Leads a team in the area asked about; listed as {title} at {company}"),
         ),
+        // The label already says "Company leadership".
         (TitleKind::Executive, Some(job)) => (
             RelevanceType::Executive,
-            format!("Company leadership ({title}); not tied to {job} by a source"),
+            format!("Listed as {title} at {company}; not tied to {job} by a source"),
         ),
         (TitleKind::Executive, None) => (
             RelevanceType::Executive,
-            format!("Company leadership ({title} at {company})"),
+            format!("Listed as {title} at {company}"),
         ),
         (TitleKind::Leader | TitleKind::TeamLead, _) => (
             RelevanceType::RelevantContact,
@@ -1187,6 +1188,24 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cpo.relevance, RelevanceType::DepartmentLeader);
+        // Leadership is shown as leadership, not tied to the opening.
+        let who = planner::intent(
+            "Is Nordlicht AI hiring machine learning engineers, and who should I talk to there?",
+        );
+        let ceo = person(
+            candidate(
+                "CEO",
+                Basis::OfficialPage,
+                Some("Machine Learning Engineer"),
+            ),
+            &who,
+        )
+        .unwrap();
+        assert_eq!(ceo.relevance, RelevanceType::Executive);
+        assert_eq!(
+            ceo.relevance_reason,
+            "Listed as CEO at Nordlicht AI; not tied to the Machine Learning Engineer opening by a source"
+        );
     }
 
     #[test]

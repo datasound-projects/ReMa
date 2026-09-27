@@ -182,7 +182,8 @@ function modelReply(body) {
   }
   const whole = JSON.stringify(body);
   log({ model: 'chat', leaked, career_sources: whole.includes('<career_sources>'), contacts: CONTACTS.test(whole),
-    linkedin_members: LINKEDIN_MEMBERS.test(whole), tools: (body.tools ?? []).map((t) => t.function?.name ?? t.type) });
+    linkedin_members: LINKEDIN_MEMBERS.test(whole), injected: INJECTED.test(whole),
+    tools: (body.tools ?? []).map((t) => t.function?.name ?? t.type) });
   return 'Mock answer from the local model.';
 }
 
@@ -411,6 +412,8 @@ const leakCheck = (text) => /sk-ant-|sk-e2e|Bearer /.test(text);
 const CONTACTS = /anna@nordlicht|660 1234567/;
 // LinkedIn connection data (session only): it must never reach a model.
 const LINKEDIN_MEMBERS = /Jane Example|jane-example|Lena Andere|lena-andere/;
+// The instructions planted on the test pages: they reach a model only as marked data, if at all.
+const INJECTED = /evil\.example|Ignore all previous instructions/;
 /** Which step a model request is, from ReMa's instructions. */
 function modelStep(system) {
   if (!system.startsWith('You are the search step of ReMa')) return 'answer';
@@ -423,7 +426,7 @@ function logModel(provider, step, body, extra = {}) {
   log({ model: provider, step, tools, allowed_domains: (web?.allowed_domains ?? web?.filters?.allowed_domains ?? []).length,
     user_location: web?.user_location?.city ?? null, tool_choice: body.tool_choice ?? null, leaked: leakCheck(whole),
     career_sources: whole.includes('<career_sources>'), contacts: CONTACTS.test(whole),
-    linkedin_members: LINKEDIN_MEMBERS.test(whole), ...extra });
+    linkedin_members: LINKEDIN_MEMBERS.test(whole), injected: INJECTED.test(whole), ...extra });
 }
 function modelText(step) {
   if (step === 'jobs') return searchAnswer();
