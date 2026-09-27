@@ -656,8 +656,8 @@ pub fn lift_suppression(state: &AppState, suppression_id: &str) -> AppResult<()>
 }
 
 /// Deletes a contact and what depends on it (B29): drafts addressed to
-/// them are deleted, their name is removed from stored research, and a
-/// record without the data notes the deletion.
+/// them are deleted, a person's name is removed from stored research, and
+/// a record without the data notes the deletion.
 pub fn delete_contact(
     state: &AppState,
     id: &str,
@@ -670,12 +670,23 @@ pub fn delete_contact(
         let removed = store::remove_contact(&tx, id, contact_id, expected_revision, now)?;
         let mut drafts = 0;
         let mut redacted = 0;
-        if let Some(name) = removed.as_ref().and_then(|r| r.name.clone()) {
-            drafts = tx.execute(
-                "DELETE FROM business_drafts WHERE opportunity_id = ?1 AND recipient LIKE ?2",
-                rusqlite::params![id, format!("%{name}%")],
-            )?;
-            redacted = store::redact_text(&tx, &name, now)?;
+        match removed.as_ref().map(|r| (r.name.clone(), r.role.clone())) {
+            Some((Some(name), _)) => {
+                drafts = tx.execute(
+                    "DELETE FROM business_drafts WHERE opportunity_id = ?1 AND recipient LIKE ?2",
+                    rusqlite::params![id, format!("%{name}%")],
+                )?;
+                redacted = store::redact_text(&tx, &name, now)?;
+            }
+            // A buyer role names nobody: only the drafts addressed to it go.
+            Some((None, role)) => {
+                drafts = tx.execute(
+                    "DELETE FROM business_drafts
+                     WHERE opportunity_id = ?1 AND recipient = ?2 COLLATE NOCASE",
+                    rusqlite::params![id, role],
+                )?;
+            }
+            None => {}
         }
         store::record_redaction(
             &tx,

@@ -2821,15 +2821,64 @@ mod tests {
                 crate::business::tests::offer_content(),
                 "offer",
             );
-            let sent = send_message(
+            // What must stay out: another offer, private pipeline notes and
+            // the career Profile, even with the Profile switched on.
+            let mut other = crate::business::model::OfferContent::empty(
+                "AI Automation Consulting",
+                crate::business::model::OfferKind::Service,
+            );
+            other.summary =
+                crate::business::model::Claim::user("Pilot pricing agreed with Kapsch.");
+            other.problem = crate::business::model::Claim::user("Manual order intake.");
+            crate::business::tests::reviewed(&state, other, "other");
+            let lead = crate::business::pipeline::create_manual(
                 &state,
-                send(
-                    None,
-                    "Find Austrian manufacturing companies for my Support Workspace.",
-                ),
+                crate::business::pipeline::ManualOpportunity {
+                    kind: crate::business::model::OpportunityKind::Service,
+                    name: "Stahl Nord AG".into(),
+                    company_name: Some("Stahl Nord AG".into()),
+                    offer_id: None,
+                    use_case: String::new(),
+                    source_url: None,
+                    amount: None,
+                    idempotency_key: "lead-1".into(),
+                },
             )
-            .await
             .unwrap();
+            crate::business::pipeline::edit(
+                &state,
+                &lead.id,
+                crate::business::store::OpportunityEdit {
+                    name: lead.name.clone(),
+                    use_case: lead.use_case.clone(),
+                    next_step: String::new(),
+                    notes: "Budget holder is on leave until March.".into(),
+                    amount: None,
+                    archived: false,
+                },
+                lead.revision,
+            )
+            .unwrap();
+            crate::services::profile::save(
+                &state,
+                Profile {
+                    first_name: "Ana".into(),
+                    custom_fields: vec![CustomField {
+                        label: "Salary expectation".into(),
+                        kind: CustomFieldKind::Text,
+                        value: "EUR 95,000".into(),
+                        document_id: None,
+                    }],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let mut input = send(
+                None,
+                "Find Austrian manufacturing companies for my Support Workspace.",
+            );
+            input.use_profile = true;
+            let sent = send_message(&state, input).await.unwrap();
             let done = finished(&state, sent.assistant_message.id).await;
             assert_eq!(done.status, MessageStatus::Complete, "{:?}", done.error);
             let content = &done.content;
@@ -2846,6 +2895,13 @@ mod tests {
             let turn = &requests.last().unwrap().1.turns.last().unwrap().content;
             assert!(turn.contains("<business_results>"), "{turn}");
             assert!(!turn.contains("Ignore all previous instructions"));
+            for (_, request) in &requests {
+                let sent = format!("{request:?}");
+                for private in ["Kapsch", "on leave until March", "95,000"] {
+                    assert!(!sent.contains(private), "{private} reached a model");
+                }
+            }
+            assert!(!content.contains("Kapsch") && !content.contains("on leave"));
         }
 
         #[tokio::test]

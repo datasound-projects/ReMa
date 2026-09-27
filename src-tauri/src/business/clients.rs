@@ -1731,6 +1731,56 @@ mod tests {
     }
 
     #[test]
+    fn one_posting_on_several_boards_counts_once() {
+        let (r, c) = offer();
+        let posting = |url: &str| {
+            evidence::new(
+                DataSource::JobsMcp,
+                "Job posting",
+                Some(url),
+                Some("Support Engineer (Zendesk)"),
+                Supports::CompanyHiring,
+                Some("Run our Zendesk service desk with a knowledge base search."),
+                1,
+                true,
+            )
+        };
+        let mut once = company(
+            "Maschinenbau Huber",
+            Some("manufacturing"),
+            Some(180),
+            "Linz, Austria",
+        );
+        once.evidence
+            .push(posting("https://boards.example/huber/support-engineer"));
+        let mut repeated = once.clone();
+        repeated
+            .evidence
+            .push(posting("https://boards.example/huber/support-engineer"));
+        repeated
+            .evidence
+            .push(posting("https://other-board.example/jobs/42"));
+        let fit_of = |co: &Company| {
+            assess(
+                co,
+                &Inspection::default(),
+                &r,
+                &c,
+                &criteria("Austria"),
+                &Locations::default(),
+                true,
+                10,
+            )
+            .0
+        };
+        let (a, b) = (fit_of(&once), fit_of(&repeated));
+        assert!(a.score.is_some(), "{a:#?}");
+        assert_eq!(a.score, b.score);
+        assert_eq!(a.coverage, b.coverage);
+        assert_eq!(a.evidence.len(), b.evidence.len(), "{:#?}", b.evidence);
+    }
+
+    #[test]
     fn a_company_outside_the_size_band_is_not_said_to_match_it() {
         let (r, c) = offer();
         let large = company("Stahl Nord AG", Some("manufacturing"), Some(5000), "Vienna");

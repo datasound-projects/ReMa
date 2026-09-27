@@ -1,7 +1,9 @@
 //! Entity resolution (NC §35): one company or person per real entity,
 //! merged conservatively. Companies merge on the same normalized name or
-//! the same own domain; people only on the same name at the same company
-//! with a compatible title or the same profile — never on a name alone.
+//! the same own domain — but not when one name extends the other on that
+//! domain (a likely division or subsidiary); people only on the same name
+//! at the same company with a compatible title or the same profile — never
+//! on a name alone.
 
 use super::{
     evidence,
@@ -150,7 +152,9 @@ pub fn merge_companies(companies: Vec<Company>) -> Vec<Company> {
                 (&kept.domain, &company.domain),
                 (Some(a), Some(b)) if a == b
             );
-            same_domain || (same_name && !conflicting_domains)
+            let related = extends(&kept.name, &company.name)
+                || kept.aliases.iter().any(|a| extends(a, &company.name));
+            (same_domain && !related) || (same_name && !conflicting_domains)
         });
         match same {
             Some(i) => {
@@ -200,11 +204,40 @@ pub fn merge_companies(companies: Vec<Company>) -> Vec<Company> {
                         &format!("{key}|{}", company.domain.clone().unwrap_or_default()),
                     );
                 }
+                // A division or subsidiary on the same web domain: said,
+                // not merged.
+                if let Some(relative) = out
+                    .iter_mut()
+                    .find(|kept| kept.domain.is_some() && kept.domain == company.domain)
+                {
+                    let apart = |other: &str| {
+                        format!(
+                            "shares its web domain with {other}; kept apart as a possible \
+                             subsidiary or division"
+                        )
+                    };
+                    let note = apart(&company.name);
+                    if !relative.unverified.contains(&note) {
+                        relative.unverified.push(note);
+                    }
+                    company.unverified.push(apart(&relative.name));
+                }
                 out.push(company);
             }
         }
     }
     out
+}
+
+/// Whether one company name extends the other word for word ("Siemens" and
+/// "Siemens Mobility"): on one web domain, more likely a division or a
+/// subsidiary than the same company.
+fn extends(a: &str, b: &str) -> bool {
+    let (a, b) = (company_key(a), company_key(b));
+    let a: Vec<&str> = a.split_whitespace().collect();
+    let b: Vec<&str> = b.split_whitespace().collect();
+    let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    !short.is_empty() && long.len() > short.len() && long[..short.len()] == short[..]
 }
 
 fn compatible_titles(a: Option<&str>, b: Option<&str>) -> bool {
@@ -368,6 +401,17 @@ mod tests {
         assert_eq!(merged.len(), 2);
         assert_ne!(merged[0].id, merged[1].id);
         assert!(merged.iter().all(|c| !c.unverified.is_empty()));
+
+        // A division or subsidiary on the parent's web domain stays apart,
+        // and both say why.
+        let merged = merge_companies(vec![
+            company("Siemens AG", Some("siemens.example")),
+            company("Siemens Mobility GmbH", Some("siemens.example")),
+        ]);
+        assert_eq!(merged.len(), 2, "{merged:#?}");
+        assert_ne!(merged[0].id, merged[1].id);
+        assert!(merged[0].unverified[0].contains("Siemens Mobility GmbH"));
+        assert!(merged[1].unverified[0].contains("possible subsidiary or division"));
         assert_eq!(own_domain("https://jobs.lever.co/atlas"), None);
         assert_eq!(
             own_domain("https://careers.atlas-bank.example/x").as_deref(),

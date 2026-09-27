@@ -716,8 +716,10 @@ function Contacts({ o, blocked }: { o: Opportunity; blocked: Set<string> }) {
               >
                 <span>
                   {confirm.kind === 'delete'
-                    ? 'Delete this contact? Drafts addressed to them are deleted and their name is removed from notes and history; a redaction record is kept.'
-                    : 'Research and drafting will not bring this person back as a contact. Only you can lift it.'}
+                    ? c.name
+                      ? 'Delete this contact? Drafts addressed to them are deleted and their name is removed from notes and history; a redaction record is kept.'
+                      : 'Delete this buyer role? Drafts addressed to it are deleted; a record of the deletion is kept.'
+                    : `Research and drafting will not bring this ${c.name ? 'person' : 'buyer role'} back as a contact. Only you can lift it.`}
                 </span>
                 <button
                   type="button"

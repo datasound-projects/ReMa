@@ -1066,6 +1066,117 @@ async fn deleting_a_contact_removes_what_depends_on_it() {
 }
 
 #[tokio::test]
+async fn deleting_a_buyer_role_deletes_the_drafts_addressed_to_it() {
+    let (state, _) = testing::state(Arc::new(FakeLanguageModel::replying(&[])));
+    let offer = reviewed(&state, offer_content(), "offer");
+    let offer_ref = state
+        .db
+        .call(|c| store::offer_ref(c, &offer.id, 1))
+        .unwrap();
+    let role = |role: &str| super::model::ContactRef {
+        id: pipeline::role_contact_id("maschinenbau huber", role),
+        name: None,
+        title: None,
+        role: role.into(),
+        profile_url: None,
+        source_url: None,
+    };
+    let (id, _) = state
+        .db
+        .call(|c| {
+            store::save_opportunity(
+                c,
+                &store::NewOpportunity {
+                    kind: super::model::OpportunityKind::Product,
+                    name: "Huber".into(),
+                    company_key: Some("maschinenbau huber".into()),
+                    company_name: Some("Maschinenbau Huber".into()),
+                    offer: Some(offer_ref),
+                    canonical_job_id: None,
+                    source_url: None,
+                    use_case: String::new(),
+                    contacts: vec![role("Head of Customer Support"), role("Head of Operations")],
+                    evidence: vec![],
+                    amount: None,
+                    contract: None,
+                    listing_status: None,
+                    idempotency_key: "client:x".into(),
+                    researched_at: None,
+                },
+                1,
+            )
+        })
+        .unwrap();
+    for (role, key) in [
+        ("Head of Customer Support", "d1"),
+        ("Head of Operations", "d2"),
+    ] {
+        let contact = pipeline::role_contact_id("maschinenbau huber", role);
+        gtm::draft(
+            &state,
+            gtm::DraftRequest {
+                opportunity_id: Some(id.clone()),
+                plan_id: None,
+                experiment_id: None,
+                variant: None,
+                contact_id: Some(contact),
+                role: None,
+                channel: "email".into(),
+                idempotency_key: key.into(),
+            },
+            None,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    }
+    let o = state
+        .db
+        .call(|c| store::opportunity(c, &id))
+        .unwrap()
+        .unwrap();
+    let removed = pipeline::role_contact_id("maschinenbau huber", "Head of Customer Support");
+    let after = pipeline::delete_contact(&state, &id, &removed, o.revision).unwrap();
+    assert_eq!(after.contacts.len(), 1);
+    // Only the deleted role's draft goes; the other role's stays.
+    let drafts = state.db.call(|c| store::drafts(c)).unwrap();
+    let recipients: Vec<&str> = drafts.iter().map(|d| d.recipient.as_str()).collect();
+    assert_eq!(recipients, ["Head of Operations"]);
+    let redactions = state.db.call(|c| store::redactions(c)).unwrap();
+    assert!(redactions
+        .iter()
+        .any(|r| r.kind == "contact_deleted" && r.detail.contains("1 draft(s) deleted")));
+}
+
+#[tokio::test]
+async fn a_total_outage_is_a_failure_not_an_empty_market() {
+    let down = MockServer::start(|_| Some((500, String::new()))).await;
+    let state = state_for(&down);
+    let offer = reviewed(&state, offer_content(), "offer");
+    let results = clients(
+        &state,
+        &offer,
+        "Find Austrian manufacturing companies for my Support Workspace",
+    )
+    .await;
+    assert_eq!(results.status, RunStatus::Failed, "{results:#?}");
+    assert!(!results.failures.is_empty());
+    assert!(results.confirmed.is_empty() && results.needs_verification.is_empty());
+    let run = state
+        .db
+        .call(|c| store::last_run(c, RunKind::Clients))
+        .unwrap()
+        .unwrap();
+    assert_eq!(run.status, RunStatus::Failed);
+    let shown = super::render::clients_markdown(&results);
+    assert!(
+        shown.contains("Failed: no source could be searched"),
+        "{shown}"
+    );
+    assert!(!shown.contains("No verified matches"), "{shown}");
+}
+
+#[tokio::test]
 async fn contract_search_applies_strict_terms_and_saves_without_an_application() {
     let site = sources().await;
     let state = state_for(&site);
@@ -1145,6 +1256,80 @@ async fn contract_search_applies_strict_terms_and_saves_without_an_application()
         .call(|c| Ok(c.query_row("SELECT COUNT(*) FROM job_applications", [], |r| r.get(0))?))
         .unwrap();
     assert_eq!(applications, 0);
+    // A listing that has closed keeps the user's record: only its status
+    // changes.
+    let (id, _) = state
+        .db
+        .call(|c| {
+            store::save_opportunity(
+                c,
+                &store::NewOpportunity {
+                    kind: super::model::OpportunityKind::Contract,
+                    name: "Freelance Data Engineer".into(),
+                    company_key: None,
+                    company_name: None,
+                    offer: None,
+                    canonical_job_id: None,
+                    source_url: Some(format!("{}/listings/closed-1", site.base_url)),
+                    use_case: String::new(),
+                    contacts: vec![],
+                    evidence: vec![],
+                    amount: None,
+                    contract: None,
+                    listing_status: Some("Open when found".into()),
+                    idempotency_key: "contract:closed-1".into(),
+                    researched_at: None,
+                },
+                1,
+            )
+        })
+        .unwrap();
+    let saved = state
+        .db
+        .call(|c| store::opportunity(c, &id))
+        .unwrap()
+        .unwrap();
+    let noted = pipeline::edit(
+        &state,
+        &id,
+        store::OpportunityEdit {
+            name: saved.name.clone(),
+            use_case: saved.use_case.clone(),
+            next_step: "Ask the agency for the end client".into(),
+            notes: "Rate negotiable per the recruiter.".into(),
+            amount: None,
+            archived: false,
+        },
+        saved.revision,
+    )
+    .unwrap();
+    let qualified = pipeline::change_stage(
+        &state,
+        &id,
+        pipeline::StageChange {
+            to: PipelineStage::Qualified,
+            reason: None,
+            activity: None,
+            occurred_at: None,
+            person: None,
+            amount: None,
+            expected_revision: noted.revision,
+            idempotency_key: "closed-qualified".into(),
+        },
+    )
+    .unwrap();
+    let checked = pipeline::refresh_listing(&state, &id).await.unwrap();
+    assert!(
+        checked
+            .listing_status
+            .as_deref()
+            .is_some_and(|s| s.starts_with("Closed when checked")),
+        "{:?}",
+        checked.listing_status
+    );
+    assert_eq!(checked.stage, qualified.stage);
+    assert_eq!(checked.notes, "Rate negotiable per the recruiter.");
+    assert_eq!(checked.next_step, "Ask the agency for the end client");
 }
 
 #[tokio::test]
