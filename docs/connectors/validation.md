@@ -10,10 +10,12 @@ request and response formats.
 
 ## 1. Automated checks
 
+Rust 1.94.1 and 1.98.1 (the CI's stable) gave the same results.
+
 | Check | Result |
 |---|---|
 | `cargo fmt --check` | clean |
-| `cargo clippy --all-targets -- -D warnings` | clean |
+| `cargo clippy --all-targets --locked -- -D warnings` | clean |
 | `cargo test` | 446 passed, 3 ignored (pre-existing explicit-only tests: bindings export, a measurement, a live Codex check) |
 | `pnpm typecheck`, `pnpm lint` | clean |
 | `pnpm test` | 73 passed (15 files) |
