@@ -217,7 +217,7 @@ button.notifications__item-button:hover {
 .apps-detail {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: var(--space-8);
 }
 
 .apps-detail__summary {
@@ -225,7 +225,6 @@ button.notifications__item-button:hover {
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-3);
-  margin-bottom: var(--space-4);
 }
 
 .apps-detail__next {
@@ -237,7 +236,6 @@ button.notifications__item-button:hover {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
-  margin-top: var(--space-3);
 }
 
 .apps-interview {
@@ -316,7 +314,7 @@ button.notifications__item-button:hover {
 .apps-timeline {
   display: flex;
   flex-direction: column;
-  margin: var(--space-3) 0 0;
+  margin: 0;
   padding: 0;
   list-style: none;
 }

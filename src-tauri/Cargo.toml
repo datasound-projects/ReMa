@@ -25,6 +25,9 @@ tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"
 # Optional "Start ReMa at login" (off unless the user turns it on).
 tauri-plugin-autostart = "2"
+# A second launch (e.g. while ReMa runs in the tray) shows the running app
+# instead of starting another instance that would sync the same mailboxes.
+tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

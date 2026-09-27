@@ -84,6 +84,10 @@ pub fn run() {
     }
 
     let app = tauri::Builder::default()
+        // First: a second launch hands over to this instance and exits.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_main_window(app)
+        }))
         .plugin(tauri_plugin_opener::init())
         // Used from Rust only; no dialog permission is granted to any webview.
         .plugin(tauri_plugin_dialog::init())

@@ -170,6 +170,18 @@ export function ApplicationsPage({ applicationId }: { applicationId: number | nu
   );
 }
 
+/** "Fri, 2 Oct, 14:00–15:00 (Europe/Vienna)" in the interview's own time zone. */
+function interviewWhen(start: number, end: number, timezone: string | null): string {
+  const options: Intl.DateTimeFormatOptions = { weekday: 'short', day: 'numeric', month: 'short' };
+  let day: string;
+  try {
+    day = new Intl.DateTimeFormat(undefined, { ...options, timeZone: timezone ?? undefined }).format(start);
+  } catch {
+    day = new Intl.DateTimeFormat(undefined, options).format(start);
+  }
+  return `${day}, ${formatTimeRange(start, end, timezone)}${timezone ? ` (${timezone})` : ''}`;
+}
+
 function nextStep(row: ApplicationRow): string {
   if (row.interviewAt !== null) return `Interview ${formatInTimezone(row.interviewAt, row.interviewTimezone)}`;
   return row.nextAction ?? '—';
@@ -333,12 +345,7 @@ function InterviewCard({ interview: i }: { interview: InterviewView }) {
   // "conflict"), which offers "Add anyway".
   const add = (allowConflict: boolean) => void action.run(() => addInterviewToCalendar(i.id, allowConflict));
 
-  const when =
-    i.startAt !== null && i.endAt !== null
-      ? `${formatInTimezone(i.startAt, i.timezone)} (${formatTimeRange(i.startAt, i.endAt, i.timezone)}${
-          i.timezone ? `, ${i.timezone}` : ''
-        })`
-      : null;
+  const when = i.startAt !== null && i.endAt !== null ? interviewWhen(i.startAt, i.endAt, i.timezone) : null;
 
   return (
     <div className="apps-interview">
@@ -380,7 +387,7 @@ function InterviewCard({ interview: i }: { interview: InterviewView }) {
           <ul>
             {i.proposedSlots.map((slot, n) => (
               <li key={n}>
-                {formatInTimezone(slot.startAt, null)} ({formatTimeRange(slot.startAt, slot.endAt, null)}) —{' '}
+                {interviewWhen(slot.startAt, slot.endAt, null)} —{' '}
                 {slot.available === true
                   ? 'you are free'
                   : slot.available === false

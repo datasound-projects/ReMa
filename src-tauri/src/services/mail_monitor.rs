@@ -19,7 +19,7 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    connectors::{self, sync},
+    connectors::{self, calendar::CalendarProvider, sync},
     db::connectors as repo,
     error::{AppError, AppResult},
     jobs::{self, MailSource, RunConfig, RunModel, Sources},
@@ -97,6 +97,24 @@ pub fn background_model(state: &AppState) -> Option<ModelRef> {
     catalog
         .default_model
         .or_else(|| catalog.models.first().map(|m| m.model.clone()))
+}
+
+/// Records a calendar step on the calendars it used (their "Last sync").
+fn calendars_checked(
+    state: &AppState,
+    calendars: &[Box<dyn CalendarProvider>],
+    report: &JobRunReport,
+) {
+    if report.calendar.is_none() {
+        return;
+    }
+    let now = now_ms();
+    for calendar in calendars {
+        let id = ConnectorId::of(calendar.provider(), ConnectorKind::Calendar);
+        let _ = state
+            .db
+            .call(|c| repo::sync_finished(c, id, now, None, None));
+    }
 }
 
 /// A user-readable message and technical detail for a failed sync.
@@ -195,7 +213,7 @@ async fn run_mailbox(
         }),
         _ => None,
     };
-    jobs::run(
+    let report = jobs::run(
         state,
         model,
         Sources {
@@ -211,7 +229,9 @@ async fn run_mailbox(
         cancel,
         now,
     )
-    .await
+    .await?;
+    calendars_checked(state, &calendars, &report);
+    Ok(report)
 }
 
 /// A calendar "sync": checks access and runs the interview step with it.
@@ -308,6 +328,9 @@ pub async fn run_task(
         })?;
     }
     drop(guards);
+    if let Ok(report) = &result {
+        calendars_checked(state, &calendars, report);
+    }
     state.events.connectors_changed();
     let mut report = result?;
     for id in busy {
@@ -317,4 +340,50 @@ pub async fn run_task(
         ));
     }
     Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{sync::Arc, time::Duration};
+
+    use super::*;
+    use crate::{llm::fake::FakeLanguageModel, state::testing};
+
+    #[tokio::test]
+    async fn the_worker_starts_only_due_mail_connectors_once() {
+        let (state, _) = testing::state(Arc::new(FakeLanguageModel::replying(&[])));
+        let now = now_ms();
+        state
+            .db
+            .call(|c| {
+                // Enabling schedules a sync right away.
+                for id in ConnectorId::ALL {
+                    repo::set_enabled(c, id, true, now)?;
+                }
+                repo::set_background_sync(c, ConnectorId::OutlookMail, false)?;
+                repo::schedule_sync(c, ConnectorId::OutlookMail, Some(now - 1))
+            })
+            .unwrap();
+
+        // Calendars are not synced on their own; Outlook Mail has
+        // background sync off.
+        assert_eq!(tick(&state), [ConnectorId::Gmail]);
+        assert!(tick(&state).is_empty(), "never twice at the same time");
+
+        // The run ends (here: no account, so it fails) and the next one is
+        // scheduled an interval later.
+        for _ in 0..200 {
+            if !state.connectors.is_syncing(ConnectorId::Gmail) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let record = state
+            .db
+            .call(|c| repo::connector(c, ConnectorId::Gmail))
+            .unwrap();
+        assert!(record.last_error.is_some());
+        assert!(record.next_sync_at.unwrap() > now + 10 * 60_000);
+        assert!(tick(&state).is_empty());
+    }
 }

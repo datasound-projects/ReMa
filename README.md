@@ -9,8 +9,9 @@ Rust owns application state, persistence, scheduling, validation, provider confi
 - **Chat**: a general-purpose AI chat with streaming responses, Stop, Retry, Copy, Markdown (code, lists, tables, links) and persistent conversation history ("Recents"). Job searches always search the web first: ReMa validates the postings it finds and shows only those, with direct links, before the model comments (see [Web search](#web-search)).
 - **Models**: OpenAI, Anthropic, Google Gemini, and any OpenAI-compatible endpoint (Ollama, LM Studio, vLLM, …). Connect OpenAI with your **ChatGPT account** and Anthropic with your **Claude Console account** in the browser, or use API keys. Pick the model in the chat composer.
 - **Scheduled Tasks**: schedule the prompt you are writing, straight from the composer. Supports one-time, daily, every N days, selected weekdays, and intervals of 15 minutes or more. A task can end on a date or after N runs. You can edit, pause, resume, delete or run tasks now, and each task keeps its run history with results.
-- **Settings**: connect providers, choose which models appear in the chat, and set the default model. Connect Google Workspace (Gmail and Calendar) with one sign-in.
-- **Job applications (Gmail)**: a scheduled task type that finds job-application emails, keeps one record per application (Confirmed, Application in Process, Needs Your Action, Upcoming Interview, Rejected), and shows an overview table in the task history. It can add confirmed interviews to Google Calendar and report calendar conflicts.
+- **Settings**: connect providers, choose which models appear in the chat, and set the default model. **Connectors** add Gmail, Google Calendar, Outlook Mail and Outlook Calendar with a sign-in in your browser (see [Connectors](#connectors)).
+- **Applications**: the job applications ReMa tracks from your connected mail (received, in process, action required, interview, rejected, offer), each with a timeline that says where every change came from ("Application changed to Interview · Source: Gmail message · Confidence: 98%"), its interviews and its emails. Confirmed interviews are checked against your calendar and added after you confirm (or automatically, if you choose).
+- **Job Application Mail Monitor**: mail connectors sync in the background while ReMa runs, and a scheduled task type runs the same pipeline on its own schedule and model. Notifications appear in the bell at the top and from the operating system.
 - **Profile**: your career context, in three independent parts. **Documents & Credentials** (the default) keeps your CV files and optional credentials (degrees, certificates, courses, licenses, badges) with an in-app preview. **Custom Profile** is an optional structured form. **Portfolio Studio** builds new CVs from 12 templates and exports them as PDF. Uploading a CV never fills the Custom Profile or opens the builder.
 - **Agents**: reusable instructions for the model (a page directly below Chat). Six built-in agents (Job Search, Job Match Analyst, CV Tailoring, Interview Prep, Application Strategist, Career Research) and your own custom agents.
 - **MCP (Model Context Protocol)**: connect local or remote MCP servers in Settings, turn them on, and pick them per chat. The model can then call their tools; tools that may change something wait for your approval.
@@ -42,7 +43,8 @@ Rust services               src-tauri/src/services   (chat, chat_tools, provider
       ↓
 Persistence / providers     src-tauri/src/db (SQLite) · src-tauri/src/llm (adapters) · src-tauri/src/secrets (OS keychain)
 Provider accounts           src-tauri/src/accounts (official local runtimes: Codex app-server, Anthropic CLI)
-Integrations                src-tauri/src/integrations/google (OAuth, Gmail tool, Calendar tool)
+Connectors                  src-tauri/src/connectors (OAuth + PKCE, token manager, Gmail, Google Calendar,
+                                                      Outlook mail and calendar via Microsoft Graph, sync)
 ```
 
 Rules:
@@ -57,7 +59,7 @@ Rules:
 - **Database**: SQLite at `<app data dir>/rema.db`. On macOS that is `~/Library/Application Support/cloud.datasound.rema/`. Schema changes are versioned migrations in `src-tauri/src/db/migrations/`.
 - **Profile documents**: copied into `<app data dir>/profile-documents/` under generated names. The original file name, size, SHA-256 and extracted text are stored in SQLite. The original file is never changed or moved. The interface reads a stored file only through the `rema-doc` protocol (by id, ReMa's own window only), never by path.
 - **Portfolio Studio CVs, custom agents and MCP server settings** are stored in SQLite. MCP secrets (tokens, header values, environment variable values, OAuth credentials) are in the OS credential store, never in the database or the interface.
-- **Credentials**: API keys and Google OAuth tokens are stored in the operating system's credential store: macOS Keychain, Windows Credential Manager, or Secret Service on Linux. They never go in the database, config files or the frontend. The UI can only save, replace or remove a key.
+- **Credentials**: API keys and connector OAuth tokens (Google, Microsoft) are stored in the operating system's credential store: macOS Keychain, Windows Credential Manager, or Secret Service on Linux. They never go in the database, config files or the frontend. The UI can only save, replace or remove a key.
 - **Authentication**: OpenAI — ChatGPT account (through OpenAI's Codex runtime) or API key. Anthropic — Claude Console account (through Anthropic's CLI) or API key. Gemini — API key. OpenAI-compatible endpoints take an optional key. Account credentials are kept by the provider's own runtime, never by ReMa. See [Provider accounts](#provider-accounts).
 
 ## Provider accounts
@@ -105,35 +107,38 @@ So the Claude Agent SDK and Claude Code subscription sign-in are not used. If An
 
 **Finding the runtimes.** Apps opened from the Finder don't inherit the terminal's `PATH`. ReMa therefore also looks in the usual install folders (Homebrew, npm, Volta, nvm, pnpm, Go) and asks your login shell. Set `REMA_CODEX_PATH` or `REMA_ANT_PATH` to use a specific executable. Debug builds also accept `REMA_ANTHROPIC_BASE_URL` / `REMA_OPENAI_BASE_URL` / `REMA_GEMINI_BASE_URL` for local mock servers.
 
-## Google Workspace
+## Connectors
 
-**Connecting.** ReMa uses Google's official OAuth 2.0 flow for installed apps: authorization code with PKCE (S256), a random `state`, and a one-time loopback redirect (`http://127.0.0.1:<random port>`). The browser opens Google's consent page, and ReMa exchanges the code in Rust. The access and refresh tokens go to the OS keychain and are refreshed automatically. If Google revokes access, Settings shows "Reconnect needed". **Disconnect** revokes the grant at Google and deletes the tokens. Tokens never reach SQLite, config files, the frontend or a model.
+Settings → Connectors has four cards: **Gmail** and **Google Calendar** (by Google), **Outlook Mail** and **Outlook Calendar** (by Microsoft). `+` connects, a green check shows a working connector, and a card that needs attention says why (reconnect, missing permission, failed sync) with technical details on request. A card opens its details: account, permissions, last and next sync, **Sync now**, **Reconnect**, **Disconnect** (after confirmation) and background sync.
 
-**OAuth client.** Google requires every app to have its own OAuth client. Create one of type **Desktop app** in Google Cloud Console (APIs & Services → Credentials), enable the Gmail API and the Google Calendar API, and enter the client ID and secret in Settings → Google Workspace. The secret is stored in the keychain. A build can also embed a client with `REMA_GOOGLE_CLIENT_ID` / `REMA_GOOGLE_CLIENT_SECRET`.
+**Signing in.** ReMa uses OAuth 2.0 for native apps (RFC 8252): authorization code with PKCE (S256), a random `state` checked on return, a one-time loopback redirect (`http://127.0.0.1:<port>` for Google, `http://localhost:<port>` for Microsoft) and your default browser, never an embedded one. ReMa brings its own app registrations (a Google "Desktop app" client and a Microsoft Entra public client, set when ReMa is built; see [docs/connectors/registration.md](docs/connectors/registration.md)); users never create or enter OAuth clients. Installed apps get no incremental authorization, so a Google sign-in asks for the union of the enabled Google connectors, and ReMa checks which permissions were actually granted.
 
-**Scopes.** ReMa asks only for the services that are enabled:
+**Permissions** (least privilege, no send or modify scope):
 
-- `gmail.readonly`: read-only mail access.
-- `calendar.events`: read events to find conflicts, and create or update interview events.
-- `openid email`: shows which account is connected.
+| Connector | Google | Microsoft Graph (delegated) |
+|---|---|---|
+| Identity | `openid`, `email`, `profile` | `openid`, `profile`, `email`, `offline_access`, `User.Read` |
+| Mail | `gmail.readonly` | `Mail.Read` |
+| Calendar | `calendar.events`, `calendar.freebusy` | `Calendars.ReadWrite` |
 
-**Job-application runs.** Each run works in this order:
+**Tokens.** Access and refresh tokens live only in the OS credential store and in Rust memory: never in SQLite, settings, logs, the interface or a model's context. Access tokens are refreshed silently five minutes before they expire (Microsoft refresh tokens rotate). A revoked or expired grant marks the account "Reconnect needed" and sends one notification; ReMa never opens a sign-in on its own. **Disconnect** stops syncing; the account's last connector also signs out: Google access is revoked at Google, Microsoft tokens are deleted (and the details link to your Microsoft account's app permissions). Your tracked applications and their history are kept.
 
-1. Rust searches Gmail with a fixed query. The window is the lookback, extended back to the last successful run.
-2. Rust skips emails that earlier runs already handled.
-3. The model sees only the sender, subject and a short snippet of each new candidate, and picks the job-related ones.
-4. Only those emails are read in full (truncated). The model returns JSON, and Rust validates it before storing anything.
+**Sync.** Gmail: the first sync records the mailbox `historyId` and reads recent job mail with a narrow dated search; later syncs read `users.history.list` changes only; an expired history id leads to a bounded resync. Outlook: Microsoft Graph delta queries on the Inbox with the stored `@odata.deltaLink`; an invalid delta token leads to a bounded resync. At most one sync per connector runs at a time.
 
-Applications are matched deterministically, by Gmail thread, reference number, company plus role, or company domain, so repeated emails update one record.
+**From email to tracker.**
 
-**Calendar.** Only confirmed interviews become events, and only when the email itself states the date, start time, end time or duration, and time zone. The model must quote the email, and Rust checks the quote. Anything missing or ambiguous is marked Needs Your Action and nothing is written.
+1. A deterministic prefilter scores each new message from its headers: a known application thread, recruiter or company domain, or an applicant-tracking system goes straight on; job words make a candidate; everything else is filtered, never read in full, and only its id, thread, date and sender domain are kept.
+2. Candidates get a headers-only relevance check by your model.
+3. Relevant messages are read in full (text only, truncated) and classified into one of 13 categories with a confidence, as strict JSON validated in Rust. Email text is delimited untrusted data; these requests carry no tools and no web access.
+4. The tracker applies the result with an audit entry. Only the newest email decides the status; confidence below 50% changes nothing and lists the email under "Needs review".
 
-Events are idempotent. The event id is stored, and each event also carries a private `remaInterviewId` property. A content hash skips unchanged events.
+**Interviews and your calendar.** Only confirmed interviews whose date, time and time zone the email itself states become calendar candidates. ReMa checks your calendar for conflicts, including a preparation buffer you choose. By default it asks before adding ("Add to calendar", "Add anyway" after a conflict, "Don't add"); with "Add automatically when confidently confirmed" it adds events for confident confirmations at free times. Every event carries a private `remaInterviewId` property, so an event is never created twice; a reschedule updates the same event (a new time that conflicts is reported, not moved); a cancellation keeps the event, renamed and marked free; events you delete are not recreated.
 
-- A reschedule updates the same event.
-- A cancellation keeps the event, renamed "Cancelled: …" and marked free, and the change is recorded in the interview history.
-- Events the user deleted are not recreated.
-- Conflicts with busy events are reported. ReMa never moves an event.
+**Background.** While ReMa runs, mail connectors with background sync check for new mail at the chosen interval (5 minutes to a day). Two options are off until you turn them on: **Run ReMa in background** (closing the window keeps ReMa in the system tray) and **Start ReMa at login** (starts in the tray). When ReMa is not running, nothing syncs; no system service is installed. A second launch shows the running ReMa.
+
+**In chat.** A question about your mail, calendar or applications gets ReMa's connector tools (`mail_search`, `mail_get_message`, `mail_get_thread`, `calendar_list_events`, `calendar_check_availability`, `calendar_create_event`, `calendar_update_event`, `applications_find_match`, `applications_update_status`, `applications_append_timeline_event`) and no web access in that answer. Mail tools return job-related mail only, marked as untrusted private data. Changes wait for your approval every time, and once an answer has read private data, every MCP tool call needs approval too.
+
+Details, compliance and validation: [docs/connectors/](docs/connectors/implementation.md).
 
 ## Profile
 
@@ -161,7 +166,7 @@ The browser is a second Tauri webview (label `browser`) inside the main window. 
 
 **Isolation.**
 
-- ReMa's commands are ACL-checked through an app manifest (`src-tauri/build.rs` + `src-tauri/src/ipc_commands.rs`). They are granted only to the `main` webview on ReMa's own origin (`capabilities/default.json`). Remote pages get no capability, so every command and event listener is refused. This includes `get_profile`, the Google and chat commands, and the opener.
+- ReMa's commands are ACL-checked through an app manifest (`src-tauri/build.rs` + `src-tauri/src/ipc_commands.rs`). They are granted only to the `main` webview on ReMa's own origin (`capabilities/default.json`). Remote pages get no capability, so every command and event listener is refused. This includes `get_profile`, the connector and chat commands, and the opener.
 - ReMa injects no Profile data and no bridge into pages. The only initialization script keeps `target="_blank"` links in the same view.
 - A navigation policy in Rust allows `http(s)` pages but blocks ReMa's own origins, `file:`, `tauri:`, `data:`, `javascript:` and custom schemes. `mailto:` and `tel:` go to the system.
 - Cookies and sessions persist like a normal browser profile. ReMa never reads them or sends them to a model. CAPTCHA and sign-in pages are left to you.
@@ -273,7 +278,7 @@ Chat answers and scheduled prompt tasks can search the web. Each model uses its 
 - **What you see.** Above the answer, the current step while it runs ("Searching with Anthropic web search…", "Checking 3 postings…"), then **Searched the web · engine · N searches · N pages read · N postings**. Expand it to see each query with its results and each page ReMa checked. Links open in the ReMa browser.
 - **Settings → Web search.** Pick a service. Brave and Tavily keys are stored in the system keychain and never shown again. SearXNG needs its address, with the JSON format enabled. **Test** runs one real search. Rate limits are retried once (after at most 5 s), and keys are removed from error messages.
 - **Fallback.** Outside job searches, if a provider rejects its web tools for a model or account (for example web search disabled for an Anthropic organization), ReMa answers without them and says why.
-- ReMa's own extraction requests (reading a job list, CV import, Gmail triage) never search the web.
+- ReMa's own extraction requests (reading a job list, CV import, mail triage and classification) never search the web.
 - In debug builds, `REMA_DEV_ALLOW_LOCAL_PAGES=1` lets ReMa read pages from a local test server, and `REMA_BRAVE_URL` / `REMA_TAVILY_URL` point the services at a mock.
 
 ## Analytics
@@ -368,7 +373,7 @@ rema/
 │   │   ├── portfolio/            # Portfolio Studio: gallery, new CV, editor, section editor
 │   │   ├── pdf/                  # PDF.js page renderer (viewer and preview)
 │   │   ├── tasks/                # TaskDialog, TaskDetail, JobReport, TaskActions, TaskStatus
-│   │   ├── settings/             # Provider connections (account or key), endpoints, web search, MCP (built-in ReMa MCP + yours), Google
+│   │   ├── settings/             # Provider connections (account or key), endpoints, web search, MCP (built-in ReMa MCP + yours), Connectors
 │   │   └── ui/                   # Menu, Dialog, Switch, EmptyState, IconButton, StatusIndicator,
 │   │                             # BrandMark, BrandLogo
 │   ├── hooks/                    # useAsyncData, useChat, useTasks, useProfile, useAutofill, …
@@ -389,7 +394,9 @@ rema/
     ├── commands/                 # Thin Tauri commands
     ├── services/                 # chat, providers, tasks, scheduler, schedule (pure math), system,
     │                             # profile, documents (storage + text extraction), profile_import, profile_context,
-    │                             # portfolio, agents, mcp, chat_tools (MCP tools in chat, approvals), websearch
+    │                             # portfolio, agents, mcp, chat_tools (MCP tools in chat, approvals), websearch,
+    │                             # connector_tools (mail/calendar/tracker tools in chat), mail_monitor (background
+    │                             # sync), applications, notifications, background (tray, start at login)
     ├── mcp/                      # MCP client: config validation, connections (stdio/HTTP), OAuth
     ├── rema_mcp/                 # ReMa MCP: contracts, source registry, safe fetcher, ATS adapters,
     │                             # job engine, cache, in-process MCP server and host
@@ -398,10 +405,12 @@ rema/
     ├── analytics/                # Job analytics: table/list parsing, normalize, skills dictionary, ingest
     │                             # (dedupe), page reader + background worker, dataset, filter, rank,
     │                             # matching, overview, gap, unique (requirements), learning
-    ├── jobs/                     # Job-application workflow: extract, interviews, applications, calendar_sync, report
+    ├── jobs/                     # Job-application pipeline: prefilter, extract (triage, classifier), applications,
+    │                             # interviews, calendar_sync, tracker, report
     ├── accounts/                 # Provider account sign-in: Codex app-server client, Anthropic CLI,
     │                             # runtime discovery, sign-in sessions
-    ├── integrations/google/      # OAuth (PKCE, refresh, revoke), Gmail and Calendar tools
+    ├── connectors/               # Gmail, Google Calendar, Outlook Mail/Calendar: OAuth (PKCE), token manager,
+    │                             # provider APIs, incremental sync, the old Google settings' migration
     ├── retrieval/                # Job searches: intent, provider search, search services (Brave, Tavily,
     │                             # SearXNG), page validation, rendering, web tools for local models
     ├── llm/                      # LanguageModel trait, SSE, HTTP, OpenAI/Anthropic/Gemini adapters
