@@ -120,7 +120,7 @@ pub struct CareerSearch {
     refusals: Mutex<HashMap<String, (Instant, String)>>,
     /// Where the no-key discovery provider is reached (a local stand-in in
     /// tests; its public address otherwise).
-    discovery_base: std::sync::OnceLock<String>,
+    discovery_base: Mutex<Option<String>>,
 }
 
 impl CareerSearch {
@@ -214,8 +214,8 @@ impl CareerSearch {
 
     /// ReMa's no-key discovery provider.
     pub fn duckduckgo(&self) -> discovery::DuckDuckGo {
-        match self.discovery_base.get() {
-            Some(base) => discovery::DuckDuckGo::with_base(base.clone()),
+        match self.discovery_base.lock().unwrap().clone() {
+            Some(base) => discovery::DuckDuckGo::with_base(base),
             None => discovery::DuckDuckGo::default(),
         }
     }
@@ -223,7 +223,7 @@ impl CareerSearch {
     /// Points discovery at a local stand-in (tests).
     #[cfg(test)]
     pub fn use_discovery_base(&self, base: &str) {
-        let _ = self.discovery_base.set(base.to_string());
+        *self.discovery_base.lock().unwrap() = Some(base.to_string());
     }
 
     /// Keeps a route report for diagnostics (newest last, bounded).

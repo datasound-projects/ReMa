@@ -250,12 +250,21 @@ impl Fetcher {
 
     fn check(&self, url: &Url) -> Result<(), FetchError> {
         check_url_with(url.as_str(), self.allow_private).map_err(FetchError::Blocked)?;
-        if self.allow_private {
-            return Ok(());
-        }
         let host = url.host_str().unwrap_or_default().to_lowercase();
         let local =
             || FetchError::Blocked("the address is on this computer or the local network".into());
+        // Link-local addresses hold cloud metadata services; local test
+        // sites never need them, so they stay closed in every mode.
+        if host
+            .trim_matches(['[', ']'])
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(is_link_local)
+        {
+            return Err(local());
+        }
+        if self.allow_private {
+            return Ok(());
+        }
         match host.trim_matches(['[', ']']).parse::<std::net::IpAddr>() {
             Ok(ip) if !is_public(ip) => return Err(local()),
             Ok(_) => {}
@@ -573,6 +582,18 @@ fn header_text(response: &reqwest::Response, name: header::HeaderName) -> Option
         .map(str::to_string)
 }
 
+/// 169.254.0.0/16 and fe80::/10, also when written as IPv4-mapped IPv6.
+fn is_link_local(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.is_link_local(),
+        std::net::IpAddr::V6(v6) => v6
+            .to_ipv4_mapped()
+            .map_or((v6.segments()[0] & 0xffc0) == 0xfe80, |v4| {
+                v4.is_link_local()
+            }),
+    }
+}
+
 /// A little randomness for retry jitter (no extra dependency).
 fn rand_u16() -> u16 {
     let mut bytes = [0u8; 2];
@@ -603,6 +624,26 @@ mod tests {
         assert!(!ours.allowed("/jobs/1"));
         assert!(Robots::parse("").allowed("/anything"));
         assert!(Robots::parse("User-agent: *\nDisallow:").allowed("/x"));
+    }
+
+    #[tokio::test]
+    async fn local_test_sites_never_open_link_local_addresses() {
+        let fetcher = Fetcher::new("test", true);
+        let cancel = CancellationToken::new();
+        for url in [
+            "http://169.254.169.254/latest",
+            "http://2852039166/latest",
+            "http://[::ffff:169.254.169.254]/",
+            "http://[fe80::1]/",
+        ] {
+            let result = fetcher
+                .get(url, Accept::Html, PAGE_LIMIT, None, later(), &cancel)
+                .await;
+            assert!(
+                matches!(result, Err(FetchError::Blocked(_))),
+                "{url}: {result:?}"
+            );
+        }
     }
 
     #[tokio::test]

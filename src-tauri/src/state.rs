@@ -107,23 +107,29 @@ pub mod testing {
             events: events.clone(),
             generations: Generations::default(),
             scheduler: SchedulerHandle::default(),
+            // Google and Microsoft are reached only through a test's own
+            // server; the defaults point at a closed local address.
             connectors: ConnectorsContext::new(
-                GoogleEndpoints::default(),
-                MicrosoftEndpoints::default(),
+                GoogleEndpoints::at("http://127.0.0.1:9/google"),
+                MicrosoftEndpoints::at("http://127.0.0.1:9/login", "http://127.0.0.1:9/graph/v1.0"),
                 Apps::default(),
             ),
             browser: Default::default(),
             analytics: Default::default(),
             mcp: Default::default(),
             approvals: Default::default(),
-            // ReMa's own sources point at a local address the fetcher
-            // refuses: tests never reach the internet, and a test that needs
-            // the sources serves them itself.
+            // ReMa's own sources and its discovery provider point at a local
+            // address the fetcher refuses: tests never reach the internet,
+            // and a test that needs them serves them itself.
             rema_mcp: crate::rema_mcp::RemaMcp::with(
                 crate::rema_mcp::adapters::Apis::local("http://127.0.0.1:9"),
                 false,
             ),
-            career: Default::default(),
+            career: {
+                let career = crate::career_search::CareerSearch::default();
+                career.use_discovery_base("http://127.0.0.1:9/ddg/html/");
+                Arc::new(career)
+            },
             network: Default::default(),
             business: Default::default(),
         };
