@@ -116,7 +116,7 @@ fn re(cell: &'static OnceLock<Regex>, pattern: &str) -> &'static Regex {
     cell.get_or_init(|| Regex::new(pattern).expect("valid pattern"))
 }
 
-const NOUNS: &str = r"jobs?|job\s+(?:openings?|offers?|ads?|postings?|listings?)|openings?|positions?|roles?|vacanc(?:y|ies)|postings?|listings?|opportunit(?:y|ies)|stellen(?:angebote?|anzeigen?)?|jobangebote?";
+const NOUNS: &str = r"jobs?|job\s+(?:openings?|offers?|ads?|postings?|listings?)|openings?|positions?|roles?|vacanc(?:y|ies)|postings?|listings?|opportunit(?:y|ies)|contracts|contract\s+(?:roles?|work|positions?)|freelance\s+(?:projects|gigs|work)|gigs|stellen(?:angebote?|anzeigen?)?|jobangebote?";
 
 fn job_noun() -> &'static Regex {
     static CELL: OnceLock<Regex> = OnceLock::new();
@@ -128,7 +128,7 @@ fn listing_noun() -> &'static Regex {
     static CELL: OnceLock<Regex> = OnceLock::new();
     re(
         &CELL,
-        r"(?i)\b(?:jobs|job\s+(?:openings?|offers|ads|postings?|listings?)|openings|positions|vacanc(?:y|ies)|postings|listings|stellen(?:angebote?)?|jobangebote?)\b",
+        r"(?i)\b(?:jobs|job\s+(?:openings?|offers|ads|postings?|listings?)|openings|positions|vacanc(?:y|ies)|postings|listings|contracts|gigs|stellen(?:angebote?)?|jobangebote?)\b",
     )
 }
 
@@ -207,6 +207,7 @@ fn clean_role(raw: &str) -> (Option<String>, bool) {
     const FILLER: &[&str] = &[
         "me",
         "us",
+        "most",
         "some",
         "the",
         "a",

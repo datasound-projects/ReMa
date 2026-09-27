@@ -773,6 +773,7 @@ mod tests {
                     connection: crate::models::provider::ConnectionMethod::ApiKey,
                     base_url: "http://localhost".into(),
                     credential: None,
+                    server_web_search: false,
                 },
                 model: &task.model,
                 max_output_tokens: None,

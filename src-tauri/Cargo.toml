@@ -56,6 +56,8 @@ zip = { version = "8", default-features = false, features = ["deflate"] }
 quick-xml = "0.38"
 # Job analytics: deterministic text patterns (salaries, dates, requirements)
 regex = "1"
+# Pages in legacy encodings (ISO-8859-1, Windows-1252) read correctly.
+encoding_rs = "0.8"
 # MCP (Model Context Protocol) client: the official Rust SDK. Local servers
 # over stdio, remote servers over Streamable HTTP, and MCP OAuth.
 rmcp = { version = "3.4", default-features = false, features = [

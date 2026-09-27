@@ -6,12 +6,13 @@
 //!
 //! 1. [`intent::detect`] recognizes a job search (or a request to verify
 //!    linked postings) from the user's message.
-//! 2. A search runs: the selected model's own hosted web search
-//!    ([`native`]; ChatGPT through Codex, OpenAI, Anthropic, Gemini), and
-//!    when that is unavailable or fails, the search service configured in
-//!    Settings ([`backend`]; Brave Search, Tavily or a SearXNG instance).
-//!    A step only counts when the provider reports searches that actually
-//!    ran.
+//! 2. The career search router (`career_search::router`) searches: ReMa's
+//!    own job sources through the Jobs MCP (no key needed), and at the same
+//!    time the selected model's own web search ([`native`]; ChatGPT through
+//!    Codex, OpenAI, Anthropic, Gemini, Unsloth Studio). A web step only
+//!    counts when the provider reports searches that actually ran. A search
+//!    service set up in Settings ([`backend`]) is optional and only adds
+//!    sources.
 //! 3. [`listings`] reads the postings' own pages (public addresses only,
 //!    like a browser opening them once), keeps what the pages state and
 //!    applies the request's hard filters: posting date, salary floor,
@@ -21,7 +22,7 @@
 //!    with no web access of its own.
 //!
 //! Results are [`Outcome::Found`], [`Outcome::Empty`] (searches ran, nothing
-//! matched) or [`Outcome::Failed`] (no search could run) — never an answer
+//! matched) or [`Outcome::Failed`] (every route failed) — never an answer
 //! with listings that were not retrieved.
 
 pub mod backend;
@@ -40,7 +41,6 @@ pub use intent::{detect, JobQuery};
 use crate::{
     llm::{Endpoint, WebObserver},
     state::AppState,
-    time::now_ms,
 };
 
 /// A posting a search reported, before ReMa read its page.
@@ -87,6 +87,17 @@ pub enum Verification {
     SearchOnly,
 }
 
+/// Whether a listing's salary is known (§27). Unknown never counts as
+/// meeting a requested minimum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SalaryStatus {
+    /// The posting states it.
+    Verified,
+    /// The source labels it an estimate (never used for a minimum).
+    Estimated,
+    NotListed,
+}
+
 /// A validated listing.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Listing {
@@ -99,8 +110,11 @@ pub struct Listing {
     /// UTC midnight of the posting date.
     pub posted: Option<i64>,
     pub salary: Option<String>,
+    pub salary_status: SalaryStatus,
     pub work_mode: Option<String>,
     pub verification: Verification,
+    /// Where it was found ("Greenhouse", "Arbeitnow", "karriere.at").
+    pub source: String,
     /// What is missing or uncertain ("salary not stated").
     pub notes: Vec<String>,
 }
@@ -115,6 +129,8 @@ pub struct Excluded {
     pub elsewhere: usize,
     pub off_topic: usize,
     pub not_postings: usize,
+    /// Postings that do not name the employer (§56).
+    pub incomplete: usize,
 }
 
 impl Excluded {
@@ -126,6 +142,18 @@ impl Excluded {
             + self.elsewhere
             + self.off_topic
             + self.not_postings
+            + self.incomplete
+    }
+
+    pub fn add(&mut self, other: &Excluded) {
+        self.older += other.older;
+        self.expired += other.expired;
+        self.gone += other.gone;
+        self.below_salary += other.below_salary;
+        self.elsewhere += other.elsewhere;
+        self.off_topic += other.off_topic;
+        self.not_postings += other.not_postings;
+        self.incomplete += other.incomplete;
     }
 }
 
@@ -133,14 +161,21 @@ impl Excluded {
 #[derive(Debug, Clone)]
 pub struct Retrieval {
     pub query: JobQuery,
+    /// The routes that answered ("ReMa Jobs + OpenAI web search").
     pub engine: String,
     pub searches: usize,
     pub pages_read: usize,
     pub listings: Vec<Listing>,
     pub excluded: Excluded,
     pub retrieved_at: i64,
-    /// Search steps that failed before one worked ("ChatGPT web search: …").
+    /// Search steps that failed while others worked ("ChatGPT web search: …").
     pub fallbacks: Vec<String>,
+    /// Sources consulted, by name ("ReMa Jobs", "Company career sites",
+    /// "OpenAI web search").
+    pub sources: Vec<String>,
+    /// Sources that could not be searched this time, by name: their
+    /// postings may be missing.
+    pub unreached: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -175,7 +210,9 @@ impl Progress for Silent {
     fn status(&self, _text: &str) {}
 }
 
-/// Runs the whole retrieval for a job-search request.
+/// Runs the whole retrieval for a job-search request, through the career
+/// search router: ReMa's job sources (the Jobs MCP) and the model's own web
+/// search together, never a search service the user has to set up.
 pub async fn run(
     state: &AppState,
     endpoint: &Endpoint,
@@ -184,62 +221,6 @@ pub async fn run(
     progress: &dyn Progress,
     cancel: &CancellationToken,
 ) -> Outcome {
-    let mut reasons = Vec::new();
-    progress.status("Searching the web…");
-    let mut found = None;
-    if native::supported(endpoint) {
-        match native::search(state, endpoint, model_id, query, progress, cancel).await {
-            Ok(result) => found = Some(result),
-            Err(reason) => reasons.push(reason),
-        }
-    }
-    if cancel.is_cancelled() {
-        return Outcome::Cancelled;
-    }
-    if found.is_none() {
-        match backend::configured(state).await {
-            Ok(Some(service)) => {
-                if !reasons.is_empty() {
-                    progress.status(&format!("Searching with {}…", service.name()));
-                }
-                match service.search_jobs(query, progress, cancel).await {
-                    Ok(result) => found = Some(result),
-                    Err(reason) => reasons.push(format!("{}: {reason}", service.name())),
-                }
-            }
-            Ok(None) if native::supported(endpoint) => reasons
-                .push("No other search service is set up (Settings → Web search).".to_string()),
-            Ok(None) => reasons.push(
-                "This model has no web search of its own, and no search service is set up. Add \
-                 one in Settings → Web search, or choose a model with web search."
-                    .to_string(),
-            ),
-            Err(error) => reasons.push(error.to_string()),
-        }
-    }
-    if cancel.is_cancelled() {
-        return Outcome::Cancelled;
-    }
-    let Some(found) = found else {
-        return Outcome::Failed { reasons };
-    };
-    let checked = listings::check(state, &found, query, progress, cancel).await;
-    if cancel.is_cancelled() {
-        return Outcome::Cancelled;
-    }
-    let retrieval = Retrieval {
-        query: query.clone(),
-        engine: found.engine,
-        searches: found.searches,
-        pages_read: checked.pages_read,
-        listings: checked.listings,
-        excluded: checked.excluded,
-        retrieved_at: now_ms(),
-        fallbacks: reasons,
-    };
-    if retrieval.listings.is_empty() {
-        Outcome::Empty(retrieval)
-    } else {
-        Outcome::Found(retrieval)
-    }
+    crate::career_search::router::search_jobs(state, endpoint, model_id, query, progress, cancel)
+        .await
 }

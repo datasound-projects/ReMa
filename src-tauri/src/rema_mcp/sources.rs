@@ -107,6 +107,110 @@ pub const REGISTRY: &[SourceInfo] = &[
         countries: &[],
     },
     SourceInfo {
+        id: "smartrecruiters",
+        name: "SmartRecruiters",
+        mode: AcquisitionMode::DocumentedPublicFeed,
+        hosts: &[
+            "jobs.smartrecruiters.com",
+            "careers.smartrecruiters.com",
+            "api.smartrecruiters.com",
+        ],
+        discovery: "known employer career sites",
+        content: "Posting API: GET /v1/companies/{company}/postings; posting pages read once",
+        needs_credentials: false,
+        implemented: true,
+        basis: "SmartRecruiters Posting API (developers.smartrecruiters.com): public postings",
+        restrictions: "Published postings of a known company only.",
+        site: None,
+        countries: &[],
+    },
+    SourceInfo {
+        id: "workable",
+        name: "Workable",
+        mode: AcquisitionMode::DocumentedPublicFeed,
+        hosts: &["apply.workable.com"],
+        discovery: "known employer career sites",
+        content: "Jobs widget: GET /api/v1/widget/accounts/{account}",
+        needs_credentials: false,
+        implemented: true,
+        basis: "Workable's public careers-page jobs widget (published jobs only)",
+        restrictions: "Published jobs of a known account only.",
+        site: None,
+        countries: &[],
+    },
+    SourceInfo {
+        id: "recruitee",
+        name: "Recruitee",
+        mode: AcquisitionMode::DocumentedPublicFeed,
+        hosts: &["recruitee.com"],
+        discovery: "known employer career sites",
+        content: "Careers Site API: GET https://{company}.recruitee.com/api/offers/",
+        needs_credentials: false,
+        implemented: true,
+        basis: "Recruitee Careers Site API (docs.recruitee.com): published offers",
+        restrictions: "Published offers of a known company only.",
+        site: None,
+        countries: &[],
+    },
+    SourceInfo {
+        id: "arbeitnow",
+        name: "Arbeitnow",
+        mode: AcquisitionMode::DocumentedPublicFeed,
+        hosts: &["arbeitnow.com"],
+        discovery: "the board's public job list, newest first",
+        content: "Job board API: GET /api/job-board-api?page={n}",
+        needs_credentials: false,
+        implemented: true,
+        basis: "Arbeitnow's free public job board API (arbeitnow.com/blog/job-board-api)",
+        restrictions: "Mostly Germany and nearby countries; each job links to its Arbeitnow page.",
+        site: None,
+        countries: &[],
+    },
+    SourceInfo {
+        id: "themuse",
+        name: "The Muse",
+        mode: AcquisitionMode::DocumentedPublicFeed,
+        hosts: &["themuse.com"],
+        discovery: "the public jobs API, by location",
+        content: "Public API: GET /api/public/jobs?page={n}&location={place}",
+        needs_credentials: false,
+        implemented: true,
+        basis: "The Muse public API (themuse.com/developers/api/v2): no key below its hourly limit",
+        restrictions: "Read sparingly (hourly limit without a key); each job links to The Muse.",
+        site: None,
+        countries: &[],
+    },
+    SourceInfo {
+        id: "remotive",
+        name: "Remotive",
+        mode: AcquisitionMode::DocumentedPublicFeed,
+        hosts: &["remotive.com"],
+        discovery: "the remote-jobs API, by search term",
+        content: "Public API: GET /api/remote-jobs?search={terms}",
+        needs_credentials: false,
+        implemented: true,
+        basis: "Remotive public remote-jobs API (remotive.com/api-documentation)",
+        restrictions: "Remote roles only; read a few times a day (kept six hours); Remotive is \
+                       named and linked as the source.",
+        site: None,
+        countries: &[],
+    },
+    SourceInfo {
+        id: "hn_hiring",
+        name: "Hacker News: Who is hiring?",
+        mode: AcquisitionMode::DocumentedPublicFeed,
+        hosts: &["news.ycombinator.com"],
+        discovery: "the monthly hiring thread, through the HN Algolia search API",
+        content: "HN Search API: GET /api/v1/search?tags=comment,story_{thread}",
+        needs_credentials: false,
+        implemented: true,
+        basis: "Hacker News Search API (hn.algolia.com/api): public, no key",
+        restrictions: "Postings are comments by the hiring companies; whether a role is still \
+                       open is not stated.",
+        site: None,
+        countries: &[],
+    },
+    SourceInfo {
         id: "web",
         name: "Employer career pages",
         mode: AcquisitionMode::PermittedPublicPage,
@@ -491,6 +595,61 @@ pub fn classify_with(url: &str, local_fixtures: bool) -> Result<Classified, Stri
         }
     }
 
+    // Employer sites and boards whose lists ReMa reads through their APIs;
+    // a single posting is read as a page.
+    if host == "jobs.smartrecruiters.com" || host == "careers.smartrecruiters.com" {
+        if let [company, posting, ..] = segs.as_slice() {
+            let id: String = posting.chars().take_while(char::is_ascii_digit).collect();
+            if safe_part(company) && id.len() >= 6 {
+                return Ok(found(
+                    "smartrecruiters",
+                    Target::Page,
+                    Some(format!("{company}:{id}")),
+                ));
+            }
+        }
+    }
+    if host == "apply.workable.com" {
+        if let [account, j, code, ..] = segs.as_slice() {
+            if j == "j" && safe_part(account) && safe_part(code) {
+                return Ok(found(
+                    "workable",
+                    Target::Page,
+                    Some(format!("{account}:{code}")),
+                ));
+            }
+        }
+        if let [j, _code, ..] = segs.as_slice() {
+            if j == "j" {
+                return Ok(found("workable", Target::Page, None));
+            }
+        }
+    }
+    if host.ends_with(".recruitee.com") && segs.first().map(String::as_str) == Some("o") {
+        return Ok(found("recruitee", Target::Page, None));
+    }
+    if host_matches(&host, "arbeitnow.com") && segs.first().map(String::as_str) == Some("jobs") {
+        let slug = segs.last().filter(|s| safe_part(s)).cloned();
+        return Ok(found("arbeitnow", Target::Page, slug));
+    }
+    if host_matches(&host, "themuse.com") && segs.first().map(String::as_str) == Some("jobs") {
+        return Ok(found("themuse", Target::Page, None));
+    }
+    if host_matches(&host, "remotive.com")
+        && segs.first().map(String::as_str) == Some("remote-jobs")
+    {
+        let id = segs
+            .last()
+            .and_then(|s| s.rsplit('-').next())
+            .filter(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_digit()))
+            .map(str::to_string);
+        return Ok(found("remotive", Target::Page, id));
+    }
+    if host == "news.ycombinator.com" && segs.first().map(String::as_str) == Some("item") {
+        let id = query("id").filter(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_digit()));
+        return Ok(found("hn_hiring", Target::Page, id));
+    }
+
     // Discovery-only sources (never fetched).
     for source in REGISTRY
         .iter()
@@ -563,6 +722,31 @@ mod tests {
                 .unwrap()
                 .target,
             Target::DiscoveryOnly
+        );
+
+        let sr =
+            classify("https://jobs.smartrecruiters.com/NordlichtAI/744000099-senior-ai-engineer")
+                .unwrap();
+        assert_eq!(sr.source.id, "smartrecruiters");
+        assert_eq!(sr.source_job_id.as_deref(), Some("NordlichtAI:744000099"));
+        assert_eq!(
+            classify("https://www.arbeitnow.com/jobs/companies/donau/senior-ai-engineer-wien-1")
+                .unwrap()
+                .source_job_id
+                .as_deref(),
+            Some("senior-ai-engineer-wien-1")
+        );
+        assert_eq!(
+            classify("https://remotive.com/remote-jobs/software-dev/ai-engineer-77")
+                .unwrap()
+                .source_job_id
+                .as_deref(),
+            Some("77")
+        );
+        let hn = classify("https://news.ycombinator.com/item?id=501").unwrap();
+        assert_eq!(
+            (hn.source.id, hn.source_job_id.as_deref()),
+            ("hn_hiring", Some("501"))
         );
 
         let page = classify("https://careers.nordlicht.example/jobs/ai-engineer").unwrap();

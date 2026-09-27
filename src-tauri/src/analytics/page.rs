@@ -178,10 +178,13 @@ pub async fn fetch_page(
                 status.as_u16()
             )));
         }
-        let html_like = response
+        let content_type = response
             .headers()
             .get(header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let html_like = content_type
+            .as_deref()
             .is_none_or(|t| t.contains("html") || t.contains("text/plain"));
         if !html_like {
             return Err(FetchFailure::Failed("the link is not a web page".into()));
@@ -198,10 +201,35 @@ pub async fn fetch_page(
         }
         return Ok((
             current.to_string(),
-            String::from_utf8_lossy(&body).into_owned(),
+            decode_body(&body, content_type.as_deref()),
         ));
     }
     Err(FetchFailure::Failed("the site redirected too often".into()))
+}
+
+/// A response body as text, in the character set it declares (the
+/// Content-Type header, else a `<meta charset>` near the top), UTF-8 when
+/// none is declared. Invalid bytes become replacement characters.
+pub fn decode_body(bytes: &[u8], content_type: Option<&str>) -> String {
+    fn label_of(text: &str) -> Option<String> {
+        let lower = text.to_ascii_lowercase();
+        let at = lower.find("charset=")? + "charset=".len();
+        let label: String = lower[at..]
+            .trim_start_matches(['"', '\''])
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':' | '.'))
+            .collect();
+        (!label.is_empty()).then_some(label)
+    }
+    let declared = content_type.and_then(label_of).or_else(|| {
+        let head = &bytes[..bytes.len().min(2048)];
+        label_of(&String::from_utf8_lossy(head))
+    });
+    let encoding = declared
+        .and_then(|label| encoding_rs::Encoding::for_label(label.as_bytes()))
+        .unwrap_or(encoding_rs::UTF_8);
+    let (text, _, _) = encoding.decode(bytes);
+    text.into_owned()
 }
 
 /// The page's `<title>`, decoded and trimmed.
@@ -596,6 +624,27 @@ pub fn parse(html: &str, title: &str) -> PageFacts {
         skills: list("skills"),
         requirement_text: (!requirement_text.is_empty()).then(|| requirement_text.join("\n")),
         benefits: list("jobBenefits").into_iter().take(12).collect(),
+    }
+}
+
+#[cfg(test)]
+mod decode_tests {
+    use super::decode_body;
+
+    #[test]
+    fn reads_the_declared_character_set() {
+        // "Gehalt: 4.500 € brutto, Wien" in Windows-1252 / ISO-8859-1.
+        let latin1 = b"<html><head><meta charset=\"iso-8859-1\"></head><body>K\xf6ln, Gr\xfc\xdfe</body></html>";
+        assert!(decode_body(latin1, None).contains("Köln, Grüße"));
+        let header = b"Stra\xdfe";
+        assert_eq!(
+            decode_body(header, Some("text/html; charset=windows-1252")),
+            "Straße"
+        );
+        assert_eq!(
+            decode_body("Wien ✓".as_bytes(), Some("text/html")),
+            "Wien ✓"
+        );
     }
 }
 

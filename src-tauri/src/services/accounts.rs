@@ -164,6 +164,7 @@ async fn complete(
         connection: method,
         base_url: Endpoint::default_base_url(kind).unwrap_or_default(),
         credential: runtime.credential().await?,
+        server_web_search: false,
     };
     let fetched = state.llm.list_models(&endpoint).await?;
     if fetched.is_empty() {

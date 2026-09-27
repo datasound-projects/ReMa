@@ -10,7 +10,7 @@ use jiff::{tz::TimeZone, Timestamp};
 
 use super::{
     intent::{JobQuery, MinSalary},
-    Excluded, Listing, Retrieval, Verification,
+    Excluded, Listing, Retrieval, SalaryStatus, Verification,
 };
 use crate::{analytics::normalize, models::analytics::SalaryPeriod};
 
@@ -160,7 +160,40 @@ fn excluded_line(excluded: &Excluded, query: &JobQuery) -> Option<String> {
     if excluded.not_postings > 0 {
         parts.push(format!("{} not a single posting", excluded.not_postings));
     }
+    if excluded.incomplete > 0 {
+        parts.push(format!(
+            "{} without the employer's name",
+            excluded.incomplete
+        ));
+    }
     (!parts.is_empty()).then(|| format!("Not shown: {}.", parts.join(" · ")))
+}
+
+/// With a salary minimum: how many listings state a salary that meets it
+/// and how many do not state one (§27).
+fn salary_line(r: &Retrieval) -> Option<String> {
+    let floor = r.query.min_salary.as_ref()?;
+    let verified = r
+        .listings
+        .iter()
+        .filter(|l| l.salary_status == SalaryStatus::Verified)
+        .count();
+    let unknown = r.listings.len() - verified;
+    let mut parts = Vec::new();
+    if verified > 0 {
+        parts.push(format!(
+            "{verified} state{} a salary from {}",
+            if verified == 1 { "s" } else { "" },
+            salary_floor(floor)
+        ));
+    }
+    if unknown > 0 {
+        parts.push(format!(
+            "{unknown} do{} not state one (shown, not confirmed to meet the minimum)",
+            if unknown == 1 { "es" } else { "" }
+        ));
+    }
+    (!parts.is_empty()).then(|| format!("Salary: {}.", parts.join(" · ")))
 }
 
 fn status(verification: Verification) -> &'static str {
@@ -169,6 +202,31 @@ fn status(verification: Verification) -> &'static str {
         Verification::Page => "Page checked",
         Verification::SearchOnly => "Unverified (search result)",
     }
+}
+
+/// The listing's status and what else to know about it ("also listed on
+/// Arbeitnow", "whether it is still open is not stated").
+fn status_cell(l: &Listing) -> String {
+    let mut parts = vec![status(l.verification).to_string()];
+    parts.extend(
+        l.notes
+            .iter()
+            // The salary column says so already.
+            .filter(|n| n.as_str() != "salary not stated")
+            .cloned(),
+    );
+    cell(&parts.join(" · "), 200)
+}
+
+/// Sources that could not be searched this time: their postings may be
+/// missing from the answer.
+fn unreached_line(r: &Retrieval) -> Option<String> {
+    (!r.unreached.is_empty()).then(|| {
+        format!(
+            "Not reachable right now: {} — postings listed only there may be missing.",
+            r.unreached.join(", ")
+        )
+    })
 }
 
 fn fallback_line(r: &Retrieval) -> Option<String> {
@@ -210,10 +268,13 @@ pub fn listings_table(r: &Retrieval) -> String {
             cell(l.salary.as_deref().unwrap_or_default(), 50),
             l.posted.map(day).unwrap_or_else(|| "—".to_string()),
             link(&l.url),
-            status(l.verification),
+            status_cell(l),
         ));
     }
     let mut notes = Vec::new();
+    if let Some(line) = salary_line(r) {
+        notes.push(line);
+    }
     if let Some(line) = excluded_line(&r.excluded, &r.query) {
         notes.push(line);
     }
@@ -227,6 +288,9 @@ pub fn listings_table(r: &Retrieval) -> String {
                 .to_string(),
         );
     }
+    if let Some(line) = unreached_line(r) {
+        notes.push(line);
+    }
     if let Some(line) = fallback_line(r) {
         notes.push(line);
     }
@@ -238,14 +302,20 @@ pub fn listings_table(r: &Retrieval) -> String {
     out
 }
 
-/// The answer when searches ran but nothing matched.
+/// The answer when searches ran but nothing matched (§57): no listings
+/// from memory.
 pub fn empty_text(r: &Retrieval) -> String {
     let mut out = format!(
-        "ReMa searched the web and found **no current postings** for {}.\n{}\n",
+        "ReMa found **no verified matching postings** for {} from the sources searched.\n{}\n",
         request_summary(&r.query),
         searched_line(r)
     );
     if let Some(line) = excluded_line(&r.excluded, &r.query) {
+        out.push('\n');
+        out.push_str(&line);
+        out.push('\n');
+    }
+    if let Some(line) = unreached_line(r) {
         out.push('\n');
         out.push_str(&line);
         out.push('\n');
@@ -261,17 +331,22 @@ pub fn empty_text(r: &Retrieval) -> String {
     out
 }
 
-/// The error when no search could run.
+/// The error when every search route failed (§21, §59): what happened,
+/// never a request to set up a search service.
 pub fn failed_text(reasons: &[String]) -> String {
-    let reasons: Vec<String> = reasons
+    let details: Vec<String> = reasons
         .iter()
+        .filter(|r| r.as_str() != crate::career_search::UNAVAILABLE)
         .map(|r| format!("{}.", r.trim().trim_end_matches('.')))
         .collect();
-    format!(
-        "ReMa couldn't search the web, so it isn't showing job listings (none could be \
-         verified). {}",
-        reasons.join(" ")
-    )
+    let mut text = format!(
+        "{} No job listings are shown, because none could be verified.",
+        crate::career_search::UNAVAILABLE
+    );
+    if !details.is_empty() {
+        text.push_str(&format!(" What happened: {}", details.join(" ")));
+    }
+    text
 }
 
 /// Tells the model how to answer after ReMa's search.
@@ -355,8 +430,10 @@ mod tests {
                     summary: Some("Build LLM products.".into()),
                     posted: Some(1_790_121_600_000), // 2026-09-23
                     salary: Some("€85,000–€100,000/year".into()),
+                    salary_status: SalaryStatus::Verified,
                     work_mode: Some("Hybrid".into()),
                     verification: Verification::Posting,
+                    source: "careers.nordlicht.example".into(),
                     notes: vec![],
                 },
                 Listing {
@@ -367,8 +444,10 @@ mod tests {
                     summary: None,
                     posted: None,
                     salary: None,
+                    salary_status: SalaryStatus::NotListed,
                     work_mode: None,
                     verification: Verification::SearchOnly,
+                    source: "jobs.donau.example".into(),
                     notes: vec!["posting date not shown".into()],
                 },
             ],
@@ -379,6 +458,8 @@ mod tests {
             },
             retrieved_at: 1_790_445_900_000,
             fallbacks: vec![],
+            sources: vec!["ChatGPT web search".into()],
+            unreached: vec![],
         }
     }
 
@@ -399,7 +480,8 @@ mod tests {
         assert!(row.ends_with("| Verified posting |"));
         let second = text.lines().find(|l| l.starts_with("| 2 |")).unwrap();
         assert!(second.contains("| — | — |"));
-        assert!(second.ends_with("| Unverified (search result) |"));
+        // What else to know about a posting stands with it.
+        assert!(second.ends_with("| Unverified (search result) · posting date not shown |"));
         assert!(text.contains("Not shown: 2 posted more than 10 days ago · 1 no longer online."));
         assert!(text.contains("Unverified: ReMa could not open these pages"));
     }
@@ -430,11 +512,26 @@ mod tests {
         let mut r = retrieval();
         r.listings.clear();
         let text = empty_text(&r);
-        assert!(text.contains("found **no current postings** for AI Engineer in Vienna"));
+        assert!(text.contains("found **no verified matching postings** for AI Engineer in Vienna"));
         assert!(text.contains("Not shown: 2 posted more than 10 days ago"));
-        let failed = failed_text(&["ChatGPT web search: your sign-in has expired".into()]);
-        assert!(failed.starts_with("ReMa couldn't search the web"));
+        let failed = failed_text(&[
+            crate::career_search::UNAVAILABLE.into(),
+            "ChatGPT web search: your sign-in has expired".into(),
+        ]);
+        assert!(failed.starts_with(crate::career_search::UNAVAILABLE));
         assert!(failed.ends_with("ChatGPT web search: your sign-in has expired."));
+        // Never a request to set up a search service.
+        for word in [
+            "Settings",
+            "configure",
+            "set up",
+            "API key",
+            "Brave",
+            "Tavily",
+            "SearXNG",
+        ] {
+            assert!(!failed.contains(word), "{word}");
+        }
         assert_eq!(money(90_000.0), "90,000");
     }
 }

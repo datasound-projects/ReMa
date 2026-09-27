@@ -1607,6 +1607,7 @@ mod tests {
         request.web = Some(WebSearch {
             observer: Some(web.clone()),
             required: false,
+            ..WebSearch::default()
         });
         let mut text = String::new();
         let finish = runtime
@@ -1676,6 +1677,7 @@ mod tests {
             request.web = Some(WebSearch {
                 observer: Some(web.clone()),
                 required: true,
+                ..WebSearch::default()
             });
             let error = runtime
                 .stream_chat(

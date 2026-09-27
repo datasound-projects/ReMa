@@ -35,8 +35,8 @@ impl Drop for Hosted {
     }
 }
 
-/// Opens a session: `endpoint` is the chat's model, whose hosted web search
-/// is the discovery fallback when no search service is set up.
+/// Opens a session: `endpoint` is the chat's model, whose own web search
+/// adds to ReMa's job sources.
 pub async fn open(
     state: &AppState,
     endpoint: Option<(&Endpoint, &str)>,
@@ -73,12 +73,8 @@ pub async fn open(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum Readiness {
-    /// A search service is set up: full discovery.
+    /// Searching works (ReMa's own job sources need no setup).
     Ready,
-    /// Discovery relies on the chat model's hosted web search.
-    LimitedCoverage,
-    /// No search backend: only known job URLs can be read.
-    SearchSetupRequired,
     /// Recent source requests failed to connect.
     Offline,
     /// The built-in server did not answer.
@@ -144,24 +140,20 @@ pub async fn status(state: &AppState, check: bool) -> AppResult<RemaMcpStatus> {
     let default = default_endpoint(state).await;
     let discovery =
         Discovery::for_chat(state, default.as_ref().map(|(e, m)| (e, m.as_str()))).await;
-    let mut readiness = match &discovery {
-        Discovery::Service(_) => Readiness::Ready,
-        Discovery::Provider { .. } => Readiness::LimitedCoverage,
-        Discovery::Unavailable(_) => Readiness::SearchSetupRequired,
+    let mut readiness = Readiness::Ready;
+    let mut message = match (&discovery.service, &discovery.provider) {
+        (Some(service), _) => format!(
+            "Searches ReMa's job sources (employer boards and public job boards) and {}.",
+            service.name()
+        ),
+        (None, Some(_)) => "Searches ReMa's job sources (employer boards and public job boards) \
+                            and the chat model's own web search. No setup needed."
+            .to_string(),
+        (None, None) => "Searches ReMa's job sources: employer boards and public job boards. No \
+                         setup needed."
+            .to_string(),
     };
-    let mut message = match &discovery {
-        Discovery::Service(s) => format!("Searches with {}.", s.name()),
-        Discovery::Provider { .. } => {
-            "Searches with the chat model's own web search. Add a search service in Settings → \
-             Web search for site-specific searches."
-                .to_string()
-        }
-        Discovery::Unavailable(_) => {
-            "No search backend: job descriptions from known links still work. Set up a search \
-             service in Settings → Web search, or use a model with web search."
-                .to_string()
-        }
-    };
+    let searchable = discovery.searches_the_web();
     let sources: Vec<SourceSummary> = sources::REGISTRY
         .iter()
         .map(|s| {
@@ -169,7 +161,7 @@ pub async fn status(state: &AppState, check: bool) -> AppResult<RemaMcpStatus> {
             SourceSummary {
                 name: s.name.into(),
                 access: access_label(s.mode).into(),
-                usable: !matches!(discovery, Discovery::Unavailable(_))
+                usable: searchable
                     || s.mode != super::contract::AcquisitionMode::SearchDiscoveryOnly,
                 note: s.restrictions.into(),
                 last_error: health

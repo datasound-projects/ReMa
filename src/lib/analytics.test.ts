@@ -19,6 +19,18 @@ describe('mayListJobs', () => {
     expect(mayListJobs(searches)).toBe(false);
   });
 
+  it('does not offer it for the sources a research answer lists', () => {
+    const research = [
+      'Anna Beispiel leads talent acquisition at Nordlicht AI [2].',
+      '',
+      '**Sources** — ReMa sources · retrieved 27 Sep 2026, 08:33',
+      '1. [Nordlicht AI](https://nordlicht.example/) · nordlicht.example · official',
+      '2. [Team – Nordlicht AI](https://nordlicht.example/team) · nordlicht.example · official',
+      '3. [Nordlicht AI (Wikidata)](https://www.wikidata.org/wiki/Q1) · wikidata.org · reference',
+    ].join('\n');
+    expect(mayListJobs(research)).toBe(false);
+  });
+
   it('recognises search result pages', () => {
     expect(isSearchPage('https://www.stepstone.at/jobs/suche?what=ai')).toBe(true);
     expect(isSearchPage('https://www.linkedin.com/jobs/view/4012345678/')).toBe(false);

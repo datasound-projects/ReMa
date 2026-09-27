@@ -1,7 +1,7 @@
-//! The search service ReMa calls itself (Settings → Web search): for models
-//! without a hosted web search, and as the fallback when a model's own
-//! search fails. The API key lives in the OS credential store; the
-//! interface only learns whether one is stored.
+//! The optional search service (Settings → Career Search → Advanced): it
+//! adds results to ReMa's own career search and is never required. The API
+//! key lives in the OS credential store; the interface only learns whether
+//! one is stored.
 
 use serde::{Deserialize, Serialize};
 use specta::Type;

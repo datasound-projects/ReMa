@@ -560,13 +560,89 @@
   }
 }
 
-/* ── Web search service ─────────────────────────────────── */
+/* ── Career search ──────────────────────────────────────── */
+
+.career-search {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+}
+
+.career-search__model {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+.career-search__routes,
+.career-search__checks,
+.career-search__recent {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.career-search__route,
+.career-search__checks li {
+  display: grid;
+  grid-template-columns: minmax(12rem, max-content) 1fr;
+  align-items: baseline;
+  gap: var(--space-3);
+}
+
+.career-search__detail,
+.career-search__hint,
+.career-search__when,
+.career-search__scope {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+.career-search__recent li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+}
+
+.career-search__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+@container (max-width: 720px) {
+  .career-search__route,
+  .career-search__checks li {
+    grid-template-columns: 1fr;
+    gap: var(--space-1);
+  }
+}
+
+/* Optional additional search service (Advanced). */
 
 .websearch {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
-  padding: var(--space-4);
+  padding: var(--space-2) 0 0;
+}
+
+.websearch__intro {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+.websearch__form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
 }
 
 .websearch .field {

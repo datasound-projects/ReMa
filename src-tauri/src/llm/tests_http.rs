@@ -74,6 +74,7 @@ fn endpoint(kind: ProviderKind, base_url: String, key: &str) -> Endpoint {
         connection: ConnectionMethod::ApiKey,
         base_url,
         credential: Some(Credential::ApiKey { key: key.into() }),
+        server_web_search: false,
     }
 }
 
@@ -166,6 +167,7 @@ async fn sends_claude_console_tokens_as_oauth_bearer() {
             refresh_token: None,
             expires_at: None,
         }),
+        server_web_search: false,
         ..endpoint(ProviderKind::Anthropic, base_url, "unused")
     };
     let (result, text) = collect(&endpoint, CancellationToken::new()).await;
@@ -323,6 +325,7 @@ async fn collect_with_web(
     request.web = Some(WebSearch {
         observer: Some(web),
         required: false,
+        ..WebSearch::default()
     });
     let mut text = String::new();
     let mut sink = |delta: &str| text.push_str(delta);
@@ -496,6 +499,7 @@ async fn a_required_search_fails_rather_than_answering_without_it() {
     request.web = Some(WebSearch {
         observer: None,
         required: true,
+        ..WebSearch::default()
     });
     let mut sink = |_: &str| {};
     let error = llm

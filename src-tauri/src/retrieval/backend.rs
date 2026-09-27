@@ -1,11 +1,11 @@
-//! Search services ReMa calls itself: for models without a hosted web
-//! search (local and other OpenAI-compatible models), and when a model's
-//! own search fails.
+//! Optional search services (Settings → Career Search → Advanced): Brave
+//! Search API, Tavily or a SearXNG instance. They only add results to
+//! ReMa's own career search; nothing depends on one being set up, and a
+//! misconfigured one is skipped rather than failing a search.
 //!
-//! Brave Search API, Tavily and a SearXNG instance are supported, set up in
-//! Settings → Web search. Keys stay in the OS credential store and are never
-//! put in prompts, logs or error messages. Searches are plain HTTPS API
-//! calls: no browser, no scraping of search result pages.
+//! Keys stay in the OS credential store and are never put in prompts, logs
+//! or error messages. Searches are plain HTTPS API calls: no browser, no
+//! scraping of search result pages.
 
 use std::time::Duration;
 
@@ -135,7 +135,7 @@ pub async fn configured(state: &AppState) -> AppResult<Option<Service>> {
             Some(key) if !key.trim().is_empty() => Some(key),
             _ => {
                 return Err(AppError::configuration(format!(
-                    "{} has no API key; add it in Settings → Web search",
+                    "{} has no API key; add it under Settings → Career Search → Advanced",
                     kind.name()
                 )))
             }
@@ -303,7 +303,8 @@ impl Service {
                     .to_string()
             }
             (StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN, _) => {
-                "the API key was rejected; check it in Settings → Web search".to_string()
+                "the API key was rejected; check it under Settings → Career Search → Advanced"
+                    .to_string()
             }
             (StatusCode::TOO_MANY_REQUESTS, _) => "the rate limit or quota is reached".to_string(),
             _ if detail.is_empty() => format!("the service answered {}", status.as_u16()),

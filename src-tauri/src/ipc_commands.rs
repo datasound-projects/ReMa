@@ -69,6 +69,8 @@ pub const APP_COMMANDS: &[&str] = &[
     "duplicate_agent",
     "delete_agent",
     // Web search service
+    "career_search_status",
+    "check_career_search",
     "web_search_settings",
     "save_web_search_settings",
     "test_web_search",

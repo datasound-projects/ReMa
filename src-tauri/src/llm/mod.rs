@@ -161,6 +161,42 @@ pub struct WebSearch {
     /// and a provider that refuses web search fails the request instead of
     /// answering without it.
     pub required: bool,
+    /// Search only these sites (and their subdomains), where the provider
+    /// supports it (OpenAI `filters.allowed_domains`, Anthropic
+    /// `allowed_domains`). Empty: no restriction.
+    pub allowed_domains: Vec<String>,
+    /// Where the request is about, for localized results (approximate;
+    /// never the device's location).
+    pub location: Option<ApproxLocation>,
+}
+
+/// An approximate place for search localization, from the request itself.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ApproxLocation {
+    pub city: Option<String>,
+    pub region: Option<String>,
+    /// ISO 3166-1 alpha-2 ("AT").
+    pub country: Option<String>,
+    /// IANA time zone ("Europe/Vienna").
+    pub timezone: Option<String>,
+}
+
+impl ApproxLocation {
+    /// The provider's `user_location` object (both use the same shape).
+    pub fn to_json(&self) -> serde_json::Value {
+        let mut out = serde_json::json!({ "type": "approximate" });
+        for (key, value) in [
+            ("city", &self.city),
+            ("region", &self.region),
+            ("country", &self.country),
+            ("timezone", &self.timezone),
+        ] {
+            if let Some(value) = value {
+                out[key] = serde_json::json!(value);
+            }
+        }
+        out
+    }
 }
 
 impl WebSearch {
@@ -277,6 +313,9 @@ pub struct Endpoint {
     /// Sent with HTTPS requests: an API key, or a Claude Console access
     /// token from the Anthropic CLI. `None` when a runtime authenticates.
     pub credential: Option<Credential>,
+    /// An OpenAI-compatible server that runs a web search tool itself
+    /// (Unsloth Studio): web requests enable only that tool there.
+    pub server_web_search: bool,
 }
 
 impl Endpoint {
@@ -359,6 +398,8 @@ pub struct StreamState {
     pub blocks: Vec<Value>,
     /// Partial JSON of blocks whose input streams in pieces, by index.
     pub partial_json: HashMap<usize, String>,
+    /// Server-side web tool calls in progress (Unsloth): id → (kind, target).
+    pub web_calls: HashMap<String, (WebKind, String)>,
 }
 
 /// How one model call ended.
@@ -466,6 +507,12 @@ pub trait LanguageModel: Send + Sync {
         cancel: CancellationToken,
         on_delta: DeltaSink<'a>,
     ) -> BoxFuture<'a, AppResult<Finish>>;
+
+    /// Whether an OpenAI-compatible server runs a web search tool itself
+    /// (Unsloth Studio). Asked once per server and remembered.
+    fn serves_web_search<'a>(&'a self, _endpoint: &'a Endpoint) -> BoxFuture<'a, bool> {
+        Box::pin(async { false })
+    }
 }
 
 /// The real implementation: HTTPS APIs, or the Codex runtime for a
@@ -491,6 +538,13 @@ impl ProviderLanguageModel {
 }
 
 impl LanguageModel for ProviderLanguageModel {
+    fn serves_web_search<'a>(&'a self, endpoint: &'a Endpoint) -> BoxFuture<'a, bool> {
+        Box::pin(async move {
+            endpoint.kind == ProviderKind::OpenaiCompatible
+                && openai::serves_web_search(&self.http, endpoint).await
+        })
+    }
+
     fn list_models<'a>(
         &'a self,
         endpoint: &'a Endpoint,

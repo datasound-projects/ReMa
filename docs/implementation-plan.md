@@ -108,39 +108,41 @@ go through it.
 
 ## 6. Phase 2 — Always-On Career Search (CS)
 
-Planned layout: `src-tauri/src/career_search/` (router, requirement classes,
-scopes, routes, no-key providers, health, evidence), built on `retrieval/` and
-`rema_mcp/` rather than beside them.
+Layout: `src-tauri/src/career_search/` (requirement classes, scopes, plan,
+registry, router, no-key job sources, company research, health, status),
+built on `retrieval/` and `rema_mcp/` rather than beside them. Record:
+[career-search/implementation.md](career-search/implementation.md);
+validation: [career-search/validation.md](career-search/validation.md).
 
-| Req | Requirement | Planned location | Status | Evidence / blocker |
+| Req | Requirement | Location | Status | Evidence / blocker |
 |---|---|---|---|---|
-| CS §1, §37 | A search path always exists, the same in Chat, Tasks, Agents, Jobs MCP | `career_search/mod.rs`; callers | Not started | |
-| CS §2 | Professional scope only, not a general browser | scopes, registry | Not started | |
-| CS §3, §19, §23 | Source hierarchy; Jobs MCP first; maintainable registry | `rema_mcp/sources.rs` (extended) | Not started | |
-| CS §4, §5, §6 | One interface, one router, automatic selection | `career_search/{mod,router}.rs` | Not started | |
-| CS §7–§9, §31 | OpenAI native search, domain filters, source validation | `llm/openai*`, `retrieval/native.rs` | Not started | |
-| CS §10 | Codex | `llm/codex*` | Not started | |
-| CS §11, §12, §32 | Anthropic native search, verification, sources | `llm/anthropic*`, `retrieval/native.rs` | Not started | |
-| CS §13, §40, §59 | No configuration error; remove the dependency | `retrieval/mod.rs`, `services/chat.rs`, `rema_mcp/engine.rs` | Not started | |
-| CS §14–§16 | Local models get a server-side search tool; Unsloth tools enabled automatically; no copied AGPL code | `llm/openai_compat*`, `career_search/routes.rs` | Not started | |
-| CS §17, §18 | No-key fallback chain, fault tolerant | `career_search/nokey/` | Not started | |
-| CS §20, §21 | Requirement classes; current-data guard | `career_search/requirement.rs` | Not started | |
-| CS §22 | Scopes | `career_search/scope.rs` | Not started | |
-| CS §24, §25 | Company domains; location-aware search | `career_search/company.rs` | Not started | |
-| CS §26 | Query planner | `career_search/planner.rs` | Not started | |
-| CS §27–§30 | Salary, freshness, normalization, evidence | `career_search/evidence.rs`, `rema_mcp/normalize` | Not started | |
-| CS §33–§36 | Dedupe, failure isolation, retries, circuit breakers | `career_search/health.rs` | Not started | |
-| CS §38, §39 | Scheduled tasks; search metadata in run history | scheduler; run context | Not started | |
-| CS §41, §42 | Settings "Career Search — Automatic"; external services optional | `src/components/settings/` | Not started | |
-| CS §43, §44 | No external browser window; no hidden GUI automation | — | Not started | |
-| CS §45–§48 | Prompt-injection protection; source fetching; JS-heavy pages; JobPosting data | `rema_mcp/fetch.rs`, adapters | Not started | |
-| CS §49–§51 | Observability; health test; startup capability detection | `career_search/health.rs`, Settings | Not started | |
-| CS §52–§55 | Routing examples (OpenAI, Claude, Unsloth, other local) | router tests | Not started | |
-| CS §56–§58 | Quality guard; no fake current results; progress UI | chat/tasks | Not started | |
-| CS §60 | Realistic reliability | health, fallback | Not started | |
-| CS §61 | Required tests | | Not started | |
-| CS §62 | Acceptance criteria 1–30 | `docs/career-search/validation.md` | Not started | |
-| CS §64 | Official documentation verification | `docs/career-search/implementation.md` | In progress | Anthropic web search (platform.claude.com), OpenAI `WebSearchTool` (openai 7.23.0 types), Unsloth 2026.9.11 package checked |
+| CS §1, §37 | A search path always exists, the same in Chat, Tasks, Agents, Jobs MCP | `career_search/router.rs`; `services/chat.rs`, `services/scheduler.rs`, `rema_mcp/engine.rs` | Verified | E2E 3–12; chat, scheduler and router tests |
+| CS §2 | Professional scope only, not a general browser | `requirement.rs` scopes, `registry.rs` | Verified | Domain filters from the career registry (E2E 4–5, 10); `scopes_choose_their_sources` |
+| CS §3, §19, §23 | Source hierarchy; Jobs MCP first; one registry | `registry.rs`; `rema_mcp/sources.rs` (read policy) | Verified | "ReMa Jobs" first in every route; `job_searches_stay_on_job_sources_of_the_region`, `urls_map_to_their_source` |
+| CS §4, §5, §6 | One interface, one router, automatic selection | `router.rs` (`search_jobs`, `research`) | Verified | E2E 3–6: four engines, no setting changed |
+| CS §7–§9, §31 | OpenAI native search, domain filters, source validation | `llm/openai_responses.rs`, `retrieval/native.rs` | Verified | E2E 5; `builds_stateless_requests_with_web_search`, `counts_only_searches_that_ran`, `research_findings_need_a_reported_page` |
+| CS §10 | Codex | `retrieval/native.rs` (ChatGPT web search) | Verified | Engine and brief with the sites as guidance; findings marked unchecked (unit tests); no live Codex run here |
+| CS §11, §12, §32 | Anthropic native search, verification, sources | `llm/anthropic.rs`, `retrieval/native.rs` | Verified | E2E 4, 7, 10; `picks_the_web_tool_versions_each_model_has`, fallback tests |
+| CS §13, §40, §59 | No configuration error; the dependency removed | `retrieval/mod.rs`, `services/chat.rs`, `rema_mcp/engine.rs`, `retrieval/render.rs` | Verified | E2E 8; `every_route_failing_is_an_honest_operational_error` |
+| CS §14–§16 | Local models get a search tool; Unsloth web search on automatically; no AGPL code | `retrieval/tools.rs`, `llm/openai.rs`, `services/providers.rs` | Verified | E2E 6; `unsloth_runs_only_its_web_search_and_reports_it`, `local_models_get_remas_web_tools_for_other_questions` |
+| CS §17, §18 | No-key fallback, fault tolerant | `career_search/jobs.rs`, `company.rs`, adapters | Verified | E2E 3, 8, 9; `one_failing_source_does_not_stop_the_others`, `a_source_that_could_not_be_searched_is_named_in_the_answer` |
+| CS §20, §21 | Requirement classes; current-data guard | `requirement.rs`; chat routing | Verified | `current_career_questions_require_search`, `static_questions_need_no_search`; E2E 9 |
+| CS §22 | Scopes | `requirement.rs` | Verified | Search scope in run context (E2E 11, 12) |
+| CS §24, §25 | Company domains; location-aware search | `company.rs` (Wikidata P856), `plan.rs` (place, ISO code, time zone) | Verified | `user_location` Vienna (E2E 4–5); `plans_the_screenshot_request` |
+| CS §26 | Query planner | `plan.rs` | Verified | Roles and variants, place, salary, recency, companies, people; plan tests |
+| CS §27–§30 | Salary, freshness, normalization, evidence | `retrieval/listings.rs`, `router.rs` | Verified | Salary rules and notes (E2E 3); `applies_the_date_window_and_the_salary_floor`; snapshot time shown (`a_search_repeated_within_minutes…`) |
+| CS §33–§36 | Dedupe, failure isolation, retries, circuit breakers | `router.rs` merge, `health.rs` | Verified | E2E 4 (one row for two sources); `repeated_failures_rest_a_source…`, `a_rate_limited_search_is_retried_once` |
+| CS §38, §39 | Scheduled tasks; search metadata in run history | `services/scheduler.rs`; `RunContext.search_scopes`, `sources_consulted` | Verified | E2E 11, 12 (Manual and Scheduled runs) |
+| CS §41, §42 | Settings "Career Search — Automatic"; external services optional | `CareerSearchSection.tsx`, `AdditionalSearchService.tsx` | Verified | E2E 1, 2, 6; Vitest |
+| CS §43, §44 | No external browser window; no hidden GUI automation | — | Verified | E2E 13; only API and permitted-page requests |
+| CS §45–§48 | Prompt-injection protection; source fetching; JS-heavy pages; JobPosting data | `research.rs` context block, `rema_mcp/fetch.rs`, `analytics/page.rs` | Verified | E2E 9 (no contacts, data block, no tools); fetch and JSON-LD tests |
+| CS §49–§51 | Observability; health test; start-up capability detection | `career_search/{mod,status}.rs` | Verified | Recent searches (E2E 12), Check now (E2E 2), Unsloth detected at save and start-up (E2E 6) |
+| CS §52–§55 | Routing examples (OpenAI, Claude, Unsloth, other local) | router | Verified | E2E 3–6 |
+| CS §56–§58 | Quality guard; no fake current results; progress UI | chat, render, `WebActivity.tsx` | Verified | "Searched career sources · …" (E2E 3); nothing from model memory (tests) |
+| CS §60 | Realistic reliability | health, fallback | Verified | E2E 7, 8; live hosts: release prerequisite (§4) |
+| CS §61 | Required tests | | Verified | [career-search/validation.md](career-search/validation.md) §1 |
+| CS §62 | Acceptance criteria 1–30 | | Verified | [career-search/validation.md](career-search/validation.md) §4 |
+| CS §64 | Official documentation verification | [career-search/implementation.md](career-search/implementation.md) §6 | Verified | OpenAI SDK types 7.23.0, platform.claude.com, Unsloth 2026.9.11 package; OpenAI's site to re-check on a normal network |
 
 ## 7. Phase 3 — Network Connect (NC §1–§63) and Business (Appendix B)
 
@@ -209,3 +211,41 @@ files and migrations, acceptance verified, commands and results, limitations).
   In-app run: [run-history/validation.md](run-history/validation.md).
 - **Limitations**: providers were local stand-ins; the longest in-app
   history was eight runs (paging is covered by tests).
+
+### Phase 2 — Always-On Career Search: gate passed
+
+- **Implemented**: one career-search layer (`career_search/`) used by Chat,
+  Scheduled Tasks (scheduled and Run now), Agents and the Jobs MCP. Job
+  requests run ReMa Jobs (the Jobs MCP over no-key sources: employers' ATS
+  boards, Arbeitnow, The Muse, Remotive, Hacker News "Who is hiring?") and
+  the model's own search (OpenAI Responses `web_search` with domain filter,
+  location and `tool_choice: required`; Anthropic `web_search`/`web_fetch`
+  with domain filter and location; Codex; Gemini; Unsloth Studio's
+  `web_search` only) at once, verify what the model reports, merge
+  duplicates (the employer's own posting kept), apply the date and salary
+  rules and show every row with its source. Research requests (companies,
+  people, market) search Wikidata, Wikipedia and the company's own pages
+  plus the model's search, then answer from a delimited source block with
+  a Sources list. The "No search service is set up" failure is gone; when
+  every route fails the answer says what happened. Settings shows **Career
+  Search — Automatic** with Check now, Recent searches and the optional
+  service under Advanced.
+- **Files**: `career_search/` (new), `rema_mcp/adapters/{boards,
+  smartrecruiters,workable,recruitee}.rs` (new) and the list endpoints of
+  the existing ATS adapters, `rema_mcp/{engine,sources,fetch,host}.rs`,
+  `retrieval/{mod,native,listings,render,tools,intent}.rs`, `llm/{mod,
+  openai,openai_responses,anthropic}.rs`, `services/{chat,scheduler,
+  providers}.rs`, `analytics/page.rs` (character sets),
+  `CareerSearchSection.tsx`, `AdditionalSearchService.tsx`,
+  `WebActivity.tsx`, `taskRuns.ts`, `TaskRunsView.tsx`; the E2E stand-in's
+  career sources and model searches. No migration (run context fields are
+  optional JSON).
+- **Acceptance**: criteria 1–30 verified (table in the validation record).
+- **Commands**: fmt and clippy clean; `cargo test` 531 passed (3 ignored,
+  as before); lint and typecheck clean; Vitest 102 passed; build succeeds.
+  In-app runs with OpenAI, Anthropic, Unsloth and a plain local model
+  stand-in, no search service configured, in Chat and as a scheduled task.
+- **Limitations**: the no-key hosts and the providers are unreachable from
+  this environment (stand-ins used; Check now on a normal network before
+  release); Bundesagentur für Arbeit not added (terms for third-party use
+  unconfirmed); Codex has no domain filter (guidance in its brief).

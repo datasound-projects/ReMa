@@ -23,6 +23,7 @@
 pub mod accounts;
 pub mod analytics;
 pub mod browser;
+pub mod career_search;
 pub mod commands;
 pub mod connectors;
 pub mod db;
@@ -164,6 +165,12 @@ pub fn run() {
             scheduler::start(state.clone());
             analytics::enrich::start(state.clone());
             mail_monitor::start(state.clone());
+            // What connected local servers can do (Unsloth Studio's own web
+            // search), learned before the first search needs it.
+            let startup = state.clone();
+            tauri::async_runtime::spawn(async move {
+                career_search::status::detect_capabilities(&startup).await;
+            });
             app.manage(state);
             Ok(())
         })
@@ -276,5 +283,6 @@ fn init_state(app: &App) -> Result<AppState, Box<dyn std::error::Error>> {
         mcp: Default::default(),
         approvals: Default::default(),
         rema_mcp: rema_mcp::RemaMcp::new(),
+        career: Default::default(),
     })
 }

@@ -77,7 +77,14 @@ pub fn request_body(model_id: &str, request: &ChatRequest) -> Value {
         .collect();
     if let Some(web) = &request.web {
         // Live results, not only OpenAI's cached index.
-        tools.push(json!({ "type": "web_search", "external_web_access": true }));
+        let mut tool = json!({ "type": "web_search", "external_web_access": true });
+        if !web.allowed_domains.is_empty() {
+            tool["filters"] = json!({ "allowed_domains": web.allowed_domains });
+        }
+        if let Some(location) = &web.location {
+            tool["user_location"] = location.to_json();
+        }
+        tools.push(tool);
         body["include"] = json!(["web_search_call.action.sources"]);
         if web.required && request.tool_specs().is_empty() {
             // The retrieval step: the model must search before it answers.
@@ -340,6 +347,30 @@ mod tests {
             ..WebSearch::default()
         });
         assert_eq!(request_body("gpt-6", &request)["tool_choice"], "required");
+
+        // A career search stays on career sites, localized to the request.
+        request.web = Some(WebSearch {
+            required: true,
+            allowed_domains: vec!["karriere.at".into(), "greenhouse.io".into()],
+            location: Some(crate::llm::ApproxLocation {
+                city: Some("Vienna".into()),
+                region: None,
+                country: Some("AT".into()),
+                timezone: Some("Europe/Vienna".into()),
+            }),
+            ..WebSearch::default()
+        });
+        let body = request_body("gpt-6", &request);
+        assert_eq!(
+            body["tools"][0],
+            json!({
+                "type": "web_search",
+                "external_web_access": true,
+                "filters": { "allowed_domains": ["karriere.at", "greenhouse.io"] },
+                "user_location": { "type": "approximate", "city": "Vienna", "country": "AT", "timezone": "Europe/Vienna" }
+            })
+        );
+        assert_eq!(body["tool_choice"], "required");
     }
 
     #[test]

@@ -9,22 +9,21 @@ import {
   type WebSearchSettings,
 } from '../../services/webSearchService';
 import { FormField } from '../ui/FormField';
-import { HelpTip } from '../ui/HelpTip';
 
 const SERVICES: { value: ServiceKind | ''; label: string }[] = [
-  { value: '', label: 'None' },
+  { value: '', label: 'None (not needed)' },
   { value: 'brave', label: 'Brave Search API' },
   { value: 'tavily', label: 'Tavily' },
   { value: 'searxng', label: 'SearXNG (your own instance)' },
 ];
 
-const HELP =
-  'When you ask for jobs, ReMa always searches the web before answering: first with the model’s own web search (ChatGPT, OpenAI, Anthropic, Gemini), then with the service set up here. Local models (Ollama, LM Studio) have no web search of their own and use this service, also as tools they can call. Searches run in the background — no browser windows open.';
-
 type Status = { kind: 'idle' } | { kind: 'busy'; what: string } | { kind: 'ok'; text: string } | { kind: 'error'; text: string };
 
-/** Settings → Web search: the search service ReMa calls itself. */
-export function WebSearchSection() {
+/**
+ * Settings → Career Search → Advanced: an optional search service that adds
+ * its results to ReMa's own career search. Never required.
+ */
+export function AdditionalSearchService() {
   const [saved, setSaved] = useState<WebSearchSettings | null>(null);
   const [service, setService] = useState<ServiceKind | ''>('');
   const [url, setUrl] = useState('');
@@ -62,7 +61,7 @@ export function WebSearchSection() {
       });
       setSaved(next);
       setKey('');
-      setStatus({ kind: 'ok', text: next.service ? 'Saved.' : 'Web search service turned off.' });
+      setStatus({ kind: 'ok', text: next.service ? 'Saved.' : 'Removed. Career search keeps working without it.' });
     } catch (err) {
       setStatus({ kind: 'error', text: toApiError(err).message });
     }
@@ -85,19 +84,13 @@ export function WebSearchSection() {
   };
 
   return (
-    <section className="section" aria-labelledby="websearch-heading" id="settings-web-search">
-      <div className="section__head">
-        <div className="section__heading">
-          <h2 id="websearch-heading" className="section__title mcp__title">
-            Web search
-            <HelpTip text={HELP} label="How does ReMa search the web?" />
-          </h2>
-          <p className="section__description">
-            Job searches always search first. Add a search service for local models, and as a fallback.
-          </p>
-        </div>
-      </div>
-      <div className="panel websearch">
+    <div className="websearch">
+      <p className="websearch__intro">
+        Optional, for developers and power users: a search service you run or pay for adds its results. Career search
+        works the same without one.
+      </p>
+      <div className="websearch__form">
+
         <FormField label="Search service">
           {(ids) => (
             <select
@@ -176,6 +169,6 @@ export function WebSearchSection() {
           </p>
         )}
       </div>
-    </section>
+    </div>
   );
 }

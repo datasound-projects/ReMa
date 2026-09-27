@@ -1021,10 +1021,15 @@ async fn scheduled_job_searches_search_first_and_fail_without_a_search() {
         run.error_category,
         Some(crate::models::task::RunErrorCategory::Search)
     );
-    assert!(run
-        .error
-        .unwrap()
-        .starts_with("ReMa couldn't search the web"));
+    let error = run.error.unwrap();
+    assert!(
+        error.starts_with(crate::career_search::UNAVAILABLE),
+        "{error}"
+    );
+    assert!(
+        !error.contains("Settings"),
+        "never a request to set up a search service"
+    );
     let search = run.progress.iter().find(|s| s.stage == "search").unwrap();
     assert_eq!(search.status, crate::models::task::StageStatus::Failed);
     assert!(

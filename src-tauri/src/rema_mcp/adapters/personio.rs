@@ -51,6 +51,20 @@ pub async fn read(
     Ok(record(&position, company, &url, &job_url, ctx.now))
 }
 
+/// Every open position in the employer's feed.
+pub async fn list(ctx: &Ctx<'_>, company: &str, domain: &str) -> Result<Vec<JobRecord>, ToolError> {
+    let url = ctx.apis.personio_feed(company, domain);
+    let body = ctx.feed(&url, Accept::Xml).await?;
+    Ok(parse_feed(&body)?
+        .iter()
+        .take(super::MAX_LISTED)
+        .map(|p| {
+            let job_url = format!("https://{company}.{domain}/job/{}", p.id);
+            record(p, company, &url, &job_url, ctx.now)
+        })
+        .collect())
+}
+
 fn entity(name: &str) -> Option<char> {
     match name {
         "amp" => Some('&'),

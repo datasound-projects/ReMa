@@ -395,6 +395,7 @@ impl Fetcher {
                     validators,
                 });
             }
+            let content_type = header_text(&response, header::CONTENT_TYPE);
             let retry_after = response
                 .headers()
                 .get(header::RETRY_AFTER)
@@ -421,6 +422,25 @@ impl Fetcher {
                 }
                 _ => {}
             }
+            // Only text is read: images, archives and other files are not.
+            if let Some(kind) = content_type.as_deref().map(str::to_ascii_lowercase) {
+                let binary = ["image/", "audio/", "video/", "font/"]
+                    .iter()
+                    .any(|p| kind.starts_with(p))
+                    || [
+                        "application/pdf",
+                        "application/octet-stream",
+                        "application/zip",
+                        "application/gzip",
+                    ]
+                    .iter()
+                    .any(|t| kind.starts_with(t));
+                if binary {
+                    return Err(fail(FetchError::Failed(
+                        "the source sent a file, not a page or data".into(),
+                    )));
+                }
+            }
             let mut body = Vec::new();
             let mut truncated = false;
             let mut stream = response.bytes_stream();
@@ -445,7 +465,10 @@ impl Fetcher {
             }
             return Ok(Response {
                 final_url: current.to_string(),
-                body: Some(String::from_utf8_lossy(&body).into_owned()),
+                body: Some(crate::analytics::page::decode_body(
+                    &body,
+                    content_type.as_deref(),
+                )),
                 truncated,
                 validators,
             });

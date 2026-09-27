@@ -150,7 +150,15 @@ function full(id: number, over: Partial<TaskRun> & { trigger?: 'scheduled' | 'ma
     model: { providerId: 'anthropic', modelId: 'model-a' },
     schedule: { schedule: { kind: 'daily', every: 1 }, timezone: 'Europe/Vienna', startDate: '2026-09-20', startTime: '21:30' },
     useProfile: false,
-    context: { profile: false, connectors: [], webSearch: true, searches: 2, searchEngines: ['ChatGPT web search'] },
+    context: {
+      profile: false,
+      connectors: [],
+      webSearch: true,
+      searches: 2,
+      searchEngines: ['ReMa Jobs + ChatGPT web search'],
+      searchScopes: ['Jobs'],
+      sourcesConsulted: ['ReMa Jobs', 'Company career sites', 'ChatGPT web search'],
+    },
     result: 'ok',
     report: null,
     error: null,
@@ -295,7 +303,9 @@ describe('Scheduled Tasks', () => {
     expect(within(history).getByText('Search Vienna')).toBeTruthy();
     expect(within(history).getByText('Vienna jobs')).toBeTruthy();
     fireEvent.click(within(history).getByRole('button', { name: 'Context' }));
-    expect(within(history).getByText('Enabled · ChatGPT web search · 2 searches')).toBeTruthy();
+    expect(within(history).getByText('Used · 2 searches')).toBeTruthy();
+    expect(within(history).getByText('Jobs')).toBeTruthy();
+    expect(within(history).getByText('ReMa Jobs, Company career sites, ChatGPT web search')).toBeTruthy();
   });
 
   it('shows a failed run with its error and the way to fix it', async () => {

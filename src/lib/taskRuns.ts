@@ -88,17 +88,18 @@ export function failureGuidance(category: RunErrorCategory | null): Guidance | n
   }
 }
 
-/** "Enabled · ChatGPT web search · 3 searches", "Not available". */
+/** "Used · 3 searches", "Available · not used", "Not available". */
 export function describeWebSearch(context: RunContext): string {
   if (!context.webSearch) return 'Not available';
-  const parts = ['Enabled'];
-  if (context.searchEngines.length > 0) parts.push(context.searchEngines.join(', '));
-  if (context.searches > 0) {
-    parts.push(`${context.searches} ${context.searches === 1 ? 'search' : 'searches'}`);
-  } else {
-    parts.push('not used');
-  }
-  return parts.join(' · ');
+  if (context.searches === 0) return 'Available · not used';
+  return `Used · ${context.searches} ${context.searches === 1 ? 'search' : 'searches'}`;
+}
+
+/** Where a run searched ("ReMa Jobs, Company career sites, OpenAI web search"). */
+export function describeSources(context: RunContext): string | null {
+  const sources = context.sourcesConsulted ?? [];
+  const names = sources.length > 0 ? sources : context.searchEngines;
+  return names.length > 0 ? names.join(', ') : null;
 }
 
 export const OUTPUT_KIND_LABELS: Record<RunOutputKind, string> = {

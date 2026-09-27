@@ -12,8 +12,8 @@ use futures_util::{stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    intent::{stem, JobQuery},
-    Candidate, Excluded, Found, Listing, Progress, Verification,
+    intent::{stem, JobQuery, MinSalary},
+    Candidate, Excluded, Found, Listing, Progress, SalaryStatus, Verification,
 };
 use crate::{
     analytics::{
@@ -73,7 +73,7 @@ enum Read {
 }
 
 /// Why a posting is not shown.
-enum Drop {
+pub(crate) enum Drop {
     Gone,
     Expired,
     Older,
@@ -192,7 +192,7 @@ fn clip(text: &str, max: usize) -> String {
 }
 
 /// The first sentences of a description.
-fn summary(text: &str) -> Option<String> {
+pub(crate) fn summary(text: &str) -> Option<String> {
     let text = normalize::clip(text, 600);
     let mut out = String::new();
     for sentence in text.split_inclusive(['.', '!', '?']) {
@@ -232,7 +232,7 @@ fn future_date(text: &str) -> Option<jiff::civil::Date> {
     day.parse::<jiff::civil::Date>().ok()
 }
 
-fn work_mode_label(mode: WorkMode) -> &'static str {
+pub(crate) fn work_mode_label(mode: WorkMode) -> &'static str {
     match mode {
         WorkMode::Remote => "Remote",
         WorkMode::Hybrid => "Hybrid",
@@ -240,23 +240,32 @@ fn work_mode_label(mode: WorkMode) -> &'static str {
     }
 }
 
-/// Whether the title shares a word of the requested role.
-fn relevant(title: &str, query: &JobQuery) -> bool {
-    let wanted = query.role_terms();
-    if wanted.is_empty() {
-        return true;
-    }
-    let have: Vec<String> = title
+fn words(title: &str) -> Vec<String> {
+    title
         .to_lowercase()
         .split(|c: char| !c.is_alphanumeric() && c != '+' && c != '#')
         .filter(|w| !w.is_empty())
         .map(stem)
-        .collect();
+        .collect()
+}
+
+/// Whether the title shares a word of the requested role, or has every
+/// word of one of its close variants ("Machine Learning Engineer" for "AI").
+pub(crate) fn relevant(title: &str, query: &JobQuery, related: &[String]) -> bool {
+    let wanted = query.role_terms();
+    if wanted.is_empty() {
+        return true;
+    }
+    let have = words(title);
     wanted.iter().any(|w| have.contains(w))
+        || related.iter().any(|role| {
+            let need = words(role);
+            !need.is_empty() && need.iter().all(|w| have.contains(w))
+        })
 }
 
 /// Whether a location is (or includes) the requested place.
-fn in_place(location: &str, wanted: &str) -> bool {
+pub(crate) fn in_place(location: &str, wanted: &str) -> bool {
     let have = normalize::place(location);
     let want = normalize::place(wanted);
     if have.cities.is_empty() && have.countries.is_empty() {
@@ -286,11 +295,100 @@ fn period_amount(salary: &Salary, value: f64, period: SalaryPeriod) -> Option<f6
     })
 }
 
+/// The request's posting-date window (§28): an older posting is not shown;
+/// one without a date is shown with a note.
+pub(crate) fn check_date(
+    posted: Option<i64>,
+    days: Option<u32>,
+    now: i64,
+    notes: &mut Vec<String>,
+) -> Result<(), Drop> {
+    if let Some(days) = days {
+        match posted {
+            Some(date) if (now - date) / DAY_MS > i64::from(days) => return Err(Drop::Older),
+            Some(_) => {}
+            None => notes.push("posting date not shown".to_string()),
+        }
+    }
+    Ok(())
+}
+
+/// The requested salary minimum (§27): a stated salary below it is not
+/// shown; an unknown one is shown and marked, never counted as meeting it.
+pub(crate) fn check_salary(
+    salary: Option<&Salary>,
+    estimate: bool,
+    floor: Option<&MinSalary>,
+    notes: &mut Vec<String>,
+) -> Result<SalaryStatus, Drop> {
+    let status = match (salary, estimate) {
+        (None, _) => SalaryStatus::NotListed,
+        (Some(_), true) => SalaryStatus::Estimated,
+        (Some(_), false) => SalaryStatus::Verified,
+    };
+    let Some(floor) = floor else {
+        return Ok(status);
+    };
+    match (salary, status) {
+        (None, _) => notes.push("salary not stated".to_string()),
+        (Some(_), SalaryStatus::Estimated) => notes.push("salary is only an estimate".to_string()),
+        (Some(stated), _) => {
+            let other_currency =
+                matches!((floor.currency, stated.currency), (Some(a), Some(b)) if a != b);
+            let top = stated.max.or(stated.min);
+            match top.and_then(|v| period_amount(stated, v, floor.period)) {
+                _ if other_currency => notes.push("salary in another currency".to_string()),
+                Some(top) if top < floor.amount => return Err(Drop::BelowSalary),
+                Some(_) => {
+                    let bottom = stated
+                        .min
+                        .and_then(|v| period_amount(stated, v, floor.period));
+                    if bottom.is_some_and(|b| b < floor.amount) {
+                        notes.push("salary range starts below the requested minimum".into());
+                    }
+                }
+                None => notes.push("salary period not stated".to_string()),
+            }
+        }
+    }
+    Ok(status)
+}
+
+/// Where a posting was found, by its address.
+pub(crate) fn source_label(url: &str) -> String {
+    normalize::source_name(url)
+        .or_else(|| {
+            crate::rema_mcp::sources::classify(url)
+                .ok()
+                .filter(|c| c.source.id != "web")
+                .map(|c| c.source.name.to_string())
+        })
+        .or_else(|| {
+            reqwest::Url::parse(url).ok().and_then(|u| {
+                u.host_str()
+                    .map(|h| h.trim_start_matches("www.").to_string())
+            })
+        })
+        .unwrap_or_else(|| "web".to_string())
+}
+
 /// Builds the listing, or says why it is not shown.
+#[cfg(test)]
 fn build(
     candidate: &Candidate,
     read: &Read,
     query: &JobQuery,
+    now: i64,
+    trust_listed: bool,
+) -> Result<Listing, Drop> {
+    build_with(candidate, read, query, &[], now, trust_listed)
+}
+
+fn build_with(
+    candidate: &Candidate,
+    read: &Read,
+    query: &JobQuery,
+    related: &[String],
     now: i64,
     trust_listed: bool,
 ) -> Result<Listing, Drop> {
@@ -361,7 +459,7 @@ fn build(
         .map(|t| clip(&t, 120))
         .filter(|t| !t.is_empty())
         .unwrap_or_else(|| normalize::source_name(&url).unwrap_or_else(|| url.clone()));
-    if !relevant(&title, query) {
+    if !relevant(&title, query, related) {
         return Err(Drop::OffTopic);
     }
     let location = facts
@@ -393,13 +491,7 @@ fn build(
             from_search
         }
     };
-    if let Some(days) = query.posted_within_days {
-        match posted {
-            Some(date) if (now - date) / DAY_MS > i64::from(days) => return Err(Drop::Older),
-            Some(_) => {}
-            None => notes.push("posting date not shown".to_string()),
-        }
-    }
+    check_date(posted, query.posted_within_days, now, &mut notes)?;
     let salary_text = facts
         .salary_text
         .clone()
@@ -409,34 +501,24 @@ fn build(
         .salary
         .clone()
         .or_else(|| salary_text.as_deref().and_then(normalize::salary));
-    if let Some(floor) = &query.min_salary {
-        match &salary {
-            None => notes.push("salary not stated".to_string()),
-            Some(stated) => {
-                let other_currency =
-                    matches!((floor.currency, stated.currency), (Some(a), Some(b)) if a != b);
-                let top = stated.max.or(stated.min);
-                match top.and_then(|v| period_amount(stated, v, floor.period)) {
-                    _ if other_currency => notes.push("salary in another currency".to_string()),
-                    Some(top) if top < floor.amount => return Err(Drop::BelowSalary),
-                    Some(_) => {
-                        let bottom = stated
-                            .min
-                            .and_then(|v| period_amount(stated, v, floor.period));
-                        if bottom.is_some_and(|b| b < floor.amount) {
-                            notes.push("salary range starts below the requested minimum".into());
-                        }
-                    }
-                    None => notes.push("salary period not stated".to_string()),
-                }
-            }
-        }
-    }
+    let salary_status = check_salary(
+        salary.as_ref(),
+        false,
+        query.min_salary.as_ref(),
+        &mut notes,
+    )?;
+    // As ReMa read it ("€95k–120k / year"); the posting's words otherwise.
+    let salary_text = salary
+        .as_ref()
+        .filter(|s| s.min.is_some() || s.max.is_some())
+        .map(normalize::format_salary)
+        .or(salary_text);
     let summary = facts
         .description
         .as_deref()
         .and_then(summary)
         .or_else(|| candidate.snippet.as_deref().map(|s| clip(s, 240)));
+    let source = source_label(&url);
     Ok(Listing {
         title,
         company: facts
@@ -449,8 +531,10 @@ fn build(
         summary,
         posted,
         salary: salary_text,
+        salary_status,
         work_mode: work_mode.map(str::to_string),
         verification,
+        source,
         notes,
     })
 }
@@ -461,6 +545,7 @@ pub async fn check(
     state: &AppState,
     found: &Found,
     query: &JobQuery,
+    related: &[String],
     progress: &dyn Progress,
     cancel: &CancellationToken,
 ) -> Checked {
@@ -474,7 +559,7 @@ pub async fn check(
         .count();
     let mut listings: Vec<Listing> = Vec::new();
     for (candidate, read) in candidates.iter().zip(&reads) {
-        match build(candidate, read, query, now, !found.lists_sources) {
+        match build_with(candidate, read, query, related, now, !found.lists_sources) {
             Ok(listing) => {
                 // Two addresses can lead to one page.
                 let key = normalize::canonical_url(&listing.url);

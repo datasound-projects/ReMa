@@ -39,6 +39,26 @@ pub async fn read(ctx: &Ctx<'_>, board: &str, id: &str) -> Result<JobRecord, Too
     parse(job, board, &url, ctx.now)
 }
 
+/// Every listed job of a board (the same cached feed as [`read`]).
+pub async fn list(ctx: &Ctx<'_>, board: &str) -> Result<Vec<JobRecord>, ToolError> {
+    let url = format!(
+        "{}/posting-api/job-board/{board}?includeCompensation=true",
+        ctx.apis.ashby
+    );
+    let body = ctx.feed(&url, Accept::Json).await?;
+    let value: Value = serde_json::from_str(&body)
+        .map_err(|_| ToolError::new(ErrorCode::ParsingFailed, "the Ashby board is unreadable"))?;
+    Ok(value
+        .get("jobs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|j| j.get("isListed").and_then(Value::as_bool) != Some(false))
+        .take(super::MAX_LISTED)
+        .filter_map(|job| parse(job, board, &url, ctx.now).ok())
+        .collect())
+}
+
 fn text(value: &Value, pointer: &str) -> Option<String> {
     value
         .pointer(pointer)

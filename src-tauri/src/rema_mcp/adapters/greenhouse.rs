@@ -29,6 +29,30 @@ pub async fn read(ctx: &Ctx<'_>, board: &str, job: &str) -> Result<JobRecord, To
     parse(&value, board, &url, ctx.now)
 }
 
+/// Every published job of a board: `GET /v1/boards/{board}/jobs?content=true`
+/// (one request for the whole board, cached like a feed).
+pub async fn list(ctx: &Ctx<'_>, board: &str) -> Result<Vec<JobRecord>, ToolError> {
+    let url = format!(
+        "{}/v1/boards/{board}/jobs?content=true",
+        ctx.apis.greenhouse
+    );
+    let body = ctx.feed(&url, crate::rema_mcp::fetch::Accept::Json).await?;
+    let value: Value = serde_json::from_str(&body).map_err(|_| {
+        ToolError::new(
+            ErrorCode::ParsingFailed,
+            "the Greenhouse board is unreadable",
+        )
+    })?;
+    Ok(value
+        .get("jobs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .take(super::MAX_LISTED)
+        .filter_map(|job| parse(job, board, &url, ctx.now).ok())
+        .collect())
+}
+
 fn text(value: &Value, key: &str) -> Option<String> {
     value
         .get(key)

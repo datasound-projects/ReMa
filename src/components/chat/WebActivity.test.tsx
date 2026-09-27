@@ -54,7 +54,7 @@ describe('WebActivity: ReMa’s job search step', () => {
         ]}
       />,
     );
-    const summary = screen.getByRole('button', { name: /Searched the web/ });
+    const summary = screen.getByRole('button', { name: /Searched career sources/ });
     expect(summary.textContent).toContain('1 search · 2 pages checked');
     fireEvent.click(summary);
     expect(screen.getByText('AI Engineer jobs Vienna')).toBeTruthy();
@@ -64,8 +64,8 @@ describe('WebActivity: ReMa’s job search step', () => {
   });
 
   it('says plainly when the search failed or was stopped', () => {
-    const { rerender } = render(<WebActivity activity={[step('failed', 'No search service')]} />);
-    expect(screen.getByText('Web search failed')).toBeTruthy();
+    const { rerender } = render(<WebActivity activity={[step('failed', 'No source answered')]} />);
+    expect(screen.getByText('Search failed')).toBeTruthy();
     rerender(<WebActivity activity={[step('denied', '')]} />);
     expect(screen.getByText('Search stopped')).toBeTruthy();
   });

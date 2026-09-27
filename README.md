@@ -6,7 +6,7 @@ Rust owns application state, persistence, scheduling, validation, provider confi
 
 ## What ReMa does
 
-- **Chat**: a general-purpose AI chat with streaming responses, Stop, Retry, Copy, Markdown (code, lists, tables, links) and persistent conversation history ("Recents"). Job searches always search the web first: ReMa validates the postings it finds and shows only those, with direct links, before the model comments (see [Web search](#web-search)).
+- **Chat**: a general-purpose AI chat with streaming responses, Stop, Retry, Copy, Markdown (code, lists, tables, links) and persistent conversation history ("Recents"). Job searches always search the web first: ReMa validates the postings it finds and shows only those, with direct links, before the model comments (see [Career search](#career-search)).
 - **Models**: OpenAI, Anthropic, Google Gemini, and any OpenAI-compatible endpoint (Ollama, LM Studio, vLLM, …). Connect OpenAI with your **ChatGPT account** and Anthropic with your **Claude Console account** in the browser, or use API keys. Pick the model in the chat composer.
 - **Scheduled Tasks**: schedule the prompt you are writing, straight from the composer. Supports one-time, daily, every N days, selected weekdays, and intervals of 15 minutes or more. A task can end on a date or after N runs. You can edit, pause, resume, delete or run tasks now. Click a task to open **Scheduled / <Task>**: every run (scheduled or Run now) with its own result, progress, the context it used, its outputs and the task as it was when it ran; a running task updates live.
 - **Settings**: connect providers, choose which models appear in the chat, and set the default model. **Connectors** add Gmail, Google Calendar, Outlook Mail and Outlook Calendar with a sign-in in your browser (see [Connectors](#connectors)).
@@ -52,7 +52,7 @@ Connectors                  src-tauri/src/connectors (OAuth + PKCE, token manage
 Rules:
 
 - **Deterministic core.** The scheduler decides when tasks run, using pure, unit-tested schedule math. The LLM never controls timing, state, credentials or configuration.
-- **Provider-neutral.** Chat and scheduler use one `LanguageModel` interface. Provider, transport, authentication and model are separate concepts: the HTTPS adapters (`llm/openai_responses.rs` for OpenAI's Responses API, `llm/anthropic.rs`, `llm/gemini.rs`, and `llm/openai.rs` for every OpenAI-compatible endpoint's Chat Completions) and the Codex runtime (`accounts/codex.rs`) are transports; a connection method says how a request is authenticated; models are discovered per connection. Web search is each provider's hosted tool, reported back as `WebEvent`s; job searches go through `retrieval/` (search → validate → answer), enforced in Rust.
+- **Provider-neutral.** Chat and scheduler use one `LanguageModel` interface. Provider, transport, authentication and model are separate concepts: the HTTPS adapters (`llm/openai_responses.rs` for OpenAI's Responses API, `llm/anthropic.rs`, `llm/gemini.rs`, and `llm/openai.rs` for every OpenAI-compatible endpoint's Chat Completions) and the Codex runtime (`accounts/codex.rs`) are transports; a connection method says how a request is authenticated; models are discovered per connection. Web search is each provider's hosted tool, reported back as `WebEvent`s; job and research requests go through `career_search/` (ReMa's no-key sources and the model's own search at once → validate → answer), enforced in Rust.
 - **Rust is the source of truth.** IPC types, commands and events are generated from Rust. The frontend never hand-writes copies of them.
 - **Streaming via events.** Replies stream as typed `ChatEvent`s. Generation runs in the background, so switching chats does not interrupt it.
 
@@ -77,7 +77,7 @@ React → Tauri command → services::accounts → accounts::{codex, claude_cons
 - **Sign-in.** **Continue with ChatGPT** calls `account/login/start`. ReMa opens the returned `auth.openai.com` page in your browser, and Codex receives the result on its own local callback.
 - **Device code.** **Use a code instead** switches to device-code sign-in: ReMa shows a one-time code to enter on OpenAI's page.
 - **Credentials and requests.** Codex stores and refreshes the credentials, in the OS keychain when available (`cli_auth_credentials_store = "auto"`). It also sends every model request.
-- **Chat.** Each chat turn runs on an ephemeral thread. ReMa's system prompt replaces Codex's instructions and earlier messages are added as history. Codex's web search is turned on for chat threads (`config: {"web_search": "live"}`, or the best mode the workspace allows; OpenAI runs the searches). If the account may not search, the answer says so, and a job search fails instead of answering unverified. Every local tool is off (shell, file edits, apps, plugins, sub-agents). The only other tools are the MCP tools you selected in the chat, offered as Codex dynamic tools and run by ReMa (with the same approvals as other providers). The thread uses a read-only sandbox in an empty folder, and Codex's own approvals are always declined.
+- **Chat.** Each chat turn runs on an ephemeral thread. ReMa's system prompt replaces Codex's instructions and earlier messages are added as history. Codex's web search is turned on for chat threads (`config: {"web_search": "live"}`, or the best mode the workspace allows; OpenAI runs the searches). If the account may not search, the answer says so, and a job search uses ReMa's own sources instead of answering unverified. Every local tool is off (shell, file edits, apps, plugins, sub-agents). The only other tools are the MCP tools you selected in the chat, offered as Codex dynamic tools and run by ReMa (with the same approvals as other providers). The thread uses a read-only sandbox in an empty folder, and Codex's own approvals are always declined.
 - **Isolation.** The runtime is private to ReMa: its own `CODEX_HOME` under the app data folder, so your Codex CLI settings, sessions and MCP servers are neither read nor changed. It keeps no history.
 - **Install.** Release builds of ReMa ship the latest Codex (see [Bundled runtimes](#bundled-runtimes)). ReMa uses the newest of the bundled and any installed copy (0.151 or newer).
 
@@ -260,9 +260,9 @@ In Chat, the **+** menu selects any number of agents (up to 8). Their instructio
 | `source_status` | Reports which sources are usable now, how (API, feed, page, links only), and their last check. |
 
 - **How it runs.** Each chat answer opens an in-process MCP session (official Rust SDK `rmcp`, protocol 2026-07-28) between ReMa's MCP client and the ReMa MCP server over an in-memory stream. No process, port or file is involved.
-- **Discovery.** It uses the search service from **Settings → Web search** (Brave, Tavily, SearXNG) when one is set up. Otherwise it uses the chat model's hosted web search, through a narrow request with only the search terms; that request gets no tools, so ReMa MCP cannot call itself. Without either, `search_jobs` reports `SEARCH_BACKEND_UNAVAILABLE`, while known job URLs can still be read.
+- **Discovery.** ReMa's own no-key sources always search (employers' boards and public job boards, see [Career search](#career-search)); an optional search service (Settings → Career Search → Advanced) and the chat model's hosted web search add results, the latter through a narrow request with only the search terms and no tools, so ReMa MCP cannot call itself. `search_jobs` fails only when no route answered.
 - **Sources.**
-  - The documented public APIs and feeds of Greenhouse, Lever, Ashby and Personio.
+  - The documented public APIs and feeds of Greenhouse, Lever, Ashby, Personio, SmartRecruiters, Workable and Recruitee, and the public APIs of Arbeitnow, The Muse, Remotive and Hacker News ("Who is hiring?").
   - Employer career pages: one read of a public page, `JobPosting` markup preferred, `robots.txt` honored.
   - LinkedIn, XING and regional job boards are **discovery-only**. Their links are shown and labeled, but never fetched; ReMa MCP looks for the employer's own posting instead.
   - No logged-in scraping, cookies, CAPTCHA workarounds or private APIs.
@@ -278,38 +278,102 @@ In Chat, the **+** menu selects any number of agents (up to 8). Their instructio
   2. "Confirm disabling ReMa MCP? You can enable it again anytime in Settings." Buttons: Keep enabled / Disable ReMa MCP.
 
   Closing either dialog or pressing Escape cancels. Once off, its tools leave every chat, and new, queued and running calls are stopped in the backend. Saved jobs and chats are kept, and the choice survives restarts and updates. Turning it on again takes one click. It cannot be edited or removed.
-- **Job-search messages.** Messages that ask for current listings still go through ReMa's enforced search-and-verify workflow (see [Web search](#web-search)). ReMa MCP serves every other chat: follow-ups ("what does #2 require?"), similar roles, and the Job Search and Job Match Agents.
+- **Job-search messages.** Messages that ask for current listings still go through ReMa's enforced search-and-verify workflow (see [Career search](#career-search)). ReMa MCP serves every other chat: follow-ups ("what does #2 require?"), similar roles, and the Job Search and Job Match Agents.
 
 ## Bundled runtimes
 
 Release builds include the official **Codex** runtime (latest `@openai/codex` from npm) and Anthropic's **`ant`** CLI (from Anthropic's Homebrew tap), so the account sign-ins work without installing anything. `pnpm build:app` downloads the current versions for the target platform (checking their published SHA-512 / SHA-256), then builds the app with them as sidecars (`src-tauri/tauri.runtimes.conf.json`). At run time ReMa uses the newest of the bundled and any installed copy. `pnpm tauri dev` and `pnpm tauri build` work without them.
 
-## Web search
+## Career search
 
-Chat answers and scheduled prompt tasks can search the web. Each model uses its provider's own hosted web search. Models without one (local and compatible endpoints) use the search service set up in **Settings → Web search**. Searches and page reads run in the background: ReMa never opens a browser window, a terminal or a computer-use session to search.
+Career search is built in: current jobs, companies, people and market facts
+are searched whatever model is selected, with no search service or API key
+to set up. Searches and page reads run in the background: ReMa never opens
+a browser window, a terminal or a computer-use session to search. Details:
+[docs/career-search/implementation.md](docs/career-search/implementation.md).
 
-| Connection | Web search |
+Every job search runs two routes at the same time (`src-tauri/src/career_search/`):
+
+- **ReMa Jobs**: the ReMa MCP job engine over sources that need no key:
+  employers' own boards (Greenhouse, Lever, Ashby, Personio, SmartRecruiters,
+  Workable, Recruitee: found through the company's website, or learned from
+  earlier results near the place) and public job boards (Arbeitnow, The Muse,
+  Remotive, Hacker News "Who is hiring?").
+- **The model's own search**, when it has one:
+
+| Connection | Search request |
 | --- | --- |
-| OpenAI · ChatGPT account | Codex web search, turned on per thread in ReMa's own config (`config: {"web_search": "live"}`). Before a required search, ReMa asks the app server whether the account may search (`modelProvider/capabilities/read`, `configRequirements/read` → `allowedWebSearchModes`) and uses the best allowed mode (`live`, else `indexed`, else `cached`). |
-| OpenAI · API key | The Responses API's `{"type": "web_search", "external_web_access": true}` tool, with `store: false` and the result sources included. The search step of a job search sets `tool_choice: "required"` with that as the only tool. Citations (`url_citation`) are read. |
-| Anthropic · Claude Console or API key | Server tools `web_search` and `web_fetch` (`_20260209` on Claude Opus/Sonnet 4.6 and later and 5-series models, `web_search_20250305` on older ones), up to 8 uses each per answer. A `pause_turn` is resumed with the content blocks sent back unchanged. Errors that arrive inside a 200 response (`web_search_tool_result_error`) are reported, and citations are kept. |
-| Gemini · API key | Grounding with Google Search |
-| Local and compatible endpoints (Ollama, LM Studio, vLLM…) | The search service from Settings → Web search: Brave Search API, Tavily, or your own SearXNG instance. ReMa runs the searches itself and offers them to models that can call tools (`rema_web_search`, `rema_read_page`). A model that can't call tools still gets the job-search results as context (see below). Without a service, the model is told it has no web access. |
+| OpenAI · API key | Responses API `web_search` with `external_web_access: true`, `filters.allowed_domains` (the career sites of the request's scope and region, at most 20), `user_location`, `tool_choice: "required"` for the search step, sources included; `url_citation`s read. |
+| OpenAI · ChatGPT account | Codex web search, turned on per thread (`config: {"web_search": "live"}`, or the best mode the account allows: `modelProvider/capabilities/read`, `configRequirements/read`); the career sites go into its brief. |
+| Anthropic · Claude Console or API key | Server tools `web_search` and `web_fetch` (`_20260209` on Claude 4.6+ and 5-series models, `web_search_20250305` before), with `allowed_domains` and `user_location`, up to 8 uses; `pause_turn` resumed; in-band errors reported; citations kept. |
+| Gemini · API key | Grounding with Google Search. |
+| Unsloth Studio | Its own `web_search` tool, and only that one: `enable_tools: true`, `enabled_tools: ["web_search"]`, `permission_mode: "off"`, `X-Unsloth-Events: 1` (recognised by its model list; leaving `enabled_tools` out would also enable its code-execution tools). |
+| Other local and compatible endpoints (Ollama, LM Studio, vLLM…) | None: ReMa Jobs answers, and in normal chat the model gets ReMa's `rema_career_search` and `rema_read_page` tools. |
 
-**Job searches always search first.** When a message asks for current jobs ("Find current AI Engineer jobs in Vienna, posted within the last 10 days.") or asks to check linked postings, ReMa itself (not the model) runs this sequence (`src-tauri/src/retrieval/`), in chat and in scheduled tasks:
+A model search counts only when the provider reports searches that actually
+ran, and only pages it reported are used; if it fails or is unavailable, the
+answer says so in one line and uses the other route ("Anthropic web search:
+the search failed (…). Used ReMa Jobs instead.").
 
-1. **Understand the request.** Rust reads the role, location, company, remote, the posting window ("last 10 days") and a salary floor from the message.
-2. **Search.** A dedicated search request goes to the selected model's hosted web search, with no other tools. It counts only when the provider reports searches that actually ran. A model that answers without searching is asked once more, and then that step fails. If the provider search is unavailable or fails, ReMa falls back to the search service from Settings.
-3. **Validate.** ReMa reads each posting's own page (at most 16, 4 at a time, 15 s each and 75 s in total). It uses public addresses only and respects pages that refuse access. It prefers the page's `JobPosting` data and drops postings that are gone (404/410), closed or expired, older than the window, below the salary floor, elsewhere or off topic. Duplicates are merged, and newest postings come first.
-4. **Answer.** ReMa writes the table of what it validated: role, company, location, work mode, salary, posting date, a direct link and a status. The status is **Verified posting** (structured data), **Page checked**, or **Unverified (search result)** when the page couldn't be read. The table also shows the retrieval time and which postings were left out and why. Then the model adds its assessment of those listings only, with web access and tools turned off. The listings are given to it as delimited data it must not take instructions from.
+**Job searches always search first.** When a message asks for current jobs
+("Find me most recent AI jobs in Vienna Austria with salary starting from
+85k a year.") or asks to check linked postings, ReMa itself (not the model)
+runs this sequence, in chat and in scheduled tasks:
 
-"No matching postings" is an answer ("ReMa searched the web and found no current postings for …"). A search that could not run is an error ("ReMa couldn't search the web, so it isn't showing job listings …"), with the reason for each route tried. No listings are shown in that case. Stop cancels searches and page reads, and nothing unverified is kept.
+1. **Understand the request.** Rust reads the role and its close variants
+   (AI → AI, ML, Applied AI and LLM Engineer…), the place (city, country,
+   time zone), remote, the posting window, a salary floor and named companies.
+2. **Search.** Both routes at once, each source isolated: one failing source
+   never stops the others, and a source that keeps failing rests for a while.
+3. **Validate.** Postings the model's search found are read from their own
+   page (at most 16, 4 at a time, public addresses only, `JobPosting` data
+   preferred). Postings that are gone, closed or expired, older than the
+   window, elsewhere or off topic are dropped. A stated salary below the
+   floor is left out; a posting that states none is shown with a note.
+   Duplicates across sources are merged, keeping the employer's own posting
+   ("also listed on Arbeitnow"); newest first.
+4. **Answer.** ReMa writes the table: role, company, location, work mode,
+   salary, posting date, a direct link named after its source, and a status
+   with what else to know ("Verified posting · whether it is still open is
+   not stated"). Below it: the salary summary, what was left out, sources
+   that could not be searched and routes that failed. Then the model adds
+   its assessment of those listings only, with web access and tools off; the
+   listings reach it as delimited data it must not take instructions from.
 
-- **What you see.** Above the answer, the current step while it runs ("Searching with Anthropic web search…", "Checking 3 postings…"), then **Searched the web · engine · N searches · N pages read · N postings**. Expand it to see each query with its results and each page ReMa checked. Links open in the ReMa browser.
-- **Settings → Web search.** Pick a service. Brave and Tavily keys are stored in the system keychain and never shown again. SearXNG needs its address, with the JSON format enabled. **Test** runs one real search. Rate limits are retried once (after at most 5 s), and keys are removed from error messages.
-- **Fallback.** Outside job searches, if a provider rejects its web tools for a model or account (for example web search disabled for an Anthropic organization), ReMa answers without them and says why.
-- ReMa's own extraction requests (reading a job list, CV import, mail triage and classification) never search the web.
-- In debug builds, `REMA_DEV_ALLOW_LOCAL_PAGES=1` lets ReMa read pages from a local test server, and `REMA_BRAVE_URL` / `REMA_TAVILY_URL` point the services at a mock.
+"No matching postings" is an answer. When no route could search, the answer
+says so and why ("ReMa could not retrieve live career sources for this
+request right now. … What happened: …"), shows no listings and never asks
+for a search service. Stop cancels searches and page reads. A search
+repeated within ten minutes reuses the stored result and shows when its
+sources were read.
+
+**Research requests** about current companies, people and markets ("Who are
+the current recruiters at Nordlicht AI?") search Wikidata, Wikipedia, the
+company's own homepage, team and careers pages and its job boards, together
+with the model's own search. The model answers only from what was found,
+given as delimited data; emails and phone numbers are removed first; the
+answer ends with a numbered **Sources** list. Questions about your own mail
+and applications are not sent to the web.
+
+- **What you see.** While it runs, the current step ("Searching jobs…",
+  "Checking 3 postings…"), then **Searched career sources · engine · N
+  searches · N pages read · N postings**; expand it for each query and each
+  page checked.
+- **Scheduled tasks** use the same searches; their runs record the stages,
+  the search scope and the sources consulted.
+- **Settings → Career Search — Automatic** shows the selected model's
+  routes, **Check now** (one request per route), **Recent searches** and,
+  under **Advanced (optional)**, a search service you may add (Brave,
+  Tavily, SearXNG). It only adds results: career search works the same
+  without it, and a misconfigured one is skipped. Keys go to the system
+  keychain.
+- ReMa's own extraction requests (reading a job list, CV import, mail
+  triage and classification) never search the web.
+- In debug builds, `REMA_DEV_ATS_BASE` points every no-key source at one
+  local test server, `REMA_DEV_ALLOW_LOCAL_PAGES=1` lets ReMa read pages
+  from it, and `REMA_ANTHROPIC_BASE_URL` / `REMA_OPENAI_BASE_URL` /
+  `REMA_BRAVE_URL` / `REMA_TAVILY_URL` point providers and services at a
+  mock (`scripts/e2e/mock-providers.mjs`).
 
 ## Analytics
 
@@ -406,7 +470,7 @@ rema/
 │   │   ├── portfolio/            # Portfolio Studio: gallery, new CV, editor, section editor
 │   │   ├── pdf/                  # PDF.js page renderer (viewer and preview)
 │   │   ├── tasks/                # TaskDialog, TaskDetail, JobReport, TaskActions, TaskStatus
-│   │   ├── settings/             # Provider connections (account or key), endpoints, web search, MCP (built-in ReMa MCP + yours), Connectors
+│   │   ├── settings/             # Provider connections (account or key), endpoints, Career Search, MCP (built-in ReMa MCP + yours), Connectors
 │   │   └── ui/                   # Menu, Dialog, Switch, EmptyState, IconButton, StatusIndicator,
 │   │                             # BrandMark, BrandLogo
 │   ├── hooks/                    # useAsyncData, useChat, useTasks, useProfile, useAutofill, …
@@ -445,8 +509,10 @@ rema/
     │                             # runtime discovery, sign-in sessions
     ├── connectors/               # Gmail, Google Calendar, Outlook Mail/Calendar: OAuth (PKCE), token manager,
     │                             # provider APIs, incremental sync, the old Google settings' migration
-    ├── retrieval/                # Job searches: intent, provider search, search services (Brave, Tavily,
-    │                             # SearXNG), page validation, rendering, web tools for local models
+    ├── career_search/            # Career search: requirement and scopes, plan, source registry, router,
+    │                             # no-key job sources, company research, health, status
+    ├── retrieval/                # Job searches: intent, provider search, optional search services (Brave,
+    │                             # Tavily, SearXNG), page validation, rendering, web tools for local models
     ├── llm/                      # LanguageModel trait, SSE, HTTP, OpenAI/Anthropic/Gemini adapters
     ├── db/                       # SQLite connection, migrations, repositories
     ├── secrets.rs                # OS credential store

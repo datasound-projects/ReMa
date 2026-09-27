@@ -80,8 +80,9 @@ function Entry({ activity: a }: { activity: ToolActivity }) {
 }
 
 /**
- * What the model searched and read on the web for this answer (its
- * provider's hosted web search). Collapsed to one line once finished.
+ * What was searched and read for this answer: ReMa's career search step
+ * (its job sources, research sources and the model's own web search) and
+ * the provider's hosted web search. Collapsed to one line once finished.
  */
 export function WebActivity({ activity }: { activity: ToolActivity[] }) {
   const [open, setOpen] = useState(false);
@@ -117,12 +118,12 @@ export function WebActivity({ activity }: { activity: ToolActivity[] }) {
                 {step.status === 'running' ? (
                   <span className="web-activity__live">{step.arguments}</span>
                 ) : step.status === 'failed' ? (
-                  <span className="web-activity__error">Web search failed</span>
+                  <span className="web-activity__error">Search failed</span>
                 ) : step.status === 'denied' ? (
                   'Search stopped'
                 ) : (
                   <>
-                    Searched the web <span className="web-activity__count">· {step.arguments}</span>
+                    Searched career sources <span className="web-activity__count">· {step.arguments}</span>
                   </>
                 )}
               </span>

@@ -15,6 +15,7 @@ import {
 } from '../../lib/format';
 import { canRunNow } from '../../lib/taskForm';
 import {
+  describeSources,
   describeWebSearch,
   elapsed,
   failureGuidance,
@@ -499,9 +500,21 @@ function RunInspector({
               <dd>{context.connectors.length > 0 ? context.connectors.join(', ') : 'None'}</dd>
             </div>
             <div>
-              <dt>Web search</dt>
+              <dt>Search</dt>
               <dd>{describeWebSearch(context)}</dd>
             </div>
+            {(context.searchScopes ?? []).length > 0 && (
+              <div>
+                <dt>Search scope</dt>
+                <dd>{(context.searchScopes ?? []).join(', ')}</dd>
+              </div>
+            )}
+            {describeSources(context) && (
+              <div>
+                <dt>Sources consulted</dt>
+                <dd>{describeSources(context)}</dd>
+              </div>
+            )}
           </dl>
         ) : (
           <p className="run-facts__missing">Not recorded for runs before ReMa kept run details.</p>

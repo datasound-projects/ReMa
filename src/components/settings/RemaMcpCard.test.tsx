@@ -115,13 +115,13 @@ describe('Settings → MCP → Built-in: ReMa MCP', () => {
   it('shows the newest status from the backend after an action', async () => {
     mocks.remaMcpStatus.mockResolvedValueOnce(off).mockResolvedValue({
       ...on,
-      readiness: 'search_setup_required',
-      message: 'Set up a search service.',
+      readiness: 'offline',
+      message: 'Recent requests to job sources could not connect.',
     });
     render(<RemaMcpCard />);
     await waitFor(() => expect(toggle().checked).toBe(false));
     fireEvent.click(toggle());
-    expect(await screen.findByText('Search setup required')).toBeTruthy();
+    expect(await screen.findByText('Offline')).toBeTruthy();
     expect(toggle().checked).toBe(true);
   });
 

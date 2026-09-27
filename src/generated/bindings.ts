@@ -156,7 +156,11 @@ export const commands = {
 	/**  Copies any agent (built-in or custom) into a new custom agent. */
 	duplicateAgent: (agentId: string) => __TAURI_INVOKE<Agent>("duplicate_agent", { agentId }),
 	deleteAgent: (id: number) => __TAURI_INVOKE<null>("delete_agent", { id }),
-	/**  The search service ReMa uses for models without their own web search. */
+	/**  Career search: automatic, its routes and sources (no setup needed). */
+	careerSearchStatus: () => __TAURI_INVOKE<CareerSearchStatus>("career_search_status"),
+	/**  Checks that ReMa's own sources and company research answer now. */
+	checkCareerSearch: () => __TAURI_INVOKE<CareerSearchStatus>("check_career_search"),
+	/**  An optional search service (Advanced) that adds results. */
 	webSearchSettings: () => __TAURI_INVOKE<WebSearchSettings>("web_search_settings"),
 	/**  Saves the search service; the key goes to the OS credential store. */
 	saveWebSearchSettings: (input: WebSearchInput) => __TAURI_INVOKE<WebSearchSettings>("save_web_search_settings", { input }),
@@ -605,6 +609,24 @@ export type CalendarView = {
 /**  A permission a connector needs, mapped to provider scopes in Rust. */
 export type Capability = "mail_read" | "calendar_read" | "calendar_write" | "free_busy";
 
+/**  Settings → Career Search. */
+export type CareerSearchStatus = {
+	/**  Always true: career search needs no setup. */
+	automatic: boolean,
+	/**  The default chat model. */
+	model: string | null,
+	/**  Its own web search ("Anthropic web search"), if it has one. */
+	modelSearch: string | null,
+	routes: RouteState[],
+	/**  An optional search service set up under Advanced. */
+	extraService: string | null,
+	sources: SourceHealth[],
+	/**  Recent searches (diagnostics; no page text, no credentials). */
+	recent: RouteReport[],
+	/**  Filled by a health check. */
+	checked: CheckResult[],
+};
+
 export type CategoryCount = {
 	category: RequirementCategory,
 	requirements: number,
@@ -624,6 +646,13 @@ export type ChatEvent =
 { type: "finished"; message: Message } | 
 /**  A tool call started, needs approval, or finished. */
 { type: "activity"; conversationId: number; messageId: number; activity: ToolActivity };
+
+/**  One result of a health check. */
+export type CheckResult = {
+	name: string,
+	ok: boolean,
+	detail: string,
+};
 
 export type ClassCount = {
 	class: FrequencyClass,
@@ -1001,6 +1030,8 @@ export type GapPriority = {
 	/**  Facts behind the priority, e.g. "Required by 22 of 35 jobs (63%)". */
 	reasons: string[],
 };
+
+export type HealthState = "healthy" | "degraded" | "temporarily_unavailable";
 
 export type Importance = "required" | "preferred";
 
@@ -1640,12 +1671,8 @@ export type RankedJob = {
 };
 
 export type Readiness = 
-/**  A search service is set up: full discovery. */
+/**  Searching works (ReMa's own job sources need no setup). */
 "ready" | 
-/**  Discovery relies on the chat model's hosted web search. */
-"limited_coverage" | 
-/**  No search backend: only known job URLs can be read. */
-"search_setup_required" | 
 /**  Recent source requests failed to connect. */
 "offline" | 
 /**  The built-in server did not answer. */
@@ -1671,6 +1698,8 @@ export type RemaMcpStatus = {
 	cachedJobs: number,
 	cachedSearches: number,
 };
+
+export type Requirement = "none" | "optional" | "required";
 
 export type RequirementCategory = "technical_skills" | "programming_languages" | "frameworks" | "cloud_infrastructure" | "ai_ml" | "data_engineering" | "databases" | "professional_experience" | "industry_experience" | "education" | "certifications" | "languages" | "soft_skills" | "other";
 
@@ -1731,6 +1760,30 @@ export type ResearchStatus = "running" | "done" | "failed";
 
 export type ResourceType = "certification" | "course" | "university" | "documentation" | "book" | "lab" | "tutorial" | "project" | "program";
 
+/**  What one search did (§49): no credentials, no page text. */
+export type RouteReport = {
+	at: number,
+	requirement: Requirement,
+	scopes: string[],
+	/**  The routes that answered ("ReMa Jobs + OpenAI web search"). */
+	route: string,
+	/**  Routes that failed, with their reason. */
+	fallbacks: string[],
+	/**  Sources asked, answered and failed (names). */
+	queried: string[],
+	succeeded: string[],
+	failed: string[],
+	durationMs: number,
+	results: number,
+};
+
+/**  One way ReMa can search. */
+export type RouteState = {
+	name: string,
+	detail: string,
+	available: boolean,
+};
+
 /**  What took part in a run: names and flags only, never credentials. */
 export type RunContext = {
 	/**  The user's Profile was given to the model. */
@@ -1743,6 +1796,16 @@ export type RunContext = {
 	searches: number,
 	/**  What ran them ("ChatGPT web search"). */
 	searchEngines: string[],
+	/**
+	 *  What the search looked for ("Jobs", "Company"). Runs recorded
+	 *  before career search have none.
+	 */
+	searchScopes?: string[],
+	/**
+	 *  Sources consulted ("ReMa Jobs", "Company career sites", "OpenAI web
+	 *  search").
+	 */
+	sourcesConsulted?: string[],
 };
 
 /**  Why a run did not succeed; decides the guidance shown with its error. */
@@ -1979,6 +2042,16 @@ export type SortKey =
 "prefer_role" | "prefer_company" | 
 /**  Jobs requiring the skill `value` first. */
 "prefer_skill";
+
+/**  Health of one source, as shown in Settings. */
+export type SourceHealth = {
+	id: string,
+	state: HealthState,
+	failures: number,
+	lastError: string | null,
+	lastSuccessAt: number | null,
+	lastFailureAt: number | null,
+};
 
 export type SourceSummary = {
 	name: string,

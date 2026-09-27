@@ -193,6 +193,7 @@ pub async fn connect(
         connection: ConnectionMethod::ApiKey,
         base_url: Endpoint::default_base_url(kind).unwrap_or_default(),
         credential: Some(credential.clone()),
+        server_web_search: false,
     };
     let fetched = state.llm.list_models(&endpoint).await?;
 
@@ -327,6 +328,7 @@ pub async fn save_custom(state: &AppState, input: CustomProviderInput) -> AppRes
         connection: ConnectionMethod::ApiKey,
         base_url: base_url.clone(),
         credential: credential.clone(),
+        server_web_search: false,
     };
     // Many local servers do not list models (or are not running yet); the
     // configured model is enough to chat.
@@ -361,6 +363,8 @@ pub async fn save_custom(state: &AppState, input: CustomProviderInput) -> AppRes
         tx.commit()?;
         Ok(())
     })?;
+    // The server may now be a different one (Unsloth Studio or not).
+    state.career.forget_runtimes();
     state.events.providers_changed();
     provider_view(state, &id)
 }
@@ -604,13 +608,19 @@ pub async fn resolve_endpoint(state: &AppState, provider_id: &str) -> AppResult<
         .clone()
         .or_else(|| Endpoint::default_base_url(row.kind))
         .ok_or_else(|| AppError::configuration(format!("{} has no base URL.", row.name)))?;
-    Ok(Endpoint {
+    let mut endpoint = Endpoint {
         kind: row.kind,
         name: row.name,
         connection: row.connection,
         base_url,
         credential,
-    })
+        server_web_search: false,
+    };
+    // A local server that runs web searches itself (Unsloth Studio).
+    if endpoint.kind == ProviderKind::OpenaiCompatible {
+        endpoint.server_web_search = state.career.server_web_search(state, &endpoint).await;
+    }
+    Ok(endpoint)
 }
 
 /// The provider-reported output limit for a model, if known.

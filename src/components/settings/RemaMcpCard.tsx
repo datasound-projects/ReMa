@@ -16,8 +16,6 @@ import { Switch } from '../ui/Switch';
 
 const READINESS: Record<Readiness, { tone: StatusTone; label: string }> = {
   ready: { tone: 'ready', label: 'Ready' },
-  limited_coverage: { tone: 'pending', label: 'Limited coverage' },
-  search_setup_required: { tone: 'pending', label: 'Search setup required' },
   offline: { tone: 'error', label: 'Offline' },
   error: { tone: 'error', label: 'Error' },
   disabled: { tone: 'idle', label: 'Off' },
@@ -114,8 +112,8 @@ export function RemaMcpCard() {
           {status.enabled && (
             <p className="rema-mcp__hint">
               Offered in every chat automatically. It searches only when a model needs it for your request; searches
-              go from this computer to your search service or model provider and to the job sources, never through a
-              ReMa server.
+              go from this computer to the job sources (and, when used, your model provider or optional search
+              service), never through a ReMa server.
             </p>
           )}
           <div className="rema-mcp__actions">

@@ -249,7 +249,11 @@ async fn serves_five_tools_over_mcp_and_finds_jobs_end_to_end() {
     assert!(result
         .unresolved_filters
         .contains(&"posted_within_days".to_string()));
-    assert_eq!(result.coverage.backend.as_deref(), Some("SearXNG"));
+    // ReMa's own sources are always asked; the search service adds to them.
+    assert_eq!(
+        result.coverage.backend.as_deref(),
+        Some("ReMa job sources + SearXNG")
+    );
     assert!(result
         .coverage
         .sources_searched
@@ -482,8 +486,12 @@ async fn similar_jobs_and_source_status() {
 
     let (status, _) = call(&hosted, "source_status", json!({})).await;
     let status: SourceStatusResult = serde_json::from_value(status).unwrap();
-    assert_eq!(status.search_backend.kind, "search_service");
-    assert_eq!(status.search_backend.deadline_seconds, 20);
+    assert_eq!(
+        status.search_backend.kind,
+        "rema_sources_and_search_service"
+    );
+    assert!(status.search_backend.usable);
+    assert_eq!(status.search_backend.deadline_seconds, 25);
     let source = |id: &str| status.sources.iter().find(|s| s.id == id).unwrap();
     assert_eq!(
         source("linkedin").acquisition,

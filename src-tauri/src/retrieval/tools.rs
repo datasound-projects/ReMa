@@ -1,7 +1,9 @@
-//! Web tools ReMa runs itself for models without a hosted web search
-//! (Ollama, LM Studio and other OpenAI-compatible servers), offered through
-//! the normal tool-call loop when a search service is set up. Results are
-//! handed back as delimited data the model must not take instructions from.
+//! ReMa's career search as tools for models without a web search of their
+//! own (Ollama, LM Studio and other OpenAI-compatible servers), offered
+//! through the normal tool-call loop (§14, §17). ReMa runs the search — its
+//! own job sources, company sites and public data, plus a search service
+//! when one is set up — and hands back normalized evidence as delimited
+//! data the model must not take instructions from. No key is needed.
 
 use std::sync::Arc;
 
@@ -11,14 +13,15 @@ use tokio_util::sync::CancellationToken;
 use super::backend::Service;
 use crate::{
     analytics::{normalize, page},
+    career_search::{plan, research::ResearchOutcome, router, Requirement},
     llm::{
-        BoxFuture, ToolCall, ToolExecutor, ToolOutput, ToolSpec, WebEvent, WebKind, WebObserver,
-        WebSource,
+        BoxFuture, Endpoint, ToolCall, ToolExecutor, ToolOutput, ToolSpec, WebEvent, WebKind,
+        WebObserver, WebSource,
     },
     state::AppState,
 };
 
-pub const SEARCH: &str = "rema_web_search";
+pub const SEARCH: &str = "rema_career_search";
 pub const READ: &str = "rema_read_page";
 const MAX_PAGE_CHARS: usize = 8_000;
 
@@ -26,15 +29,16 @@ pub fn specs() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: SEARCH.into(),
-            description: "Search the web (run by ReMa). Returns titles, addresses and snippets \
-                          of current results. Use it for anything that depends on current \
-                          information."
+            description: "Search current career information (run by ReMa): open jobs and \
+                          contracts, companies, people in professional roles, salary ranges. \
+                          Returns sources with addresses. Use it for anything that depends on \
+                          current information."
                 .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "query": { "type": "string", "description": "What to search for." },
-                    "days": { "type": "integer", "description": "Only results from the last N days (optional)." }
+                    "query": { "type": "string", "description": "What to find, e.g. \"AI Engineer jobs in Vienna\" or \"recruiters at Bitpanda\"." },
+                    "scope": { "type": "string", "enum": ["jobs", "company", "people", "market"], "description": "What kind of information (optional)." }
                 },
                 "required": ["query"]
             }),
@@ -53,10 +57,14 @@ pub fn specs() -> Vec<ToolSpec> {
     ]
 }
 
-/// Runs ReMa's web tools, and hands every other tool to `next` (MCP).
+/// Runs ReMa's career tools, and hands every other tool to `next` (MCP).
 pub struct WebTools {
     pub state: AppState,
-    pub service: Arc<Service>,
+    /// The chat's model (its own web search joins when it has one).
+    pub endpoint: Endpoint,
+    pub model_id: String,
+    /// A search service set up in Settings (optional; adds web results).
+    pub service: Option<Arc<Service>>,
     pub observer: Option<Arc<dyn WebObserver>>,
     pub next: Option<Arc<dyn ToolExecutor>>,
     pub cancel: CancellationToken,
@@ -71,6 +79,19 @@ fn data(kind: &str, body: String) -> ToolOutput {
     }
 }
 
+/// Reports the tool's search as web activity.
+struct ToolProgress {
+    observer: Option<Arc<dyn WebObserver>>,
+}
+
+impl super::Progress for ToolProgress {
+    fn status(&self, _text: &str) {}
+
+    fn web(&self) -> Option<Arc<dyn WebObserver>> {
+        self.observer.clone()
+    }
+}
+
 impl WebTools {
     fn report(&self, event: WebEvent) {
         if let Some(observer) = &self.observer {
@@ -79,64 +100,171 @@ impl WebTools {
     }
 
     async fn search(&self, call: &ToolCall) -> ToolOutput {
-        let Some(query) = call.arguments.get("query").and_then(Value::as_str) else {
+        let Some(query) = call
+            .arguments
+            .get("query")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|q| !q.is_empty())
+        else {
             return ToolOutput::error("Give a \"query\" to search for.");
         };
-        let days = call
-            .arguments
-            .get("days")
-            .and_then(Value::as_u64)
-            .map(|d| d.min(365) as u32);
+        let query = normalize::clip(query, 300);
+        let mut plan = plan::plan(&query);
+        plan.requirement = Requirement::Required;
+        match call.arguments.get("scope").and_then(Value::as_str) {
+            Some("jobs") => plan.scopes.jobs = true,
+            Some("company") => plan.scopes.company = true,
+            Some("people") => plan.scopes.people = true,
+            Some("market") => plan.scopes.market = true,
+            _ => {}
+        }
+        if !plan.scopes.any() {
+            plan.scopes.jobs = super::detect(&query).is_some();
+            plan.scopes.company = !plan.scopes.jobs;
+        }
         self.report(WebEvent::Started {
             id: call.id.clone(),
             kind: WebKind::Search,
-            target: query.to_string(),
+            target: query.clone(),
         });
-        match self.service.search(query, days, &self.cancel).await {
-            Ok(hits) => {
-                self.report(WebEvent::Finished {
-                    id: call.id.clone(),
-                    kind: WebKind::Search,
-                    target: query.to_string(),
-                    sources: hits
+        let progress = ToolProgress {
+            observer: self.observer.clone(),
+        };
+        let (output, sources, error) = if plan.scopes.jobs {
+            let job = super::detect(&query).unwrap_or_else(|| super::JobQuery {
+                text: query.clone(),
+                role: plan
+                    .roles
+                    .first()
+                    .cloned()
+                    .or_else(|| Some(normalize::clip(&query, 60))),
+                location: plan.place.as_ref().map(|p| p.label()),
+                remote: plan.remote,
+                ..super::JobQuery::default()
+            });
+            match router::search_jobs(
+                &self.state,
+                &self.endpoint,
+                &self.model_id,
+                &job,
+                &progress,
+                &self.cancel,
+            )
+            .await
+            {
+                super::Outcome::Found(found) => (
+                    data("job_listings", super::render::model_context(&found)),
+                    found
+                        .listings
                         .iter()
-                        .map(|h| WebSource {
-                            title: h.title.clone(),
-                            url: h.url.clone(),
+                        .map(|l| WebSource {
+                            title: l.title.clone(),
+                            url: l.url.clone(),
                         })
                         .collect(),
-                    error: None,
-                });
-                if hits.is_empty() {
-                    return data("search_results", "No results.".into());
+                    None,
+                ),
+                super::Outcome::Empty(found) => (
+                    data("job_listings", super::render::empty_text(&found)),
+                    Vec::new(),
+                    None,
+                ),
+                super::Outcome::Failed { reasons } => {
+                    let text = super::render::failed_text(&reasons);
+                    (ToolOutput::error(text.clone()), Vec::new(), Some(text))
                 }
-                let lines: Vec<String> = hits
-                    .iter()
-                    .enumerate()
-                    .map(|(i, h)| {
-                        let mut line = format!("[{}] {} — {}", i + 1, h.title, h.url);
-                        if let Some(age) = &h.age {
-                            line.push_str(&format!(" ({age})"));
-                        }
-                        if let Some(snippet) = &h.snippet {
-                            line.push_str(&format!("\n    {snippet}"));
-                        }
-                        line
-                    })
-                    .collect();
-                data("search_results", lines.join("\n"))
+                super::Outcome::Cancelled => (
+                    ToolOutput::error("The request was stopped."),
+                    Vec::new(),
+                    Some("stopped".into()),
+                ),
             }
-            Err(error) => {
-                self.report(WebEvent::Finished {
-                    id: call.id.clone(),
-                    kind: WebKind::Search,
-                    target: query.to_string(),
-                    sources: Vec::new(),
-                    error: Some(error.clone()),
-                });
-                ToolOutput::error(format!("The search failed: {error}"))
+        } else {
+            let model = Some((&self.endpoint, self.model_id.as_str()));
+            match router::research(&self.state, model, &plan, &progress, &self.cancel).await {
+                ResearchOutcome::Found(found) => (
+                    data(
+                        "career_sources",
+                        crate::career_search::research::model_context(&found),
+                    ),
+                    found
+                        .findings
+                        .iter()
+                        .map(|f| WebSource {
+                            title: f.title.clone(),
+                            url: f.url.clone(),
+                        })
+                        .collect(),
+                    None,
+                ),
+                ResearchOutcome::Empty(found) => (
+                    data(
+                        "career_sources",
+                        crate::career_search::research::empty_text(&found),
+                    ),
+                    Vec::new(),
+                    None,
+                ),
+                ResearchOutcome::Failed { reasons } => {
+                    let text = reasons.join(" ");
+                    (ToolOutput::error(text.clone()), Vec::new(), Some(text))
+                }
+                ResearchOutcome::Cancelled => (
+                    ToolOutput::error("The request was stopped."),
+                    Vec::new(),
+                    Some("stopped".into()),
+                ),
             }
-        }
+        };
+        // A search service from Settings adds plain web results (and
+        // answers on its own when ReMa's career sources had nothing).
+        let mut sources = sources;
+        let (output, error) = match &self.service {
+            Some(service) => match service.search(&query, None, &self.cancel).await {
+                Ok(hits) if !hits.is_empty() => {
+                    let lines: Vec<String> = hits
+                        .iter()
+                        .take(8)
+                        .enumerate()
+                        .map(|(i, h)| {
+                            let mut line = format!("[w{}] {} — {}", i + 1, h.title, h.url);
+                            if let Some(snippet) = &h.snippet {
+                                line.push_str(&format!("\n    {snippet}"));
+                            }
+                            line
+                        })
+                        .collect();
+                    sources.extend(hits.iter().take(8).map(|h| WebSource {
+                        title: h.title.clone(),
+                        url: h.url.clone(),
+                    }));
+                    let web = data("search_results", lines.join("\n")).content;
+                    let content = if error.is_some() {
+                        web
+                    } else {
+                        format!("{}\n{web}", output.content)
+                    };
+                    (
+                        ToolOutput {
+                            content,
+                            is_error: false,
+                        },
+                        None,
+                    )
+                }
+                _ => (output, error),
+            },
+            None => (output, error),
+        };
+        self.report(WebEvent::Finished {
+            id: call.id.clone(),
+            kind: WebKind::Search,
+            target: query,
+            sources,
+            error,
+        });
+        output
     }
 
     async fn read(&self, call: &ToolCall) -> ToolOutput {

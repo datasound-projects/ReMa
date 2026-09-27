@@ -4,7 +4,7 @@ import { PlusIcon } from '../components/icons';
 import { PageContainer } from '../components/layout/PageContainer';
 import { ConnectorsSection } from '../components/settings/ConnectorsSection';
 import { McpSection } from '../components/settings/McpSection';
-import { WebSearchSection } from '../components/settings/WebSearchSection';
+import { CareerSearchSection } from '../components/settings/CareerSearchSection';
 import { CloudProviderRow } from '../components/settings/CloudProviderRow';
 import { CustomEndpointRow } from '../components/settings/ProviderRows';
 import { BrandLogo } from '../components/ui/BrandLogo';
@@ -137,7 +137,7 @@ export function SettingsPage({ focus }: { focus?: 'mcp' | 'connectors' }) {
 
       <ConnectorsSection focus={focus === 'connectors'} />
 
-      <WebSearchSection />
+      <CareerSearchSection />
 
       <McpSection focus={focus === 'mcp'} />
 

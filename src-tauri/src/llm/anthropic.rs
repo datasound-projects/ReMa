@@ -13,7 +13,7 @@ use super::{
     http::{error_message, join_url, send_json},
     sse::SseEvent,
     ChatRequest, Endpoint, FetchedModel, Finish, StreamPiece, StreamState, ToolDelta, WebEvent,
-    WebKind, WebSource,
+    WebKind, WebSearch, WebSource,
 };
 use crate::{
     error::{AppError, AppResult},
@@ -130,16 +130,27 @@ fn has_current_web_tools(model_id: &str) -> bool {
     }
 }
 
-fn web_tools(model_id: &str) -> Vec<Value> {
-    if has_current_web_tools(model_id) {
+fn web_tools(model_id: &str, web: &WebSearch) -> Vec<Value> {
+    let current = has_current_web_tools(model_id);
+    let mut search = json!({
+        "type": if current { "web_search_20260209" } else { "web_search_20250305" },
+        "name": "web_search",
+        "max_uses": MAX_WEB_USES,
+    });
+    // Career searches stay on career sources; the place is approximate.
+    if !web.allowed_domains.is_empty() {
+        search["allowed_domains"] = json!(web.allowed_domains);
+    }
+    if let Some(location) = &web.location {
+        search["user_location"] = location.to_json();
+    }
+    if current {
         vec![
-            json!({ "type": "web_search_20260209", "name": "web_search", "max_uses": MAX_WEB_USES }),
+            search,
             json!({ "type": "web_fetch_20260209", "name": "web_fetch", "max_uses": MAX_WEB_USES }),
         ]
     } else {
-        vec![
-            json!({ "type": "web_search_20250305", "name": "web_search", "max_uses": MAX_WEB_USES }),
-        ]
+        vec![search]
     }
 }
 
@@ -229,8 +240,8 @@ pub fn request_body(model_id: &str, request: &ChatRequest) -> Value {
             })
         })
         .collect();
-    if request.web.is_some() {
-        tools.extend(web_tools(model_id));
+    if let Some(web) = &request.web {
+        tools.extend(web_tools(model_id, web));
     }
     if !tools.is_empty() {
         body["tools"] = json!(tools);
@@ -617,6 +628,40 @@ mod tests {
             request_body("claude-haiku-4-5", &request)["tools"],
             json!([{ "type": "web_search_20250305", "name": "web_search", "max_uses": 8 }])
         );
+
+        // Career searches: the registry's sites and the request's place.
+        let request = ChatRequest {
+            web: Some(crate::llm::WebSearch {
+                required: true,
+                allowed_domains: vec!["karriere.at".into(), "linkedin.com".into()],
+                location: Some(crate::llm::ApproxLocation {
+                    city: Some("Vienna".into()),
+                    region: None,
+                    country: Some("AT".into()),
+                    timezone: Some("Europe/Vienna".into()),
+                }),
+                ..crate::llm::WebSearch::default()
+            }),
+            ..ChatRequest::default()
+        };
+        let tools = &request_body("claude-sonnet-5", &request)["tools"];
+        assert_eq!(
+            tools[0],
+            json!({
+                "type": "web_search_20260209", "name": "web_search", "max_uses": 8,
+                "allowed_domains": ["karriere.at", "linkedin.com"],
+                "user_location": { "type": "approximate", "city": "Vienna", "country": "AT", "timezone": "Europe/Vienna" }
+            })
+        );
+        assert_eq!(tools[1]["type"], "web_fetch_20260209");
+        // Without a place in the request, no location is sent.
+        let request = ChatRequest {
+            web: Some(crate::llm::WebSearch::default()),
+            ..ChatRequest::default()
+        };
+        assert!(request_body("claude-sonnet-5", &request)["tools"][0]
+            .get("user_location")
+            .is_none());
     }
 
     #[test]

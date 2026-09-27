@@ -133,6 +133,25 @@ impl RemaMcp {
         self.inner.local_fixtures
     }
 
+    /// What adapters need for one request (the fetcher, APIs and caches).
+    pub fn ctx<'a>(
+        &'a self,
+        version: &str,
+        cancel: &'a CancellationToken,
+        deadline: std::time::Instant,
+        refresh: bool,
+    ) -> adapters::Ctx<'a> {
+        adapters::Ctx {
+            fetcher: self.fetcher(version),
+            apis: self.apis(),
+            feeds: self.feeds(),
+            deadline,
+            cancel,
+            now: crate::time::now_ms(),
+            refresh,
+        }
+    }
+
     /// Tracks a piece of running work so disabling can cancel it. The
     /// returned token is a child of `parent`.
     pub fn begin(&self, parent: &CancellationToken) -> Work {

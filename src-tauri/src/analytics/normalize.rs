@@ -786,6 +786,14 @@ pub fn country_name(text: &str) -> Option<&'static str> {
         .map(|(name, _, _)| *name)
 }
 
+/// The two-letter ISO code of a canonical country name ("Austria" → "AT").
+pub fn country_code(name: &str) -> Option<&'static str> {
+    COUNTRIES
+        .iter()
+        .find(|(country, _, _)| *country == name)
+        .and_then(|(_, _, codes)| codes.iter().find(|c| c.len() == 2).copied())
+}
+
 /// The canonical city for a user-typed name ("Wien" → "Vienna").
 pub fn city_name(text: &str) -> Option<&'static str> {
     let lower = text.trim().to_lowercase();
@@ -1404,6 +1412,13 @@ pub fn source_name(url: &str) -> Option<String> {
         ("remoteok.com", "Remote OK"),
         ("weworkremotely.com", "We Work Remotely"),
         ("arbeitsagentur.de", "Bundesagentur für Arbeit"),
+        ("arbeitnow.com", "Arbeitnow"),
+        ("themuse.com", "The Muse"),
+        ("remotive.com", "Remotive"),
+        ("news.ycombinator.com", "Hacker News"),
+        ("recruitee.com", "Recruitee"),
+        ("workable.com", "Workable"),
+        ("jobs.at", "jobs.at"),
         ("ams.at", "AMS"),
         ("monster.", "Monster"),
     ];

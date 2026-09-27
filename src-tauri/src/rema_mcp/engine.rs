@@ -36,7 +36,8 @@ use crate::{
 };
 
 pub const PARSER_VERSION: u32 = 1;
-const SERVICE_DEADLINE: Duration = Duration::from_secs(20);
+/// ReMa's own sources and a search service (company sites included).
+const SERVICE_DEADLINE: Duration = Duration::from_secs(25);
 /// One model turn with hosted searches often takes longer than 20 s.
 const PROVIDER_DEADLINE: Duration = Duration::from_secs(90);
 const MAX_QUERIES: usize = 8;
@@ -50,78 +51,80 @@ pub const MAX_SEARCH_PAYLOAD: usize = 32 * 1024;
 pub const DESCRIPTION_PART: usize = 12_000;
 const BATCH_DESCRIPTION: usize = 5_000;
 
-/// How vacancies are discovered in this session.
-#[derive(Clone)]
-pub enum Discovery {
-    /// The search service from Settings → Web search.
-    Service(Arc<Service>),
-    /// The chat model's provider-hosted web search.
-    Provider {
-        endpoint: Endpoint,
-        model_id: String,
-    },
-    Unavailable(String),
+/// How vacancies are discovered in this session. ReMa's own job sources
+/// (`career_search::jobs`: employer boards and public job boards, no key)
+/// are always asked; a search service from Settings (optional, advanced)
+/// and the chat model's own web search add to them. Discovery never
+/// depends on a search service being set up.
+#[derive(Clone, Default)]
+pub struct Discovery {
+    /// A search service set up in Settings (Brave, Tavily, SearXNG).
+    pub service: Option<Arc<Service>>,
+    /// The chat model's own web search (hosted, or its local server's).
+    pub provider: Option<(Endpoint, String)>,
 }
 
 impl Discovery {
-    /// The chat's discovery path: the configured search service first,
-    /// then the model's hosted web search.
-    pub async fn for_chat(state: &AppState, endpoint: Option<(&Endpoint, &str)>) -> Self {
-        match retrieval::backend::configured(state).await {
-            Ok(Some(service)) => return Self::Service(Arc::new(service)),
-            Err(error) => {
-                if let Some((endpoint, model)) =
-                    endpoint.filter(|(e, _)| retrieval::native::supported(e))
-                {
-                    return Self::Provider {
-                        endpoint: endpoint.clone(),
-                        model_id: model.to_string(),
-                    };
-                }
-                return Self::Unavailable(error.to_string());
-            }
-            Ok(None) => {}
-        }
-        match endpoint {
-            Some((endpoint, model)) if retrieval::native::supported(endpoint) => Self::Provider {
-                endpoint: endpoint.clone(),
-                model_id: model.to_string(),
-            },
-            _ => Self::Unavailable(
-                "no search backend: set up a search service in Settings → Web search, or use a \
-                 model with web search"
-                    .into(),
-            ),
-        }
+    /// ReMa's own sources only.
+    pub fn own() -> Self {
+        Self::default()
     }
 
+    /// The chat's discovery: ReMa's sources, plus the search service when
+    /// one is set up (a misconfigured one is skipped, not an error), plus
+    /// the model's own web search when it has one.
+    pub async fn for_chat(state: &AppState, endpoint: Option<(&Endpoint, &str)>) -> Self {
+        let service = retrieval::backend::configured(state)
+            .await
+            .ok()
+            .flatten()
+            .map(Arc::new);
+        let provider = endpoint
+            .filter(|(e, _)| retrieval::native::supported(e))
+            .map(|(e, m)| (e.clone(), m.to_string()));
+        Self { service, provider }
+    }
+
+    /// "ReMa job sources + Brave Search + OpenAI web search".
     pub fn name(&self) -> Option<String> {
-        match self {
-            Self::Service(s) => Some(s.name().to_string()),
-            Self::Provider { endpoint, .. } => {
-                Some(retrieval::native::engine_name(endpoint).to_string())
-            }
-            Self::Unavailable(_) => None,
+        let mut parts = vec![OWN_SOURCES.to_string()];
+        if let Some(service) = &self.service {
+            parts.push(service.name().to_string());
         }
+        if let Some((endpoint, _)) = &self.provider {
+            parts.push(retrieval::native::engine_name(endpoint).to_string());
+        }
+        Some(parts.join(" + "))
     }
 
     fn identity(&self) -> String {
-        match self {
-            Self::Service(s) => format!("service:{}", s.name()),
-            Self::Provider { endpoint, model_id } => {
-                format!("provider:{}:{model_id}", endpoint.kind.as_str())
-            }
-            Self::Unavailable(_) => "none".into(),
+        let mut id = "rema".to_string();
+        if let Some(service) = &self.service {
+            id.push_str(&format!("+service:{}", service.name()));
         }
+        if let Some((endpoint, model_id)) = &self.provider {
+            id.push_str(&format!("+provider:{}:{model_id}", endpoint.kind.as_str()));
+        }
+        id
+    }
+
+    /// Whether links of discovery-only sources (LinkedIn, XING, boards)
+    /// can be found: they need a web search.
+    pub fn searches_the_web(&self) -> bool {
+        self.service.is_some() || self.provider.is_some()
     }
 
     pub fn deadline(&self) -> Duration {
-        match self {
-            Self::Provider { .. } => PROVIDER_DEADLINE,
-            _ => SERVICE_DEADLINE,
+        if self.provider.is_some() {
+            PROVIDER_DEADLINE
+        } else {
+            SERVICE_DEADLINE
         }
     }
 }
+
+/// How ReMa's own job sources are named in coverage and status.
+pub const OWN_SOURCES: &str = "ReMa job sources";
 
 /// One tool session (one chat answer, or a Settings check).
 #[derive(Clone)]
@@ -273,6 +276,9 @@ fn clean_sources(items: &[String]) -> Result<Vec<String>, ToolError> {
 #[derive(Debug)]
 pub struct Request {
     pub query: String,
+    /// Close variants of the query's role that also count as on topic
+    /// (set by ReMa's own job search; tool calls leave it empty).
+    pub also: Vec<String>,
     pub filters: SearchFilters,
     pub limit: usize,
     pub sort: SortMode,
@@ -315,6 +321,7 @@ pub fn validate(input: &SearchJobsInput) -> Result<Request, ToolError> {
     }
     Ok(Request {
         query: extract::clip(query, 200),
+        also: Vec::new(),
         filters: SearchFilters {
             required_skills: clean_list(&input.required_skills, 60)?,
             required_skills_mode: input.required_skills_mode.unwrap_or_default(),
@@ -359,6 +366,7 @@ fn query_key(session: &Session, req: &Request, similar: Option<&str>) -> String 
     let json = serde_json::json!({
         "v": PARSER_VERSION,
         "q": req.query.to_lowercase(),
+        "a": req.also,
         "f": req.filters,
         "s": req.sort,
         "u": req.include_unresolved,
@@ -404,6 +412,8 @@ struct Hit {
     via: String,
     company: Option<String>,
     location: Option<String>,
+    /// The job as a list API returned it (nothing left to read).
+    record: Option<Box<JobRecord>>,
 }
 
 struct Discovered {
@@ -431,198 +441,386 @@ fn wants(f: &SearchFilters, id: &str) -> bool {
 async fn discover(
     session: &Session,
     query: &str,
+    also: &[String],
     f: &SearchFilters,
     deadline: Instant,
     cancel: &CancellationToken,
     coverage: &mut Coverage,
 ) -> Result<Discovered, ToolError> {
-    match &session.discovery {
-        Discovery::Unavailable(reason) => Err(ToolError::new(
+    let discovery = &session.discovery;
+    let own = own_discovery(session, query, also, f, deadline, cancel);
+    let service = async {
+        match &discovery.service {
+            Some(service) => {
+                Some(service_discovery(session, service, query, f, deadline, cancel).await)
+            }
+            None => None,
+        }
+    };
+    let provider = async {
+        match &discovery.provider {
+            Some((endpoint, model_id)) => Some(
+                provider_discovery(session, endpoint, model_id, query, f, deadline, cancel).await,
+            ),
+            None => None,
+        }
+    };
+    let (own, service, provider) = tokio::join!(own, service, provider);
+    if cancel.is_cancelled() {
+        return Err(cancelled());
+    }
+    coverage.backend = discovery.name();
+    let mut hits = Vec::new();
+    let mut queries = 0;
+    let mut answered = false;
+    let mut reasons = Vec::new();
+    for part in [Some(own), service, provider].into_iter().flatten() {
+        coverage.sources_searched.extend(part.searched);
+        coverage.sources_unavailable.extend(part.unavailable);
+        coverage.bounded_by.extend(part.bounded);
+        match part.result {
+            Ok(found) => {
+                answered = true;
+                queries += found.queries;
+                hits.extend(found.hits);
+            }
+            Err(reason) => reasons.push(reason),
+        }
+    }
+    coverage.sources_searched.dedup();
+    coverage.backend_queries = queries;
+    if !answered {
+        return Err(ToolError::new(
             ErrorCode::SearchBackendUnavailable,
-            reason.clone(),
-        )),
-        Discovery::Service(service) => {
-            let place = place_text(f);
-            let base = format!("{query} {place}").trim().to_string();
-            let countries: Vec<String> = f
-                .locations
-                .iter()
-                .filter_map(|l| l.country.clone())
-                .collect();
-            let mut plan: Vec<(String, Option<String>, String)> = Vec::new();
-            if wants(f, "web") {
-                plan.push(("web".into(), None, format!("{base} job")));
-            }
-            // Employer boards and the big networks first, then regional
-            // boards, then the remaining ATS hosts.
-            let priority = |id: &str| match id {
-                "greenhouse" => 0,
-                "lever" => 1,
-                "linkedin" => 2,
-                "xing" => 3,
-                "ashby" => 5,
-                "personio" => 6,
-                _ => 4,
-            };
-            let mut scoped = sources::discovery_sources(&countries);
-            scoped.sort_by_key(|s| priority(s.id));
-            for source in scoped {
-                if wants(f, source.id) {
-                    plan.push((
-                        source.id.into(),
-                        source.site.map(str::to_string),
-                        base.clone(),
-                    ));
-                }
-            }
-            let reserve = if plan.iter().any(|(id, ..)| id == "linkedin" || id == "xing") {
-                CANONICAL_LOOKUPS
+            if reasons.is_empty() {
+                "no source could be searched".to_string()
             } else {
-                0
-            };
-            if plan.len() > MAX_QUERIES - reserve {
-                plan.truncate(MAX_QUERIES - reserve);
-                coverage.bounded_by.push("query_budget".into());
-            }
-            let days = f.posted_within_days;
-            let results: Vec<(String, Result<Vec<retrieval::backend::Hit>, String>)> =
-                stream::iter(plan.into_iter().map(|(id, site, text)| {
-                    let service = service.clone();
-                    let cancel = cancel.clone();
-                    async move {
-                        let remaining = deadline.saturating_duration_since(Instant::now());
-                        let result = tokio::time::timeout(
-                            remaining,
-                            service.search_in(&text, days, site.as_deref(), &cancel),
-                        )
-                        .await
-                        .unwrap_or_else(|_| Err("no answer in time".into()));
-                        (id, result)
-                    }
-                }))
-                .buffered(3)
-                .collect()
-                .await;
-            if cancel.is_cancelled() {
-                return Err(cancelled());
-            }
-            let mut hits = Vec::new();
-            let mut ok = 0;
-            for (id, result) in results {
-                match result {
-                    Ok(found) => {
-                        ok += 1;
-                        coverage.sources_searched.push(id.clone());
-                        hits.extend(found.into_iter().map(|h| Hit {
-                            url: h.url,
-                            title: h.title,
-                            snippet: h.snippet,
-                            via: id.clone(),
-                            company: None,
-                            location: None,
-                        }));
-                    }
-                    Err(message) => coverage.sources_unavailable.push(SourceIssue {
-                        code: backend_code(&message),
-                        source: id,
-                        message: format!("{}: {message}", service.name()),
-                    }),
-                }
-            }
-            coverage.backend = Some(service.name().to_string());
-            coverage.backend_queries = ok;
-            if ok == 0 {
-                let reason = coverage
-                    .sources_unavailable
-                    .first()
-                    .map(|i| i.message.clone())
-                    .unwrap_or_else(|| "no search ran".into());
-                return Err(ToolError::new(ErrorCode::SearchBackendUnavailable, reason));
-            }
-            Ok(Discovered { hits, queries: ok })
-        }
-        Discovery::Provider { endpoint, model_id } => {
-            let place = place_text(f);
-            let salary = match (f.salary_min, f.salary_currency.as_deref(), f.salary_period) {
-                (Some(amount), Some(currency), Some(SalaryPeriod::Year)) => {
-                    Some(retrieval::intent::MinSalary {
-                        amount,
-                        currency: normalize::currency(&currency.to_lowercase()),
-                        period: crate::models::analytics::SalaryPeriod::Year,
-                    })
-                }
-                (Some(amount), Some(currency), Some(SalaryPeriod::Month)) => {
-                    Some(retrieval::intent::MinSalary {
-                        amount,
-                        currency: normalize::currency(&currency.to_lowercase()),
-                        period: crate::models::analytics::SalaryPeriod::Month,
-                    })
-                }
-                _ => None,
-            };
-            let job_query = JobQuery {
-                text: format!("Find current {query} jobs {place}")
-                    .trim()
-                    .to_string(),
-                role: Some(query.to_string()),
-                location: (!place.is_empty()).then_some(place),
-                company: f.companies.first().cloned(),
-                remote: f.work_modes.contains(&WorkMode::Remote),
-                posted_within_days: f.posted_within_days,
-                min_salary: salary,
-                verify_urls: Vec::new(),
-            };
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            // A bounded request with only the query's terms: no chat, no CV,
-            // no tools (so ReMa MCP can never call itself).
-            let found = tokio::time::timeout(
-                remaining,
-                retrieval::native::search(
-                    &session.state,
-                    endpoint,
-                    model_id,
-                    &job_query,
-                    &retrieval::Silent,
-                    cancel,
-                ),
-            )
+                reasons.join("; ")
+            },
+        ));
+    }
+    Ok(Discovered { hits, queries })
+}
+
+/// What one discovery route contributed.
+struct Part {
+    result: Result<Discovered, String>,
+    searched: Vec<String>,
+    unavailable: Vec<SourceIssue>,
+    /// Why coverage stopped ("query_budget").
+    bounded: Vec<String>,
+}
+
+/// ReMa's own job sources: complete records from list APIs.
+async fn own_discovery(
+    session: &Session,
+    query: &str,
+    also: &[String],
+    f: &SearchFilters,
+    deadline: Instant,
+    cancel: &CancellationToken,
+) -> Part {
+    let place = f.locations.first().and_then(|l| {
+        let text = [l.city.clone(), l.region.clone(), l.country.clone()]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(", ");
+        crate::career_search::plan::Place::from_text(&text)
+    });
+    let mut roles = vec![query.to_string()];
+    roles.extend(also.iter().cloned());
+    let ask = crate::career_search::jobs::JobAsk {
+        roles,
+        place,
+        remote: f.work_modes.contains(&WorkMode::Remote),
+        companies: f.companies.clone(),
+    };
+    let ctx = session.ctx(cancel, deadline, false);
+    let listed =
+        crate::career_search::jobs::list(&session.state, &ctx, &ask, &session.state.career.health)
             .await;
-            if cancel.is_cancelled() {
-                return Err(cancelled());
+    let now = now_ms();
+    for source in &listed.searched {
+        session.state.rema_mcp.record(source, now, Ok(()));
+    }
+    let unavailable: Vec<SourceIssue> = listed
+        .failed
+        .iter()
+        .map(|(source, code, message)| {
+            session
+                .state
+                .rema_mcp
+                .record(source, now, Err(message.clone()));
+            SourceIssue {
+                source: source.clone(),
+                code: *code,
+                message: message.clone(),
             }
-            let engine = retrieval::native::engine_name(endpoint).to_string();
-            coverage.backend = Some(engine.clone());
-            match found {
-                Err(_) => Err(ToolError::new(
-                    ErrorCode::Timeout,
-                    format!(
-                        "{engine} did not finish within {} seconds",
-                        remaining.as_secs()
-                    ),
-                )),
-                Ok(Err(reason)) => Err(ToolError::new(ErrorCode::SearchBackendUnavailable, reason)),
-                Ok(Ok(found)) => {
-                    coverage.backend_queries = found.searches as u32;
-                    coverage.sources_searched.push("web".into());
-                    let hits = found
-                        .candidates
-                        .into_iter()
-                        .map(|c| Hit {
-                            url: c.url,
-                            title: c.title.unwrap_or_default(),
-                            snippet: c.snippet,
-                            via: "web".into(),
-                            company: c.company,
-                            location: c.location,
-                        })
-                        .collect();
-                    Ok(Discovered {
-                        hits,
-                        queries: found.searches as u32,
-                    })
-                }
-            }
+        })
+        .chain(listed.resting.iter().map(|source| SourceIssue {
+            source: source.clone(),
+            code: ErrorCode::SourceUnavailable,
+            message: "resting after repeated failures; asked again shortly".into(),
+        }))
+        .collect();
+    let hits: Vec<Hit> = listed
+        .records
+        .into_iter()
+        .filter(|(via, _)| wants(f, via) || f.sources.is_empty())
+        .filter_map(|(via, record)| {
+            let url = record
+                .links
+                .canonical_url
+                .clone()
+                .or_else(|| record.links.discovered.first().map(|d| d.url.clone()))?;
+            Some(Hit {
+                title: record.title.clone(),
+                snippet: None,
+                company: record.employer.name.clone(),
+                location: record.locations.first().map(|l| l.text.clone()),
+                via,
+                url,
+                record: Some(Box::new(record)),
+            })
+        })
+        .collect();
+    let result = if listed.searched.is_empty() && !listed.failed.is_empty() {
+        Err(format!(
+            "{OWN_SOURCES}: {}",
+            listed
+                .failed
+                .first()
+                .map(|(_, _, m)| m.clone())
+                .unwrap_or_default()
+        ))
+    } else {
+        Ok(Discovered {
+            queries: listed.searched.len() as u32,
+            hits,
+        })
+    };
+    Part {
+        result,
+        searched: listed.searched,
+        unavailable,
+        bounded: Vec::new(),
+    }
+}
+
+/// Site-scoped searches with the search service from Settings.
+async fn service_discovery(
+    session: &Session,
+    service: &Arc<Service>,
+    query: &str,
+    f: &SearchFilters,
+    deadline: Instant,
+    cancel: &CancellationToken,
+) -> Part {
+    let place = place_text(f);
+    let base = format!("{query} {place}").trim().to_string();
+    let countries: Vec<String> = f
+        .locations
+        .iter()
+        .filter_map(|l| l.country.clone())
+        .collect();
+    let mut plan: Vec<(String, Option<String>, String)> = Vec::new();
+    if wants(f, "web") {
+        plan.push(("web".into(), None, format!("{base} job")));
+    }
+    // Employer boards and the big networks first, then regional boards,
+    // then the remaining ATS hosts.
+    let priority = |id: &str| match id {
+        "greenhouse" => 0,
+        "lever" => 1,
+        "linkedin" => 2,
+        "xing" => 3,
+        "ashby" => 5,
+        "personio" => 6,
+        _ => 4,
+    };
+    let mut scoped = sources::discovery_sources(&countries);
+    scoped.sort_by_key(|s| priority(s.id));
+    for source in scoped {
+        if wants(f, source.id) {
+            plan.push((
+                source.id.into(),
+                source.site.map(str::to_string),
+                base.clone(),
+            ));
         }
+    }
+    let reserve = if plan.iter().any(|(id, ..)| id == "linkedin" || id == "xing") {
+        CANONICAL_LOOKUPS
+    } else {
+        0
+    };
+    let mut bounded = Vec::new();
+    if plan.len() > MAX_QUERIES - reserve {
+        plan.truncate(MAX_QUERIES - reserve);
+        bounded.push("query_budget".to_string());
+    }
+    let days = f.posted_within_days;
+    let results: Vec<(String, Result<Vec<retrieval::backend::Hit>, String>)> =
+        stream::iter(plan.into_iter().map(|(id, site, text)| {
+            let service = service.clone();
+            let cancel = cancel.clone();
+            async move {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                let result = tokio::time::timeout(
+                    remaining,
+                    service.search_in(&text, days, site.as_deref(), &cancel),
+                )
+                .await
+                .unwrap_or_else(|_| Err("no answer in time".into()));
+                (id, result)
+            }
+        }))
+        .buffered(3)
+        .collect()
+        .await;
+    let mut hits = Vec::new();
+    let mut ok = 0;
+    let mut searched = Vec::new();
+    let mut unavailable = Vec::new();
+    for (id, result) in results {
+        match result {
+            Ok(found) => {
+                ok += 1;
+                searched.push(id.clone());
+                hits.extend(found.into_iter().map(|h| Hit {
+                    url: h.url,
+                    title: h.title,
+                    snippet: h.snippet,
+                    via: id.clone(),
+                    company: None,
+                    location: None,
+                    record: None,
+                }));
+            }
+            Err(message) => unavailable.push(SourceIssue {
+                code: backend_code(&message),
+                source: id,
+                message: format!("{}: {message}", service.name()),
+            }),
+        }
+    }
+    let _ = session;
+    let result = if ok == 0 {
+        Err(unavailable
+            .first()
+            .map(|i| i.message.clone())
+            .unwrap_or_else(|| format!("{}: no search ran", service.name())))
+    } else {
+        Ok(Discovered { hits, queries: ok })
+    };
+    Part {
+        result,
+        searched,
+        unavailable,
+        bounded,
+    }
+}
+
+/// The chat model's own web search, in one bounded request.
+async fn provider_discovery(
+    session: &Session,
+    endpoint: &Endpoint,
+    model_id: &str,
+    query: &str,
+    f: &SearchFilters,
+    deadline: Instant,
+    cancel: &CancellationToken,
+) -> Part {
+    let place = place_text(f);
+    let salary = match (f.salary_min, f.salary_currency.as_deref(), f.salary_period) {
+        (Some(amount), Some(currency), Some(SalaryPeriod::Year)) => {
+            Some(retrieval::intent::MinSalary {
+                amount,
+                currency: normalize::currency(&currency.to_lowercase()),
+                period: crate::models::analytics::SalaryPeriod::Year,
+            })
+        }
+        (Some(amount), Some(currency), Some(SalaryPeriod::Month)) => {
+            Some(retrieval::intent::MinSalary {
+                amount,
+                currency: normalize::currency(&currency.to_lowercase()),
+                period: crate::models::analytics::SalaryPeriod::Month,
+            })
+        }
+        _ => None,
+    };
+    let job_query = JobQuery {
+        text: format!("Find current {query} jobs {place}")
+            .trim()
+            .to_string(),
+        role: Some(query.to_string()),
+        location: (!place.is_empty()).then_some(place),
+        company: f.companies.first().cloned(),
+        remote: f.work_modes.contains(&WorkMode::Remote),
+        posted_within_days: f.posted_within_days,
+        min_salary: salary,
+        verify_urls: Vec::new(),
+    };
+    let plan = crate::career_search::plan::for_job_query(&job_query);
+    let hints = crate::career_search::plan::hints(&plan, &[]);
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    // A bounded request with only the query's terms: no chat, no CV,
+    // no tools (so ReMa MCP can never call itself).
+    let found = tokio::time::timeout(
+        remaining,
+        retrieval::native::search(
+            &session.state,
+            endpoint,
+            model_id,
+            &job_query,
+            &hints,
+            &retrieval::Silent,
+            cancel,
+        ),
+    )
+    .await;
+    let engine = retrieval::native::engine_name(endpoint).to_string();
+    let (result, searched) = match found {
+        Err(_) => (
+            Err(format!(
+                "{engine} did not finish within {} seconds",
+                remaining.as_secs()
+            )),
+            Vec::new(),
+        ),
+        Ok(Err(reason)) => (Err(reason), Vec::new()),
+        Ok(Ok(found)) => {
+            let queries = found.searches as u32;
+            let hits = found
+                .candidates
+                .into_iter()
+                .map(|c| Hit {
+                    url: c.url,
+                    title: c.title.unwrap_or_default(),
+                    snippet: c.snippet,
+                    via: "web".into(),
+                    company: c.company,
+                    location: c.location,
+                    record: None,
+                })
+                .collect();
+            (Ok(Discovered { hits, queries }), vec!["web".to_string()])
+        }
+    };
+    let unavailable = match &result {
+        Err(reason) => vec![SourceIssue {
+            source: "web".into(),
+            code: backend_code(reason),
+            message: reason.clone(),
+        }],
+        Ok(_) => Vec::new(),
+    };
+    Part {
+        result,
+        searched,
+        unavailable,
+        bounded: Vec::new(),
     }
 }
 
@@ -825,17 +1023,27 @@ async fn collect(
         if !chosen {
             continue;
         }
-        if retrieval::listings::is_search_page(&target.url)
-            || (target.target == Target::Page && !normalize::is_job_specific(&target.url))
+        // A job a list API returned is a posting by construction.
+        if hit.record.is_none()
+            && (retrieval::listings::is_search_page(&target.url)
+                || (target.target == Target::Page && !normalize::is_job_specific(&target.url)))
         {
             excluded.not_job_postings += 1;
             continue;
         }
-        let key = candidate_key(&target);
+        let key = hit
+            .record
+            .as_ref()
+            .and_then(|r| r.source_ids.first())
+            .map(|s| format!("{}:{}", s.source, s.id.to_lowercase()))
+            .unwrap_or_else(|| candidate_key(&target));
         if let Some(&index) = seen.get(&key) {
             let existing: &mut Candidate = &mut candidates[index];
             if existing.hit.snippet.is_none() {
                 existing.hit.snippet = hit.snippet.clone();
+            }
+            if existing.hit.record.is_none() && hit.record.is_some() {
+                existing.hit.record = hit.record;
             }
             excluded.duplicates += 1;
             continue;
@@ -854,12 +1062,19 @@ async fn collect(
     }
     coverage.candidates_seen += candidates.len() as u32;
 
+    // Jobs list APIs returned complete: nothing to read.
+    let mut results: HashMap<usize, Result<JobRecord, ToolError>> = HashMap::new();
+    for (i, candidate) in candidates.iter_mut().enumerate() {
+        if let Some(record) = candidate.hit.record.take() {
+            results.insert(i, Ok(*record));
+        }
+    }
     // Readable candidates, ATS first; cached recent checks are reused.
     let mut readable: Vec<usize> = (0..candidates.len())
+        .filter(|&i| !results.contains_key(&i))
         .filter(|&i| candidates[i].target.target != Target::DiscoveryOnly)
         .collect();
     readable.sort_by_key(|&i| (candidates[i].target.target == Target::Page, i));
-    let mut results: HashMap<usize, Result<JobRecord, ToolError>> = HashMap::new();
     let mut to_fetch = Vec::new();
     for i in readable {
         if !refresh {
@@ -1028,7 +1243,7 @@ async fn canonical_lookups(
     cancel: &CancellationToken,
     coverage: &mut Coverage,
 ) -> Vec<Hit> {
-    let Discovery::Service(service) = &session.discovery else {
+    let Some(service) = &session.discovery.service else {
         return Vec::new();
     };
     let mut hits = Vec::new();
@@ -1061,6 +1276,7 @@ async fn canonical_lookups(
                         via: "web".into(),
                         company: None,
                         location: None,
+                        record: None,
                     }),
             );
         }
@@ -1193,7 +1409,18 @@ pub async fn search_jobs(
     cancel: &CancellationToken,
 ) -> Result<SearchResult, ToolError> {
     let req = validate(input)?;
-    run(session, req, None, cancel).await
+    run(session, req, None, cancel, true).await
+}
+
+/// ReMa's own job search (the career search router): the same pipeline as
+/// the `search_jobs` tool. The MCP switch in Settings turns off the tools
+/// offered to models, not ReMa's built-in job search.
+pub async fn search_for_rema(
+    session: &Session,
+    req: Request,
+    cancel: &CancellationToken,
+) -> Result<SearchResult, ToolError> {
+    run(session, req, None, cancel, false).await
 }
 
 async fn run(
@@ -1201,6 +1428,7 @@ async fn run(
     req: Request,
     similar: Option<SimilarTo>,
     cancel: &CancellationToken,
+    tool_call: bool,
 ) -> Result<SearchResult, ToolError> {
     let key = query_key(
         session,
@@ -1227,7 +1455,7 @@ async fn run(
             return page(session, &id, 0, req.limit, true, now);
         }
     }
-    if !super::is_enabled(&session.state) {
+    if tool_call && !super::is_enabled(&session.state) {
         return Err(disabled());
     }
     let deadline = Instant::now() + session.discovery.deadline();
@@ -1235,6 +1463,7 @@ async fn run(
     let discovered = discover(
         session,
         &req.query,
+        &req.also,
         &req.filters,
         deadline,
         cancel,
@@ -1326,7 +1555,7 @@ async fn run(
             source: None,
         });
     }
-    if matches!(session.discovery, Discovery::Service(_)) {
+    if session.discovery.service.is_some() {
         coverage.bounded_by.push("sources".into());
     }
     if coverage
@@ -1354,8 +1583,14 @@ async fn run(
                 continue;
             }
         }
-        let relevance = filter::relevance(&record, &req.query, &req.filters, now);
-        match filter::check(&record, &req.query, &req.filters, now) {
+        // The query, or a close variant of its role that fits this job.
+        let topic = std::iter::once(&req.query)
+            .chain(req.also.iter())
+            .find(|q| filter::on_topic(&record, q))
+            .unwrap_or(&req.query)
+            .clone();
+        let relevance = filter::relevance(&record, &topic, &req.filters, now);
+        match filter::check(&record, &topic, &req.filters, now) {
             Verdict::Match { notes } => matches.push((relevance, record, notes)),
             Verdict::Unresolved { filters, reasons } => {
                 excluded.unresolved += 1;
@@ -1550,6 +1785,7 @@ pub async fn search_similar(
             exclude,
         }),
         cancel,
+        true,
     )
     .await
 }
@@ -1853,50 +2089,47 @@ pub fn source_status(
     input: &SourceStatusInput,
 ) -> Result<SourceStatusResult, ToolError> {
     let wanted = clean_sources(&input.sources)?;
-    let backend = match &session.discovery {
-        Discovery::Service(service) => BackendStatus {
-            kind: "search_service".into(),
-            name: Some(service.name().into()),
-            usable: true,
-            detail: "the search service from Settings → Web search (your own key or instance)"
-                .into(),
-            deadline_seconds: SERVICE_DEADLINE.as_secs() as u32,
+    let discovery = &session.discovery;
+    let backend = BackendStatus {
+        kind: match (&discovery.service, &discovery.provider) {
+            (Some(_), _) => "rema_sources_and_search_service",
+            (None, Some(_)) => "rema_sources_and_provider_web_search",
+            (None, None) => "rema_sources",
+        }
+        .into(),
+        name: discovery.name(),
+        usable: true,
+        detail: match (&discovery.service, &discovery.provider) {
+            (Some(service), _) => format!(
+                "ReMa's own job sources (employer boards and public job boards, no key) and {}",
+                service.name()
+            ),
+            (None, Some((endpoint, _))) => format!(
+                "ReMa's own job sources (employer boards and public job boards, no key) and {}",
+                retrieval::native::engine_name(endpoint)
+            ),
+            (None, None) => {
+                "ReMa's own job sources: employer boards and public job boards (no key needed)"
+                    .into()
+            }
         },
-        Discovery::Provider { endpoint, .. } => BackendStatus {
-            kind: "provider_web_search".into(),
-            name: Some(retrieval::native::engine_name(endpoint).into()),
-            usable: true,
-            detail: "the chat model's own hosted web search, billed to your provider account"
-                .into(),
-            deadline_seconds: PROVIDER_DEADLINE.as_secs() as u32,
-        },
-        Discovery::Unavailable(reason) => BackendStatus {
-            kind: "none".into(),
-            name: None,
-            usable: false,
-            detail: reason.clone(),
-            deadline_seconds: SERVICE_DEADLINE.as_secs() as u32,
-        },
+        deadline_seconds: discovery.deadline().as_secs() as u32,
     };
-    let searchable = backend.usable;
+    let searchable = discovery.searches_the_web();
     let sources = sources::REGISTRY
         .iter()
         .filter(|s| wanted.is_empty() || wanted.iter().any(|w| w == s.id))
         .map(|s| {
             let health = session.state.rema_mcp.health(s.id);
             let (usable, limitation) = match s.mode {
-                AcquisitionMode::SearchDiscoveryOnly if !searchable => {
-                    (false, "needs a search backend for discovery".to_string())
-                }
+                AcquisitionMode::SearchDiscoveryOnly if !searchable => (
+                    false,
+                    "its links are found only by a web search (the chat model's own, when it has \
+                     one); known links still work"
+                        .to_string(),
+                ),
                 AcquisitionMode::SearchDiscoveryOnly => (true, s.restrictions.to_string()),
                 AcquisitionMode::Blocked => (false, s.restrictions.to_string()),
-                _ if !searchable => (
-                    true,
-                    format!(
-                        "{} Discovery needs a search backend; known job URLs still work.",
-                        s.restrictions
-                    ),
-                ),
                 _ => (true, s.restrictions.to_string()),
             };
             SourceState {

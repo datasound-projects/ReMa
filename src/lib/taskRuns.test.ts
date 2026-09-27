@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { describeWebSearch, elapsed, failureGuidance, runStatus, runTags, runTitle } from './taskRuns';
+import { describeSources, describeWebSearch, elapsed, failureGuidance, runStatus, runTags, runTitle } from './taskRuns';
 
 const noon = new Date(2026, 8, 27, 12, 0);
 
@@ -29,13 +29,21 @@ describe('run history labels', () => {
     expect(failureGuidance(null)).toBeNull();
   });
 
-  it('describes the web search a run had', () => {
+  it('describes the search a run had and the sources it consulted', () => {
     const base = { profile: false, connectors: [], webSearch: true, searches: 0, searchEngines: [] };
     expect(describeWebSearch({ ...base, webSearch: false })).toBe('Not available');
-    expect(describeWebSearch(base)).toBe('Enabled · not used');
-    expect(describeWebSearch({ ...base, searches: 1, searchEngines: ['Anthropic web search'] })).toBe(
-      'Enabled · Anthropic web search · 1 search',
-    );
+    expect(describeWebSearch(base)).toBe('Available · not used');
+    expect(describeWebSearch({ ...base, searches: 1, searchEngines: ['Anthropic web search'] })).toBe('Used · 1 search');
+    expect(describeSources(base)).toBeNull();
+    // Runs from before career search named only the engine.
+    expect(describeSources({ ...base, searchEngines: ['ChatGPT web search'] })).toBe('ChatGPT web search');
+    expect(
+      describeSources({
+        ...base,
+        searchEngines: ['ReMa Jobs + OpenAI web search'],
+        sourcesConsulted: ['ReMa Jobs', 'Company career sites', 'OpenAI web search'],
+      }),
+    ).toBe('ReMa Jobs, Company career sites, OpenAI web search');
   });
 
   it('measures a run while it runs and after it ended', () => {

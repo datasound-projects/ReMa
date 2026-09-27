@@ -1,12 +1,27 @@
 use tauri::State;
 
 use crate::{
+    career_search::status::{self, CareerSearchStatus},
     error::AppResult,
     services::websearch::{self, WebSearchInput, WebSearchSettings, WebSearchTest},
     state::AppState,
 };
 
-/// The search service ReMa uses for models without their own web search.
+/// Career search: automatic, its routes and sources (no setup needed).
+#[tauri::command]
+#[specta::specta]
+pub async fn career_search_status(state: State<'_, AppState>) -> AppResult<CareerSearchStatus> {
+    status::status(&state).await
+}
+
+/// Checks that ReMa's own sources and company research answer now.
+#[tauri::command]
+#[specta::specta]
+pub async fn check_career_search(state: State<'_, AppState>) -> AppResult<CareerSearchStatus> {
+    status::check(&state).await
+}
+
+/// An optional search service (Advanced) that adds results.
 #[tauri::command]
 #[specta::specta]
 pub async fn web_search_settings(state: State<'_, AppState>) -> AppResult<WebSearchSettings> {

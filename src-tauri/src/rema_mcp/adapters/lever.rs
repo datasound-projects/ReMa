@@ -32,6 +32,26 @@ pub async fn read(ctx: &Ctx<'_>, site: &str, id: &str, eu: bool) -> Result<JobRe
     parse(&value, site, &url, ctx.now)
 }
 
+/// Every published posting of an employer site: `GET /v0/postings/{site}?mode=json`.
+pub async fn list(ctx: &Ctx<'_>, site: &str, eu: bool) -> Result<Vec<JobRecord>, ToolError> {
+    let base = if eu {
+        &ctx.apis.lever_eu
+    } else {
+        &ctx.apis.lever
+    };
+    let url = format!("{base}/v0/postings/{site}?mode=json");
+    let body = ctx.feed(&url, crate::rema_mcp::fetch::Accept::Json).await?;
+    let value: Value = serde_json::from_str(&body)
+        .map_err(|_| ToolError::new(ErrorCode::ParsingFailed, "the Lever site is unreadable"))?;
+    Ok(value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .take(super::MAX_LISTED)
+        .filter_map(|posting| parse(posting, site, &url, ctx.now).ok())
+        .collect())
+}
+
 fn text(value: &Value, pointer: &str) -> Option<String> {
     value
         .pointer(pointer)

@@ -446,6 +446,7 @@ fn endpoint() -> Endpoint {
         connection: ConnectionMethod::ApiKey,
         base_url: "http://localhost".into(),
         credential: None,
+        server_web_search: false,
     }
 }
 

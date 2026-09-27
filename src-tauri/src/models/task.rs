@@ -266,6 +266,14 @@ pub struct RunContext {
     pub searches: u32,
     /// What ran them ("ChatGPT web search").
     pub search_engines: Vec<String>,
+    /// What the search looked for ("Jobs", "Company"). Runs recorded
+    /// before career search have none.
+    #[serde(default)]
+    pub search_scopes: Vec<String>,
+    /// Sources consulted ("ReMa Jobs", "Company career sites", "OpenAI web
+    /// search").
+    #[serde(default)]
+    pub sources_consulted: Vec<String>,
 }
 
 /// State of one stage of a run.

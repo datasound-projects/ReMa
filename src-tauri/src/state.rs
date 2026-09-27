@@ -59,6 +59,8 @@ pub struct AppState {
     pub approvals: Approvals,
     /// ReMa MCP, the built-in job-search server.
     pub rema_mcp: crate::rema_mcp::RemaMcp,
+    /// ReMa Search: source health, local server capabilities, caches.
+    pub career: Arc<crate::career_search::CareerSearch>,
 }
 
 #[cfg(test)]
@@ -110,10 +112,14 @@ pub mod testing {
             analytics: Default::default(),
             mcp: Default::default(),
             approvals: Default::default(),
+            // ReMa's own sources point at a local address the fetcher
+            // refuses: tests never reach the internet, and a test that needs
+            // the sources serves them itself.
             rema_mcp: crate::rema_mcp::RemaMcp::with(
-                crate::rema_mcp::adapters::Apis::official(),
+                crate::rema_mcp::adapters::Apis::local("http://127.0.0.1:9"),
                 false,
             ),
+            career: Default::default(),
         };
         (state, events)
     }
