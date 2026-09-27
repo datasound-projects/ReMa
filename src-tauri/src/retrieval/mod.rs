@@ -98,6 +98,19 @@ pub enum SalaryStatus {
     NotListed,
 }
 
+/// What a source states about a posting's life (§50), where it does.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PostingFacts {
+    /// "Valid through", as the posting states it (ISO date or date-time).
+    pub valid_through: Option<String>,
+    /// When ReMa last checked that the posting is still there.
+    pub verified_at: Option<i64>,
+    /// The application page, only when the source states it.
+    pub apply_url: Option<String>,
+    /// The posting's id at its source ("greenhouse:nordlicht:4411001").
+    pub source_job_id: Option<String>,
+}
+
 /// A validated listing.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Listing {
@@ -117,6 +130,8 @@ pub struct Listing {
     pub source: String,
     /// What is missing or uncertain ("salary not stated").
     pub notes: Vec<String>,
+    /// Valid through, last checked, application page, source id.
+    pub facts: PostingFacts,
 }
 
 /// Postings found but not shown, by reason.

@@ -129,8 +129,15 @@ pub enum WebEvent {
         error: Option<String>,
     },
     /// The answer cites a page (OpenAI URL citations, Anthropic web
-    /// citations).
-    Cited { url: String, title: String },
+    /// citations), with the cited words when the provider gives them
+    /// (Anthropic's `cited_text`) and the cited span of the answer
+    /// (OpenAI's `start_index`..`end_index`, in characters).
+    Cited {
+        url: String,
+        title: String,
+        quote: Option<String>,
+        range: Option<(u32, u32)>,
+    },
     /// Web search could not be used for this answer.
     Unavailable { reason: String },
 }
@@ -168,6 +175,28 @@ pub struct WebSearch {
     /// Where the request is about, for localized results (approximate;
     /// never the device's location).
     pub location: Option<ApproxLocation>,
+    /// Tools offered instead when the provider refuses its own search for
+    /// this request (an organization that turned web search off): ReMa's
+    /// career search tools, so the answer still rests on current sources.
+    /// They replace the request's tools and include them.
+    pub fallback: Option<ToolBox>,
+}
+
+/// Most sites OpenAI's web search accepts in `filters.allowed_domains`.
+pub const OPENAI_MAX_DOMAINS: usize = 100;
+
+/// The queries of a search action: OpenAI and Codex list them in
+/// `queries` (the single `query` is the older field).
+pub fn joined_queries(action: &Value) -> Option<String> {
+    let queries: Vec<&str> = action
+        .get("queries")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|q| !q.is_empty())
+        .collect();
+    (!queries.is_empty()).then(|| queries.join("; "))
 }
 
 /// An approximate place for search localization, from the request itself.
@@ -513,6 +542,17 @@ pub trait LanguageModel: Send + Sync {
     fn serves_web_search<'a>(&'a self, _endpoint: &'a Endpoint) -> BoxFuture<'a, bool> {
         Box::pin(async { false })
     }
+
+    /// A runtime's own web search policy, read from its metadata without
+    /// searching: Codex's mode for the signed-in account (`live`,
+    /// `indexed`, `cached`) or why it may not search. `None` where the
+    /// runtime has no such policy.
+    fn web_search_policy<'a>(
+        &'a self,
+        _endpoint: &'a Endpoint,
+    ) -> BoxFuture<'a, Option<Result<String, String>>> {
+        Box::pin(async { None })
+    }
 }
 
 /// The real implementation: HTTPS APIs, or the Codex runtime for a
@@ -542,6 +582,23 @@ impl LanguageModel for ProviderLanguageModel {
         Box::pin(async move {
             endpoint.kind == ProviderKind::OpenaiCompatible
                 && openai::serves_web_search(&self.http, endpoint).await
+        })
+    }
+
+    fn web_search_policy<'a>(
+        &'a self,
+        endpoint: &'a Endpoint,
+    ) -> BoxFuture<'a, Option<Result<String, String>>> {
+        Box::pin(async move {
+            if endpoint.connection != ConnectionMethod::ChatgptAccount {
+                return None;
+            }
+            let codex = self.codex.as_deref()?;
+            match codex.web_search_policy().await {
+                Ok(policy) => Some(policy.map(str::to_string)),
+                // Not running or not signed in: nothing learned yet.
+                Err(_) => None,
+            }
         })
     }
 
@@ -599,8 +656,22 @@ impl LanguageModel for ProviderLanguageModel {
                         .await
                 };
                 let step = match result {
+                    // Anthropic asks this model to call web search directly
+                    // (no programmatic tool calling): once, then remembered.
+                    Err(error)
+                        if endpoint.kind == ProviderKind::Anthropic
+                            && request.web.is_some()
+                            && request.rounds.is_empty()
+                            && round_text.is_empty()
+                            && anthropic::asks_for_direct_callers(&error)
+                            && anthropic::learn_direct(model_id) =>
+                    {
+                        continue;
+                    }
                     // The provider refused its web tools for this model or
-                    // account: answer without them rather than not at all.
+                    // account: answer with ReMa's career search tools when
+                    // the request has them, else without web search, rather
+                    // than not at all.
                     Err(error)
                         if request.web.as_ref().is_some_and(|w| !w.required)
                             && request.rounds.is_empty()
@@ -611,6 +682,9 @@ impl LanguageModel for ProviderLanguageModel {
                             web.report(WebEvent::Unavailable {
                                 reason: error.to_string(),
                             });
+                            if let Some(fallback) = web.fallback {
+                                request.tools = Some(fallback);
+                            }
                         }
                         continue;
                     }

@@ -1098,7 +1098,11 @@ async fn run_task(
                 Ok(Finish::Cancelled) => return Ok(Output::cancelled()),
                 Ok(_) => {
                     recorder.done("answer", "Answer written from the sources");
-                    answer.trim().to_string()
+                    // References the sources do not have never show as
+                    // sources (§49).
+                    let table =
+                        career_search::citations::CitationTable::from_findings(&found.findings);
+                    career_search::citations::check(answer.trim(), &table).text
                 }
                 Err(error) => {
                     recorder.stage(
@@ -1144,8 +1148,9 @@ async fn run_task(
                 recorder: recorder.clone(),
                 searches: AtomicU32::new(0),
             });
-            // Models without a hosted search get ReMa's career search tools.
-            let tools = (!web).then(|| ToolBox {
+            // Models without a hosted search get ReMa's career search tools;
+            // so does a hosted model whose provider refuses its own search.
+            let career_tools = ToolBox {
                 specs: retrieval::tools::specs(),
                 executor: Arc::new(retrieval::tools::WebTools {
                     state: state.clone(),
@@ -1155,8 +1160,11 @@ async fn run_task(
                     observer: Some(observer.clone()),
                     next: None,
                     cancel: cancel.clone(),
+                    found: Default::default(),
+                    user_text: task.prompt.clone(),
                 }),
-            });
+            };
+            let tools = (!web).then(|| career_tools.clone());
             recorder.update_context(|c| c.web_search = true);
             let plan = career_search::plan::plan(&task.prompt);
             let hints = if plan.scopes.any() {
@@ -1185,6 +1193,7 @@ async fn run_task(
                     required: false,
                     allowed_domains: hints.allowed_domains.clone(),
                     location: hints.location.clone(),
+                    fallback: Some(career_tools),
                 }),
                 ..ChatRequest::default()
             };

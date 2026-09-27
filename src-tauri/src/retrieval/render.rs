@@ -33,20 +33,24 @@ fn cell(text: &str, max: usize) -> String {
     }
 }
 
-/// A Markdown link to a posting, named after its site.
-fn link(url: &str) -> String {
-    let Some(url) = normalize::web_url(url) else {
-        return "—".to_string();
-    };
-    let safe: String = url
-        .chars()
+/// An address made safe inside a Markdown link.
+fn safe_link(url: &str) -> String {
+    url.chars()
         .filter(|c| !c.is_whitespace() && !matches!(c, '<' | '>' | '"'))
         .map(|c| match c {
             '(' => "%28".to_string(),
             ')' => "%29".to_string(),
             c => c.to_string(),
         })
-        .collect();
+        .collect()
+}
+
+/// A Markdown link to a posting, named after its site.
+fn link(url: &str) -> String {
+    let Some(url) = normalize::web_url(url) else {
+        return "—".to_string();
+    };
+    let safe = safe_link(&url);
     let name = normalize::source_name(&url)
         .or_else(|| {
             reqwest::Url::parse(&url).ok().and_then(|u| {
@@ -215,7 +219,21 @@ fn status_cell(l: &Listing) -> String {
             .filter(|n| n.as_str() != "salary not stated")
             .cloned(),
     );
-    cell(&parts.join(" · "), 200)
+    // What the posting states about its life (§50).
+    if let Some(until) = l.facts.valid_through.as_deref() {
+        parts.push(format!("open until {}", until.get(..10).unwrap_or(until)));
+    }
+    let mut text = cell(&parts.join(" · "), 200);
+    if let Some(apply) = l
+        .facts
+        .apply_url
+        .as_deref()
+        .and_then(normalize::web_url)
+        .filter(|a| normalize::canonical_url(a) != normalize::canonical_url(&l.url))
+    {
+        text.push_str(&format!(" · [apply]({})", safe_link(&apply)));
+    }
+    text
 }
 
 /// Sources that could not be searched this time: their postings may be
@@ -397,6 +415,12 @@ fn listing_line(number: usize, l: &Listing) -> String {
         " | posted: {}",
         l.posted.map(day).unwrap_or_else(|| "not shown".into())
     ));
+    if let Some(until) = &l.facts.valid_through {
+        line.push_str(&format!(" | valid through: {}", cell(until, 30)));
+    }
+    if let Some(checked) = l.facts.verified_at {
+        line.push_str(&format!(" | checked: {}", day(checked)));
+    }
     line.push_str(&format!(" | {} | {}\n", status(l.verification), l.url));
     if let Some(summary) = &l.summary {
         line.push_str(&format!("    Summary: {}\n", cell(summary, 300)));
@@ -435,6 +459,7 @@ mod tests {
                     verification: Verification::Posting,
                     source: "careers.nordlicht.example".into(),
                     notes: vec![],
+                    facts: Default::default(),
                 },
                 Listing {
                     title: "ML Engineer".into(),
@@ -449,6 +474,7 @@ mod tests {
                     verification: Verification::SearchOnly,
                     source: "jobs.donau.example".into(),
                     notes: vec!["posting date not shown".into()],
+                    facts: Default::default(),
                 },
             ],
             excluded: Excluded {

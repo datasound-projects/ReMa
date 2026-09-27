@@ -591,6 +591,11 @@ export type Assignment =
 /**  Randomized by account, frozen before contact. */
 "random_by_account" | "manual" | "sequential";
 
+/**  How the model is reached and signed in (authentication only). */
+export type AuthMode = "api_key" | "chatgpt_account" | "claude_console" | 
+/**  A local or self-hosted server (a key is optional). */
+"local_server";
+
 /**
  *  Who might care about the offer at a company (B11). Never purchase
  *  authority by title alone.
@@ -833,6 +838,11 @@ export type CareerSearchStatus = {
 	model: string | null,
 	/**  Its own web search ("Anthropic web search"), if it has one. */
 	modelSearch: string | null,
+	/**
+	 *  What the selected model's runtime can do for search (§6): found
+	 *  from the runtime, never from the provider's name alone.
+	 */
+	capabilities: RuntimeCapabilities | null,
 	routes: RouteState[],
 	/**  An optional search service set up under Advanced. */
 	extraService: string | null,
@@ -3062,6 +3072,33 @@ export type RunSource = "chat" | "task" | "manual" | "tool";
 
 /**  Distinguishable outcomes (B27): a failure is never a zero-result search. */
 export type RunStatus = "queued" | "running" | "complete" | "partial" | "no_verified_matches" | "needs_review" | "capability_unavailable" | "offline" | "failed" | "cancelled";
+
+/**  `ProviderRuntimeCapabilities` (§6) of one model. */
+export type RuntimeCapabilities = {
+	/**  "OpenAI", "Anthropic", … */
+	provider: string,
+	authMode: AuthMode,
+	runtime: RuntimeType,
+	/**  The connection can answer: a key or a signed-in runtime is there. */
+	inferenceAvailable: boolean,
+	/**  The model's own hosted search can be used. */
+	nativeSearchAvailable: boolean,
+	/**  It reads the live web, not only a cached index. */
+	nativeSearchLive: boolean,
+	/**  It can be kept to the career sites of a request. */
+	nativeDomainFiltering: boolean,
+	/**  It reports the pages it used, so ReMa can check them. */
+	nativeCitations: boolean,
+	/**  ReMa's own career search (always). */
+	remaSearchAvailable: boolean,
+	/**  The tool or mode ReMa uses ("web_search_20260318", "live"). */
+	nativeDetail: string | null,
+	/**  Why the model's own search is off or limited. */
+	note: string | null,
+};
+
+/**  The runtime that carries the model's requests. */
+export type RuntimeType = "openai_responses" | "codex_app_server" | "anthropic_messages" | "gemini_api" | "unsloth_studio" | "openai_compatible";
 
 export type SalaryCoverage = {
 	/**  Jobs stating a salary. */

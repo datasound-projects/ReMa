@@ -1146,6 +1146,7 @@ mod tests {
             verification: Verification::Posting,
             source: "Greenhouse".into(),
             notes: vec![],
+            facts: Default::default(),
         }
     }
 

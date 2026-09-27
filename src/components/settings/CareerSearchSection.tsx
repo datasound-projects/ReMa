@@ -7,6 +7,7 @@ import {
   checkCareerSearch,
   type CareerSearchStatus,
   type RouteReport,
+  type RuntimeCapabilities,
 } from '../../services/careerSearchService';
 import { backendEvents } from '../../services/events';
 import { toApiError } from '../../services/ipc';
@@ -20,6 +21,29 @@ const HELP =
 
 function when(ms: number): string {
   return new Date(ms).toLocaleString(undefined, { hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'short' });
+}
+
+const RUNTIMES: Record<RuntimeCapabilities['runtime'], string> = {
+  openai_responses: 'OpenAI Responses API',
+  codex_app_server: 'Codex (ChatGPT account)',
+  anthropic_messages: 'Anthropic Messages API',
+  gemini_api: 'Gemini API',
+  unsloth_studio: 'Unsloth Studio',
+  openai_compatible: 'Local or compatible server',
+};
+
+/** One line on what the selected model's runtime can do for search. */
+function describeCapabilities(c: RuntimeCapabilities): string {
+  const parts = [RUNTIMES[c.runtime]];
+  if (c.nativeSearchAvailable) {
+    parts.push(c.nativeDetail ? `own web search (${c.nativeDetail})` : 'own web search');
+    if (c.nativeSearchLive) parts.push('live');
+    if (c.nativeDomainFiltering) parts.push('kept to career sites');
+    if (c.nativeCitations) parts.push('reports its sources');
+  } else {
+    parts.push('ReMa searches for it');
+  }
+  return parts.join(' · ');
 }
 
 function describeReport(r: RouteReport): string {
@@ -65,8 +89,8 @@ export function CareerSearchSection() {
             <HelpTip text={HELP} label="How does ReMa search?" />
           </h2>
           <p className="section__description">
-            ReMa automatically uses available model-native and built-in career search for current jobs and
-            professional research. No API key required.
+            ReMa automatically uses the best available search capability for jobs and professional research.
+            Nothing to set up. No API key required.
           </p>
         </div>
         <StatusIndicator tone="ready" label="Automatic" />
@@ -84,6 +108,9 @@ export function CareerSearchSection() {
                 Selected model: <strong>{status.model}</strong>
                 {status.modelSearch ? ` — with ${status.modelSearch}` : ' — ReMa searches for it'}
               </p>
+            )}
+            {status.capabilities && (
+              <p className="career-search__capabilities">{describeCapabilities(status.capabilities)}</p>
             )}
             <ul className="career-search__routes" aria-label="Search routes">
               {status.routes.map((route) => (

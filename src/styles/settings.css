@@ -582,6 +582,12 @@
   color: var(--color-text-secondary);
 }
 
+.career-search__capabilities {
+  margin: calc(var(--space-2) * -1) 0 0;
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
+}
+
 .career-search__routes,
 .career-search__checks,
 .career-search__recent {

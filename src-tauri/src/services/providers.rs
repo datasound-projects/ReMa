@@ -203,6 +203,8 @@ pub async fn connect(
     // An account sign-in that was running is replaced by the key.
     state.accounts.dismiss(id);
     state.events.providers_changed();
+    // Search is prepared for it at once: no second step (§58).
+    crate::career_search::capabilities::provision(state, id).await;
     provider_view(state, id)
 }
 
@@ -366,6 +368,8 @@ pub async fn save_custom(state: &AppState, input: CustomProviderInput) -> AppRes
     // The server may now be a different one (Unsloth Studio or not).
     state.career.forget_runtimes();
     state.events.providers_changed();
+    // Whether it searches itself is learned in the background (§58).
+    crate::career_search::capabilities::provision_later(state, &id);
     provider_view(state, &id)
 }
 

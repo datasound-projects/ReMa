@@ -10,6 +10,7 @@ use specta::Type;
 use tokio_util::sync::CancellationToken;
 
 use super::{
+    capabilities::{self, RuntimeCapabilities},
     health::{HealthState, SourceHealth},
     RouteReport,
 };
@@ -60,6 +61,9 @@ pub struct CareerSearchStatus {
     pub model: Option<String>,
     /// Its own web search ("Anthropic web search"), if it has one.
     pub model_search: Option<String>,
+    /// What the selected model's runtime can do for search (§6): found
+    /// from the runtime, never from the provider's name alone.
+    pub capabilities: Option<RuntimeCapabilities>,
     pub routes: Vec<RouteState>,
     /// An optional search service set up under Advanced.
     pub extra_service: Option<String>,
@@ -86,16 +90,34 @@ async fn default_model(state: &AppState) -> Option<(String, Endpoint, String)> {
     Some((name, endpoint, model.model_id))
 }
 
-fn model_route(endpoint: Option<&Endpoint>) -> RouteState {
+fn model_route(endpoint: Option<&Endpoint>, caps: Option<&RuntimeCapabilities>) -> RouteState {
     match endpoint {
+        // The provider has one, but the account or organization may not
+        // use it now: ReMa's own search answers instead.
+        Some(e) if native::supported(e) && caps.is_some_and(|c| !c.native_search_available) => {
+            RouteState {
+                name: native::engine_name(e).to_string(),
+                detail: format!(
+                    "Not used right now: {}. ReMa searches for this model with its own sources.",
+                    caps.and_then(|c| c.note.clone())
+                        .unwrap_or_else(|| "not available".into())
+                ),
+                available: false,
+            }
+        }
         Some(e) if native::supported(e) => RouteState {
             name: native::engine_name(e).to_string(),
             detail: if e.kind == ProviderKind::OpenaiCompatible {
                 "The local server's own web search, turned on automatically for career searches."
                     .into()
+            } else if caps.is_some_and(|c| !c.native_search_live) {
+                format!(
+                    "The selected model's own web search ({}).",
+                    caps.and_then(|c| c.note.clone()).unwrap_or_default()
+                )
             } else {
-                "The selected model's own web search, kept to career sites and the place you ask \
-                 about."
+                "The selected model's own web search, live, kept to career sites and the place \
+                 you ask about."
                     .into()
             },
             available: true,
@@ -118,6 +140,12 @@ fn model_route(endpoint: Option<&Endpoint>) -> RouteState {
 /// What Settings shows (no network requests).
 pub async fn status(state: &AppState) -> AppResult<CareerSearchStatus> {
     let default = default_model(state).await;
+    let caps = match &default {
+        Some((_, endpoint, model_id)) => {
+            Some(capabilities::detect(state, endpoint, model_id).await)
+        }
+        None => None,
+    };
     let extra_service = backend::configured(state)
         .await
         .ok()
@@ -143,7 +171,7 @@ pub async fn status(state: &AppState) -> AppResult<CareerSearchStatus> {
                 .into(),
             available: health.state("wikidata") != HealthState::TemporarilyUnavailable,
         },
-        model_route(default.as_ref().map(|(_, e, _)| e)),
+        model_route(default.as_ref().map(|(_, e, _)| e), caps.as_ref()),
     ];
     if let Some(name) = &extra_service {
         routes.push(RouteState {
@@ -159,6 +187,7 @@ pub async fn status(state: &AppState) -> AppResult<CareerSearchStatus> {
             .as_ref()
             .filter(|(_, e, _)| native::supported(e))
             .map(|(_, e, _)| native::engine_name(e).to_string()),
+        capabilities: caps,
         routes,
         extra_service,
         sources: OWN_SOURCES

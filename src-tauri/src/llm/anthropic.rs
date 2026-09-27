@@ -105,35 +105,108 @@ pub fn parse_models(entries: &[Value]) -> Vec<FetchedModel> {
         .collect()
 }
 
-/// Whether the model has the current web tools (`_20260209`, with dynamic
-/// filtering): Claude Opus/Sonnet 4.6 and later, and every 5-series model.
-/// Older models get the basic `web_search_20250305` only.
-fn has_current_web_tools(model_id: &str) -> bool {
+/// Anthropic's web tool versions. One place to update when Anthropic adds
+/// a version (checked against platform.claude.com: web search tool, web
+/// fetch tool, programmatic tool calling; 2026-09-27).
+pub mod web_tool_versions {
+    /// Newest search version: dynamic filtering and response inclusion.
+    pub const SEARCH_CURRENT: &str = "web_search_20260318";
+    /// Newest fetch version (same additions).
+    pub const FETCH_CURRENT: &str = "web_fetch_20260318";
+    /// Basic search, for models without dynamic filtering.
+    pub const SEARCH_BASIC: &str = "web_search_20250305";
+}
+
+/// Which web tools a model gets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WebToolChoice {
+    pub search: &'static str,
+    pub fetch: Option<&'static str>,
+    /// `allowed_callers: ["direct"]`: the model calls search itself rather
+    /// than from code execution. Required for models without programmatic
+    /// tool calling on the dynamic-filtering versions.
+    pub direct: bool,
+}
+
+/// Family, major and minor version of a Claude model id
+/// (`claude-sonnet-4-6`, `claude-opus-4-5-20251101` → minor 5, a dated
+/// snapshot is not a minor version).
+fn model_version(model_id: &str) -> Option<(String, u32, u32)> {
     let id = model_id.to_ascii_lowercase();
-    let Some(rest) = id.strip_prefix("claude-") else {
-        return false;
-    };
+    let rest = id.strip_prefix("claude-")?;
     let mut parts = rest.split(['-', '.', '@']);
-    let family = parts.next().unwrap_or_default();
+    let family = parts.next()?.to_string();
     let major: u32 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
-    // A dated snapshot (`20250929`) is not a minor version.
     let minor: u32 = parts
         .next()
         .filter(|p| p.len() <= 2)
         .and_then(|p| p.parse().ok())
         .unwrap_or(0);
-    match family {
+    Some((family, major, minor))
+}
+
+/// Models told (by a 400) to call web search directly, learned at run time
+/// so the next request is right the first time.
+static DIRECT_ONLY: std::sync::OnceLock<std::sync::Mutex<Vec<String>>> = std::sync::OnceLock::new();
+
+fn learned_direct(model_id: &str) -> bool {
+    DIRECT_ONLY
+        .get()
+        .is_some_and(|m| m.lock().unwrap().iter().any(|id| id == model_id))
+}
+
+/// Remembers that the model needs direct web search; false when it was
+/// already known (the request should not be retried again).
+pub fn learn_direct(model_id: &str) -> bool {
+    let mut known = DIRECT_ONLY.get_or_init(Default::default).lock().unwrap();
+    if known.iter().any(|id| id == model_id) {
+        return false;
+    }
+    known.push(model_id.to_string());
+    true
+}
+
+/// A 400 asking for `allowed_callers` (a model without programmatic tool
+/// calling given a dynamic-filtering web tool).
+pub fn asks_for_direct_callers(error: &AppError) -> bool {
+    matches!(error, AppError::Provider(message)
+        if message.contains("(400)") && message.to_lowercase().contains("allowed_callers"))
+}
+
+/// The web tools for a model. Dynamic filtering (the `_20260209` and
+/// later versions) is available on Claude 4.6 and later and the Mythos
+/// models; every other model gets basic search. Claude Haiku models have
+/// no programmatic tool calling, so they call search directly.
+pub fn web_tool_choice(model_id: &str) -> WebToolChoice {
+    use web_tool_versions::*;
+    let basic = WebToolChoice {
+        search: SEARCH_BASIC,
+        fetch: None,
+        direct: false,
+    };
+    let Some((family, major, minor)) = model_version(model_id) else {
+        return basic;
+    };
+    let dynamic = match family.as_str() {
         "opus" | "sonnet" => major >= 5 || (major == 4 && minor >= 6),
-        "fable" => major >= 5,
-        "haiku" => major >= 5,
+        "fable" | "haiku" => major >= 5,
+        "mythos" => true,
         _ => false,
+    };
+    if !dynamic {
+        return basic;
+    }
+    WebToolChoice {
+        search: SEARCH_CURRENT,
+        fetch: Some(FETCH_CURRENT),
+        direct: family == "haiku" || learned_direct(model_id),
     }
 }
 
 fn web_tools(model_id: &str, web: &WebSearch) -> Vec<Value> {
-    let current = has_current_web_tools(model_id);
+    let choice = web_tool_choice(model_id);
     let mut search = json!({
-        "type": if current { "web_search_20260209" } else { "web_search_20250305" },
+        "type": choice.search,
         "name": "web_search",
         "max_uses": MAX_WEB_USES,
     });
@@ -144,14 +217,23 @@ fn web_tools(model_id: &str, web: &WebSearch) -> Vec<Value> {
     if let Some(location) = &web.location {
         search["user_location"] = location.to_json();
     }
-    if current {
-        vec![
-            search,
-            json!({ "type": "web_fetch_20260209", "name": "web_fetch", "max_uses": MAX_WEB_USES }),
-        ]
-    } else {
-        vec![search]
+    let mut tools = vec![search];
+    if let Some(fetch) = choice.fetch {
+        tools.push(json!({ "type": fetch, "name": "web_fetch", "max_uses": MAX_WEB_USES }));
     }
+    for tool in &mut tools {
+        if choice.direct {
+            tool["allowed_callers"] = json!(["direct"]);
+        }
+        // ReMa verifies a search by its result blocks: keep them all.
+        if tool["type"]
+            .as_str()
+            .is_some_and(|t| t.ends_with("20260318"))
+        {
+            tool["response_inclusion"] = json!("full");
+        }
+    }
+    tools
 }
 
 pub fn request_body(model_id: &str, request: &ChatRequest) -> Value {
@@ -446,6 +528,11 @@ pub fn parse_event(event: &SseEvent, state: &mut StreamState) -> AppResult<Strea
                                     .and_then(Value::as_str)
                                     .unwrap_or(url)
                                     .to_string(),
+                                quote: citation
+                                    .and_then(|c| c.get("cited_text"))
+                                    .and_then(Value::as_str)
+                                    .map(str::to_string),
+                                range: None,
                             })
                             .into_iter()
                             .collect(),
@@ -600,26 +687,38 @@ mod tests {
 
     #[test]
     fn picks_the_web_tool_versions_each_model_has() {
+        // Dynamic filtering: Claude 4.6 and later, the 5-series, Mythos.
         for id in [
+            "claude-opus-5-5",
             "claude-opus-5",
             "claude-fable-5-1",
             "claude-sonnet-5",
             "claude-opus-4-8",
             "claude-opus-4-6",
             "claude-sonnet-4-6",
+            "claude-mythos-5-1",
         ] {
-            assert!(has_current_web_tools(id), "{id}");
+            let choice = web_tool_choice(id);
+            assert_eq!(choice.search, "web_search_20260318", "{id}");
+            assert_eq!(choice.fetch, Some("web_fetch_20260318"), "{id}");
+            assert!(!choice.direct, "{id} has programmatic tool calling");
         }
         for id in [
             "claude-haiku-4-5-20251001",
             "claude-sonnet-4-5",
+            "claude-opus-4-5-20251101",
             "claude-opus-4-1",
             "claude-sonnet-4-20250514",
             "claude-3-7-sonnet-latest",
             "llama3",
         ] {
-            assert!(!has_current_web_tools(id), "{id}");
+            let choice = web_tool_choice(id);
+            assert_eq!(choice.search, "web_search_20250305", "{id}");
+            assert_eq!(choice.fetch, None, "{id}");
         }
+        // A Haiku model with dynamic filtering has no programmatic tool
+        // calling: it calls search directly.
+        assert!(web_tool_choice("claude-haiku-5").direct);
         let request = ChatRequest {
             web: Some(crate::llm::WebSearch::default()),
             ..ChatRequest::default()
@@ -628,6 +727,24 @@ mod tests {
             request_body("claude-haiku-4-5", &request)["tools"],
             json!([{ "type": "web_search_20250305", "name": "web_search", "max_uses": 8 }])
         );
+        assert_eq!(
+            request_body("claude-haiku-5", &request)["tools"][0],
+            json!({
+                "type": "web_search_20260318", "name": "web_search", "max_uses": 8,
+                "allowed_callers": ["direct"], "response_inclusion": "full"
+            })
+        );
+        // A model the API says must call search directly is remembered.
+        let asked = AppError::provider(
+            "Anthropic: tools.0: this model requires `allowed_callers: [\"direct\"]` (400)",
+        );
+        assert!(asks_for_direct_callers(&asked));
+        assert!(!asks_for_direct_callers(&AppError::provider(
+            "Anthropic: web search is not enabled (400)"
+        )));
+        assert!(learn_direct("claude-sonnet-6-test"));
+        assert!(!learn_direct("claude-sonnet-6-test"), "learned once");
+        assert!(web_tool_choice("claude-sonnet-6-test").direct);
 
         // Career searches: the registry's sites and the request's place.
         let request = ChatRequest {
@@ -648,12 +765,19 @@ mod tests {
         assert_eq!(
             tools[0],
             json!({
-                "type": "web_search_20260209", "name": "web_search", "max_uses": 8,
+                "type": "web_search_20260318", "name": "web_search", "max_uses": 8,
                 "allowed_domains": ["karriere.at", "linkedin.com"],
-                "user_location": { "type": "approximate", "city": "Vienna", "country": "AT", "timezone": "Europe/Vienna" }
+                "user_location": { "type": "approximate", "city": "Vienna", "country": "AT", "timezone": "Europe/Vienna" },
+                "response_inclusion": "full"
             })
         );
-        assert_eq!(tools[1]["type"], "web_fetch_20260209");
+        assert_eq!(
+            tools[1],
+            json!({
+                "type": "web_fetch_20260318", "name": "web_fetch", "max_uses": 8,
+                "response_inclusion": "full"
+            })
+        );
         // Without a place in the request, no location is sent.
         let request = ChatRequest {
             web: Some(crate::llm::WebSearch::default()),

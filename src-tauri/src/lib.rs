@@ -167,11 +167,12 @@ pub fn run() {
             scheduler::start(state.clone());
             analytics::enrich::start(state.clone());
             mail_monitor::start(state.clone());
-            // What connected local servers can do (Unsloth Studio's own web
-            // search), learned before the first search needs it.
+            // Career search needs no setup: its parts are checked, an old
+            // search-service setting is moved out of the way, and what the
+            // connected models can do is learned before the first search.
             let startup = state.clone();
             tauri::async_runtime::spawn(async move {
-                career_search::status::detect_capabilities(&startup).await;
+                career_search::bootstrap::run(&startup).await;
             });
             app.manage(state);
             Ok(())

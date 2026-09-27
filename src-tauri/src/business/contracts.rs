@@ -1378,6 +1378,7 @@ mod tests {
             verification: Verification::Posting,
             source: "Example".into(),
             notes: vec![],
+            facts: Default::default(),
         }
     }
 

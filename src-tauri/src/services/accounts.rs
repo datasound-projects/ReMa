@@ -133,7 +133,12 @@ pub async fn start_sign_in(
             SignInOutcome::Failed(message) => Err(message),
         };
         match result {
-            Ok(()) => state.accounts.finish(id, seq),
+            Ok(()) => {
+                state.accounts.finish(id, seq);
+                // The runtime is signed in: its search policy is applied
+                // and checked now, with no further step (§58).
+                crate::career_search::capabilities::provision_later(&state, id);
+            }
             Err(message) => {
                 state.accounts.update(id, seq, |v| {
                     v.status = SignInStatus::Failed;

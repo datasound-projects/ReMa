@@ -12,9 +12,14 @@
 //! credentials in the OS keychain when available, no saved history, and
 //! chat turns on ephemeral threads with every local agent tool turned off
 //! (shell, file edits, apps, plugins, sub-agents), a read-only sandbox in an
-//! empty folder and approvals always declined. Web search is off by
-//! default; a chat turn that asks for it gets Codex's live web search for
-//! that thread only (OpenAI runs the searches; nothing runs locally).
+//! empty folder and approvals always declined.
+//!
+//! Web search: ReMa's runtime searches the live web by default
+//! (`web_search = "live"`, OpenAI runs the searches; nothing runs locally),
+//! so the user never turns it on. Every thread states its own mode: a turn
+//! that searches gets the best mode the account may use, with the career
+//! sites and the place of the request (`tools.web_search`); ReMa's own
+//! extraction requests and answers about the user's mail get `disabled`.
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -67,7 +72,9 @@ const SETTINGS: &[&str] = &[
     r#"forced_login_method="chatgpt""#,
     r#"history.persistence="none""#,
     "check_for_update_on_startup=false",
-    r#"web_search="disabled""#,
+    // ReMa's sessions default to live web search (§17 of the career search
+    // specification); each thread still states its own mode.
+    r#"web_search="live""#,
     r#"sandbox_mode="read-only""#,
     r#"approval_policy="never""#,
     "agents.enabled=false",
@@ -262,6 +269,14 @@ impl CodexRuntime {
         Ok(parse_models(&models))
     }
 
+    /// The web search mode this account may use (`live`, `indexed`,
+    /// `cached`), or why it may not search. Reads the runtime's metadata;
+    /// no search runs.
+    pub async fn web_search_policy(&self) -> AppResult<Result<&'static str, String>> {
+        let conn = self.connection().await?;
+        Ok(web_search_mode(&conn).await)
+    }
+
     /// Runs one chat turn on a fresh ephemeral thread: ReMa's system prompt
     /// replaces Codex's instructions, earlier turns are added as history and
     /// the answer streams back.
@@ -288,10 +303,39 @@ impl CodexRuntime {
             "approvalPolicy": "never",
             "model": model_id,
         });
-        // MCP tools the user selected, offered as dynamic tools: Codex asks
-        // ReMa to run them (`item/tool/call`).
-        let tools: Vec<Value> = request
-            .tool_specs()
+        // Every thread states its web search mode: live results unless the
+        // account's workspace allows only cached ones; off for requests that
+        // must not search (ReMa's extraction, answers about the user's mail).
+        // A workspace without web search gets ReMa's career tools instead.
+        let mut tool_box = request.tools.as_ref();
+        let mode = match &request.web {
+            None => "disabled",
+            Some(web) => match web_search_mode(&conn).await {
+                Ok(mode) => mode,
+                Err(reason) => {
+                    if let Some(observer) = &web.observer {
+                        observer.observe(WebEvent::Unavailable {
+                            reason: reason.clone(),
+                        });
+                    }
+                    if web.required {
+                        return Err(AppError::provider(format!(
+                            "ChatGPT web search is not available: {reason}"
+                        )));
+                    }
+                    if let Some(fallback) = &web.fallback {
+                        tool_box = Some(fallback);
+                    }
+                    "disabled"
+                }
+            },
+        };
+        params["config"] = thread_config(mode, request.web.as_ref());
+        // Tools ReMa runs (the user's MCP tools, ReMa's career tools),
+        // offered as dynamic tools: Codex asks ReMa to run them
+        // (`item/tool/call`).
+        let tools: Vec<Value> = tool_box
+            .map_or(&[][..], |t| t.specs.as_slice())
             .iter()
             .map(|tool| {
                 json!({
@@ -305,25 +349,6 @@ impl CodexRuntime {
         if !tools.is_empty() {
             params["dynamicTools"] = json!(tools);
         }
-        if let Some(web) = &request.web {
-            // OpenAI's web search, for this thread only: live results unless
-            // the account's workspace allows only cached ones.
-            match web_search_mode(&conn).await {
-                Ok(mode) => params["config"] = json!({ "web_search": mode }),
-                Err(reason) => {
-                    if let Some(observer) = &web.observer {
-                        observer.observe(WebEvent::Unavailable {
-                            reason: reason.clone(),
-                        });
-                    }
-                    if web.required {
-                        return Err(AppError::provider(format!(
-                            "ChatGPT web search is not available: {reason}"
-                        )));
-                    }
-                }
-            }
-        }
         let started = conn.request("thread/start", params).await?;
         let thread_id = started
             .pointer("/thread/id")
@@ -331,7 +356,7 @@ impl CodexRuntime {
             .ok_or_else(|| AppError::provider("Codex did not start a conversation"))?
             .to_string();
         let mut route = conn.subscribe(format!("thread:{thread_id}"));
-        let executor = request.tools.as_ref().map(|t| t.executor.clone());
+        let executor = tool_box.map(|t| t.executor.clone());
         let result = run_turn(
             &conn,
             &mut route,
@@ -538,6 +563,50 @@ async fn web_search_mode(conn: &Connection) -> Result<&'static str, String> {
     }
 }
 
+/// A thread's configuration: its web search mode and, when it searches, the
+/// sites and the place to search (Codex's `tools.web_search`, sent to
+/// OpenAI as `filters.allowed_domains` and `user_location`). A `tools` table
+/// replaces the runtime's, so the setting ReMa keeps there is stated again.
+/// Codex rejects empty values here, so only known fields are sent.
+fn thread_config(mode: &str, web: Option<&WebSearch>) -> Value {
+    let mut config = json!({ "web_search": mode });
+    let Some(web) = web.filter(|_| mode != "disabled") else {
+        return config;
+    };
+    let mut search = serde_json::Map::new();
+    if !web.allowed_domains.is_empty() {
+        let domains: Vec<&String> = web
+            .allowed_domains
+            .iter()
+            .take(crate::llm::OPENAI_MAX_DOMAINS)
+            .collect();
+        search.insert("allowed_domains".into(), json!(domains));
+    }
+    if let Some(location) = &web.location {
+        let mut place = serde_json::Map::new();
+        for (key, value) in [
+            ("country", &location.country),
+            ("region", &location.region),
+            ("city", &location.city),
+            ("timezone", &location.timezone),
+        ] {
+            if let Some(value) = value.as_deref().filter(|v| !v.is_empty()) {
+                place.insert(key.into(), json!(value));
+            }
+        }
+        if !place.is_empty() {
+            search.insert("location".into(), Value::Object(place));
+        }
+    }
+    if !search.is_empty() {
+        config["tools"] = json!({
+            "web_search": search,
+            "experimental_request_user_input": { "enabled": false },
+        });
+    }
+    config
+}
+
 /// A Codex `webSearch` item as web activity.
 fn web_search_event(item: &Value, finished: bool) -> WebEvent {
     let id = item
@@ -552,19 +621,26 @@ fn web_search_event(item: &Value, finished: bool) -> WebEvent {
             action
                 .get("url")
                 .and_then(Value::as_str)
-                .unwrap_or_default(),
+                .unwrap_or_default()
+                .to_string(),
         ),
+        // `query` is the older field; `queries` lists every query run.
         _ => (
             WebKind::Search,
             action
                 .get("query")
                 .and_then(Value::as_str)
                 .filter(|q| !q.is_empty())
-                .or_else(|| item.get("query").and_then(Value::as_str))
+                .map(str::to_string)
+                .or_else(|| crate::llm::joined_queries(action))
+                .or_else(|| {
+                    item.get("query")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
                 .unwrap_or_default(),
         ),
     };
-    let target = target.to_string();
     if !finished {
         return WebEvent::Started { id, kind, target };
     }
@@ -1637,7 +1713,8 @@ mod tests {
             if target == "https://jobs.example.com/1")
         );
 
-        // Without web search the thread keeps the runtime's default (off).
+        // A request that must not search (extraction, the user's mail) turns
+        // the runtime's live default off for its thread.
         let (runtime, requests, _) = runtime_with_turn();
         runtime
             .stream_chat(
@@ -1650,7 +1727,78 @@ mod tests {
             .unwrap();
         let log = requests.lock().unwrap().clone();
         let thread = log.iter().find(|m| m["method"] == "thread/start").unwrap();
-        assert!(thread["params"].get("config").is_none());
+        assert_eq!(
+            thread["params"]["config"],
+            json!({ "web_search": "disabled" })
+        );
+    }
+
+    #[test]
+    fn the_runtime_searches_live_by_default() {
+        assert!(SETTINGS.contains(&r#"web_search="live""#));
+        assert!(!SETTINGS
+            .iter()
+            .any(|s| s.contains(r#"web_search="disabled""#)));
+    }
+
+    #[test]
+    fn a_searching_thread_gets_the_career_sites_and_the_place() {
+        let web = WebSearch {
+            required: true,
+            allowed_domains: vec!["karriere.at".into(), "greenhouse.io".into()],
+            location: Some(crate::llm::ApproxLocation {
+                city: Some("Vienna".into()),
+                region: None,
+                country: Some("AT".into()),
+                timezone: Some("Europe/Vienna".into()),
+            }),
+            ..WebSearch::default()
+        };
+        // Checked against Codex 0.157.1: `tools.web_search` becomes OpenAI's
+        // `filters.allowed_domains` and `user_location`; empty values are
+        // rejected, and a `tools` table replaces the runtime's.
+        assert_eq!(
+            thread_config("live", Some(&web)),
+            json!({
+                "web_search": "live",
+                "tools": {
+                    "web_search": {
+                        "allowed_domains": ["karriere.at", "greenhouse.io"],
+                        "location": { "country": "AT", "city": "Vienna", "timezone": "Europe/Vienna" }
+                    },
+                    "experimental_request_user_input": { "enabled": false }
+                }
+            })
+        );
+        // No sites and no place: only the mode.
+        assert_eq!(
+            thread_config("cached", Some(&WebSearch::default())),
+            json!({ "web_search": "cached" })
+        );
+        // A thread that may not search gets nothing else.
+        assert_eq!(
+            thread_config("disabled", Some(&web)),
+            json!({ "web_search": "disabled" })
+        );
+        assert_eq!(
+            thread_config("disabled", None),
+            json!({ "web_search": "disabled" })
+        );
+    }
+
+    #[test]
+    fn reads_every_query_of_a_codex_search() {
+        let event = web_search_event(
+            &json!({ "type": "webSearch", "id": "ws1", "query": "",
+                     "action": { "type": "search", "query": null,
+                                 "queries": ["AI Engineer Wien", "KI Jobs Wien"] },
+                     "results": null }),
+            true,
+        );
+        assert!(
+            matches!(event, WebEvent::Finished { target, kind: WebKind::Search, .. }
+            if target == "AI Engineer Wien; KI Jobs Wien")
+        );
     }
 
     #[tokio::test]

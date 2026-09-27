@@ -79,7 +79,12 @@ pub fn request_body(model_id: &str, request: &ChatRequest) -> Value {
         // Live results, not only OpenAI's cached index.
         let mut tool = json!({ "type": "web_search", "external_web_access": true });
         if !web.allowed_domains.is_empty() {
-            tool["filters"] = json!({ "allowed_domains": web.allowed_domains });
+            let domains: Vec<&String> = web
+                .allowed_domains
+                .iter()
+                .take(super::OPENAI_MAX_DOMAINS)
+                .collect();
+            tool["filters"] = json!({ "allowed_domains": domains });
         }
         if let Some(location) = &web.location {
             tool["user_location"] = location.to_json();
@@ -97,7 +102,7 @@ pub fn request_body(model_id: &str, request: &ChatRequest) -> Value {
     body
 }
 
-/// A `url_citation` annotation on the answer text.
+/// A `url_citation` annotation on the answer text, with the span it cites.
 fn citation(annotation: &Value) -> Option<WebEvent> {
     if annotation.get("type").and_then(Value::as_str) != Some("url_citation") {
         return None;
@@ -108,7 +113,19 @@ fn citation(annotation: &Value) -> Option<WebEvent> {
         .and_then(Value::as_str)
         .unwrap_or(&url)
         .to_string();
-    Some(WebEvent::Cited { url, title })
+    let index = |key: &str| {
+        annotation
+            .get(key)
+            .and_then(Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+    };
+    let range = index("start_index").zip(index("end_index"));
+    Some(WebEvent::Cited {
+        url,
+        title,
+        quote: None,
+        range,
+    })
 }
 
 /// Arguments as the JSON text the API expects.
@@ -143,15 +160,23 @@ fn web_search(item: &Value, finished: bool) -> WebEvent {
         Some("open_page" | "find_in_page") => WebKind::Page,
         _ => WebKind::Search,
     };
-    let target = action
-        .get(if kind == WebKind::Page {
-            "url"
-        } else {
-            "query"
-        })
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
+    // A page's address, or the queries of a search (`queries`; the single
+    // `query` is the older field).
+    let target = if kind == WebKind::Page {
+        action
+            .get("url")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    } else {
+        action
+            .get("query")
+            .and_then(Value::as_str)
+            .filter(|q| !q.is_empty())
+            .map(str::to_string)
+            .or_else(|| super::joined_queries(action))
+            .unwrap_or_default()
+    };
     if !finished {
         return WebEvent::Started { id, kind, target };
     }
@@ -176,8 +201,11 @@ fn web_search(item: &Value, finished: bool) -> WebEvent {
             url: target.clone(),
         });
     }
-    let error = (item.get("status").and_then(Value::as_str) == Some("failed"))
-        .then(|| "The search failed.".to_string());
+    let error = match item.get("status").and_then(Value::as_str) {
+        Some("failed") => Some("The search failed.".to_string()),
+        Some("incomplete") => Some("The search did not finish.".to_string()),
+        _ => None,
+    };
     WebEvent::Finished {
         id,
         kind,
@@ -371,6 +399,18 @@ mod tests {
             })
         );
         assert_eq!(body["tool_choice"], "required");
+
+        // OpenAI accepts at most 100 sites.
+        request.web = Some(WebSearch {
+            allowed_domains: (0..130).map(|i| format!("site{i}.example")).collect(),
+            ..WebSearch::default()
+        });
+        let body = request_body("gpt-6", &request);
+        let domains = body["tools"][0]["filters"]["allowed_domains"]
+            .as_array()
+            .unwrap();
+        assert_eq!(domains.len(), crate::llm::OPENAI_MAX_DOMAINS);
+        assert_eq!(domains[0], "site0.example");
     }
 
     #[test]
@@ -382,8 +422,28 @@ mod tests {
             piece.web,
             vec![WebEvent::Cited {
                 url: "https://jobs.example.com/1".into(),
-                title: "AI Engineer".into()
+                title: "AI Engineer".into(),
+                quote: None,
+                range: Some((0, 5)),
             }]
+        );
+    }
+
+    #[test]
+    fn reads_the_queries_of_a_search_and_its_outcome() {
+        let done = parse(
+            r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"web_search_call","id":"ws_2","status":"completed","action":{"type":"search","queries":["AI Engineer Wien","KI Ingenieur Wien"],"sources":[{"type":"url","url":"https://example.at/1"}]}}}"#,
+        );
+        assert!(
+            matches!(&done.web[0], WebEvent::Finished { target, error: None, .. }
+            if target == "AI Engineer Wien; KI Ingenieur Wien")
+        );
+        let cut = parse(
+            r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"web_search_call","id":"ws_3","status":"incomplete","action":{"type":"search","queries":["x"]}}}"#,
+        );
+        assert!(
+            matches!(&cut.web[0], WebEvent::Finished { error: Some(e), .. }
+            if e.contains("did not finish"))
         );
     }
 

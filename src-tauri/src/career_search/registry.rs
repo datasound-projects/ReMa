@@ -26,6 +26,8 @@ pub enum SourceType {
     CompanyInfo,
     /// Salary and market data.
     Market,
+    /// A marketplace for freelance and contract work.
+    Marketplace,
 }
 
 #[derive(Debug)]
@@ -43,8 +45,20 @@ pub struct CareerSource {
     pub company: bool,
     pub people: bool,
     pub market: bool,
+    /// Freelance and contract work (§41 CONTRACTS).
+    pub contracts: bool,
     /// The employer's own system (an ATS page is the employer's posting).
     pub official: bool,
+    /// Used by searches; a source can be switched off here without
+    /// deleting it.
+    pub enabled: bool,
+}
+
+impl CareerSource {
+    /// An applicant tracking system (the employer's own postings).
+    pub const fn ats(&self) -> bool {
+        matches!(self.kind, SourceType::Ats)
+    }
 }
 
 const DACH: &[&str] = &["AT", "DE", "CH"];
@@ -53,6 +67,12 @@ macro_rules! source {
     ($id:literal, $name:literal, [$($d:literal),+], $kind:ident, $regions:expr, $prio:literal,
      jobs: $jobs:literal, company: $company:literal, people: $people:literal,
      market: $market:literal, official: $official:literal) => {
+        source!($id, $name, [$($d),+], $kind, $regions, $prio, jobs: $jobs, company: $company,
+            people: $people, market: $market, contracts: false, official: $official)
+    };
+    ($id:literal, $name:literal, [$($d:literal),+], $kind:ident, $regions:expr, $prio:literal,
+     jobs: $jobs:literal, company: $company:literal, people: $people:literal,
+     market: $market:literal, contracts: $contracts:literal, official: $official:literal) => {
         CareerSource {
             id: $id,
             name: $name,
@@ -64,7 +84,9 @@ macro_rules! source {
             company: $company,
             people: $people,
             market: $market,
+            contracts: $contracts,
             official: $official,
+            enabled: true,
         }
     };
 }
@@ -101,12 +123,12 @@ pub const SOURCES: &[CareerSource] = &[
         jobs: true, company: false, people: false, market: false, official: true),
     // Professional networks.
     source!("linkedin", "LinkedIn", ["linkedin.com"], Network, &[], 0,
-        jobs: true, company: true, people: true, market: false, official: false),
+        jobs: true, company: true, people: true, market: false, contracts: true, official: false),
     source!("xing", "XING", ["xing.com"], Network, DACH, 0,
-        jobs: true, company: true, people: true, market: false, official: false),
+        jobs: true, company: true, people: true, market: false, contracts: true, official: false),
     // Job boards.
     source!("indeed", "Indeed", ["indeed.com"], JobBoard, &[], 1,
-        jobs: true, company: false, people: false, market: true, official: false),
+        jobs: true, company: false, people: false, market: true, contracts: true, official: false),
     source!("karriere_at", "karriere.at", ["karriere.at"], JobBoard, &["AT"], 0,
         jobs: true, company: false, people: false, market: false, official: false),
     source!("jobs_at", "jobs.at", ["jobs.at"], JobBoard, &["AT"], 1,
@@ -121,6 +143,17 @@ pub const SOURCES: &[CareerSource] = &[
         jobs: true, company: false, people: false, market: false, official: false),
     source!("welcome_to_the_jungle", "Welcome to the Jungle", ["welcometothejungle.com"], JobBoard, &["FR", "ES", "CZ"], 1,
         jobs: true, company: true, people: false, market: false, official: false),
+    // Freelance and contract work.
+    source!("freelancermap", "freelancermap", ["freelancermap.de", "freelancermap.at", "freelancermap.ch"], Marketplace, DACH, 0,
+        jobs: false, company: false, people: false, market: false, contracts: true, official: false),
+    source!("freelance_de", "freelance.de", ["freelance.de"], Marketplace, DACH, 0,
+        jobs: false, company: false, people: false, market: false, contracts: true, official: false),
+    source!("gulp", "GULP", ["gulp.de"], Marketplace, DACH, 1,
+        jobs: false, company: false, people: false, market: false, contracts: true, official: false),
+    source!("malt", "Malt", ["malt.de", "malt.at", "malt.com", "malt.fr"], Marketplace, &[], 1,
+        jobs: false, company: false, people: false, market: false, contracts: true, official: false),
+    source!("upwork", "Upwork", ["upwork.com"], Marketplace, &[], 2,
+        jobs: false, company: false, people: false, market: false, contracts: true, official: false),
     // Company facts and the market.
     source!("crunchbase", "Crunchbase", ["crunchbase.com"], CompanyInfo, &[], 1,
         jobs: false, company: true, people: false, market: false, official: false),
@@ -141,7 +174,8 @@ fn relevant(source: &CareerSource, scopes: Scopes, country: Option<&str>) -> boo
     let in_scope = (scopes.jobs && source.jobs)
         || (scopes.company && source.company)
         || (scopes.people && source.people)
-        || (scopes.market && source.market);
+        || (scopes.market && source.market)
+        || (scopes.contracts && source.contracts);
     // Without a country, regional sources are left out.
     let in_region =
         source.regions.is_empty() || country.is_some_and(|c| source.regions.contains(&c));
@@ -168,9 +202,17 @@ pub fn allowed_domains(scopes: Scopes, country: Option<&str>, companies: &[Strin
     }
     let mut sources: Vec<&CareerSource> = SOURCES
         .iter()
-        .filter(|s| relevant(s, scopes, country))
+        .filter(|s| s.enabled && relevant(s, scopes, country))
         .collect();
-    sources.sort_by_key(|s| (s.regions.is_empty(), s.priority));
+    // Contract requests: the marketplaces first, then the other sources
+    // that carry contract work.
+    let contract_rank = |s: &CareerSource| match (scopes.contracts, s.kind, s.contracts) {
+        (false, ..) => 0,
+        (true, SourceType::Marketplace, _) => 0,
+        (true, _, true) => 1,
+        _ => 2,
+    };
+    sources.sort_by_key(|s| (contract_rank(s), s.regions.is_empty(), s.priority));
     for source in sources {
         for domain in source.domains {
             push(domain);
@@ -267,6 +309,55 @@ mod tests {
             "regional without a country"
         );
         assert!(allowed_domains(Scopes::default(), Some("AT"), &[]).is_empty());
+    }
+
+    #[test]
+    fn contract_requests_search_the_marketplaces_first() {
+        let domains = allowed_domains(
+            Scopes {
+                jobs: true,
+                contracts: true,
+                ..Scopes::default()
+            },
+            Some("AT"),
+            &[],
+        );
+        assert_eq!(
+            &domains[..3],
+            ["freelancermap.de", "freelancermap.at", "freelancermap.ch"]
+        );
+        assert!(domains.contains(&"freelance.de".to_string()));
+        assert!(domains.contains(&"karriere.at".to_string()), "jobs too");
+        // Jobs alone: no marketplaces.
+        let jobs = allowed_domains(jobs(), Some("AT"), &[]);
+        assert!(!jobs.contains(&"freelancermap.de".to_string()));
+    }
+
+    #[test]
+    fn every_source_is_well_formed_and_enabled() {
+        let mut ids: Vec<&str> = SOURCES.iter().map(|s| s.id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), SOURCES.len(), "ids are unique");
+        for source in SOURCES {
+            assert!(source.enabled, "{}", source.id);
+            assert!(
+                source.jobs || source.company || source.people || source.market || source.contracts,
+                "{} serves a scope",
+                source.id
+            );
+            assert_eq!(source.ats(), source.kind == SourceType::Ats);
+            for domain in source.domains {
+                assert!(
+                    !domain.contains('/') && !domain.starts_with("www."),
+                    "{domain}"
+                );
+            }
+        }
+        assert!(SOURCES.iter().any(|s| s.id == "workday" && s.ats()));
+        for ats in ["successfactors", "taleo", "icims", "teamtailor"] {
+            assert!(SOURCES.iter().any(|s| s.id == ats), "{ats}");
+        }
     }
 
     #[test]

@@ -26,7 +26,9 @@ pub enum Requirement {
     Required,
 }
 
-/// What a request searches for (several can apply).
+/// What a request searches for (several can apply, §41): JOBS, COMPANIES,
+/// PEOPLE, CONTRACTS, MARKET. Contract and freelance work also searches
+/// jobs (the Jobs MCP lists both).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct Scopes {
@@ -34,11 +36,12 @@ pub struct Scopes {
     pub company: bool,
     pub people: bool,
     pub market: bool,
+    pub contracts: bool,
 }
 
 impl Scopes {
     pub fn any(self) -> bool {
-        self.jobs || self.company || self.people || self.market
+        self.jobs || self.company || self.people || self.market || self.contracts
     }
 
     /// "Jobs", "Company, People".
@@ -48,6 +51,7 @@ impl Scopes {
             (self.jobs, "Jobs"),
             (self.company, "Company"),
             (self.people, "People"),
+            (self.contracts, "Contracts"),
             (self.market, "Market"),
         ] {
             if on {
@@ -155,7 +159,9 @@ pub fn classify(text: &str) -> Classified {
     let job_search = retrieval::detect(text).is_some();
     let asks = search_verb().is_match(text);
     let current = current_cue().is_match(text);
-    scopes.jobs = job_search || (contract_noun().is_match(text) && (asks || current));
+    let contracts = contract_noun().is_match(text) && (asks || current || job_search);
+    scopes.contracts = contracts;
+    scopes.jobs = job_search || contracts;
     scopes.company = company_cue().is_match(text);
     scopes.people = people_cue().is_match(text);
     scopes.market = market_cue().is_match(text);
@@ -254,13 +260,21 @@ mod tests {
             )
             .people
         );
-        assert!(
-            check(
-                "Find short-term AI contracts in Austria.",
-                Requirement::Required
-            )
-            .jobs
+        let contracts = check(
+            "Find short-term AI contracts in Austria.",
+            Requirement::Required,
         );
+        assert!(contracts.jobs && contracts.contracts);
+        assert_eq!(contracts.names(), ["Jobs", "Contracts"]);
+        assert!(check("Find B2B AI contracts in Austria.", Requirement::Required).contracts);
+        // Scopes combine (§41).
+        let combined = check(
+            "Find Vienna fintech companies hiring AI Engineers and find the relevant recruiting \
+             contact.",
+            Requirement::Required,
+        );
+        assert!(combined.company && combined.jobs && combined.people);
+        assert!(!check("Find AI Engineer jobs in Vienna.", Requirement::Required).contracts);
         assert!(check("Find current salary ranges.", Requirement::Required).market);
         let building = check(
             "Find companies currently building AI teams.",

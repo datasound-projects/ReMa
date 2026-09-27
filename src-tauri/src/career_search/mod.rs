@@ -26,7 +26,13 @@
 //! instructions: they reach models only as delimited data, and nothing in
 //! them can call tools, read credentials or change settings.
 
+pub mod bootstrap;
+pub mod capabilities;
+pub mod citations;
 pub mod company;
+pub mod discovery;
+pub mod evidence;
+pub mod extract;
 pub mod health;
 pub mod jobs;
 pub mod plan;
@@ -96,6 +102,12 @@ pub struct CareerSearch {
     companies: Mutex<HashMap<String, (Instant, Option<company::Company>)>>,
     boards: Mutex<HashMap<String, (Instant, Vec<company::Board>)>>,
     reports: Mutex<VecDeque<RouteReport>>,
+    /// Providers that refused their own web search (an organization or
+    /// workspace turned it off), by provider key, with the reason.
+    refusals: Mutex<HashMap<String, (Instant, String)>>,
+    /// Where the no-key discovery provider is reached (a local stand-in in
+    /// tests; its public address otherwise).
+    discovery_base: std::sync::OnceLock<String>,
 }
 
 impl CareerSearch {
@@ -159,6 +171,46 @@ impl CareerSearch {
             .lock()
             .unwrap()
             .insert(key.to_string(), (Instant::now(), boards.to_vec()));
+    }
+
+    /// What a provider's own search just did: a refusal is remembered for
+    /// a while (the next requests use ReMa's search straight away); a
+    /// search that ran clears it.
+    pub fn note_native(&self, key: &str, outcome: Result<(), &str>) {
+        let mut refusals = self.refusals.lock().unwrap();
+        match outcome {
+            Ok(()) => {
+                refusals.remove(key);
+            }
+            Err(reason) if capabilities::is_refusal(reason) => {
+                refusals.insert(key.to_string(), (Instant::now(), reason.to_string()));
+            }
+            Err(_) => {}
+        }
+    }
+
+    /// Why a provider refused its own search recently, if it did.
+    pub fn refusal(&self, key: &str) -> Option<String> {
+        self.refusals
+            .lock()
+            .unwrap()
+            .get(key)
+            .filter(|(at, _)| at.elapsed() < capabilities::REFUSAL_TTL)
+            .map(|(_, reason)| reason.clone())
+    }
+
+    /// ReMa's no-key discovery provider.
+    pub fn duckduckgo(&self) -> discovery::DuckDuckGo {
+        match self.discovery_base.get() {
+            Some(base) => discovery::DuckDuckGo::with_base(base.clone()),
+            None => discovery::DuckDuckGo::default(),
+        }
+    }
+
+    /// Points discovery at a local stand-in (tests).
+    #[cfg(test)]
+    pub fn use_discovery_base(&self, base: &str) {
+        let _ = self.discovery_base.set(base.to_string());
     }
 
     /// Keeps a route report for diagnostics (newest last, bounded).

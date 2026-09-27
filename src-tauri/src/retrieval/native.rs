@@ -307,7 +307,7 @@ pub fn candidates(text: &str, events: &[WebEvent]) -> Vec<Candidate> {
                 target,
                 ..
             } => remember(target, ""),
-            WebEvent::Cited { url, title } => remember(url, title),
+            WebEvent::Cited { url, title, .. } => remember(url, title),
             _ => {}
         }
     }
@@ -384,6 +384,8 @@ pub async fn search(
                 required: true,
                 allowed_domains: hints.allowed_domains.clone(),
                 location: hints.location.clone(),
+                // ReMa's router falls back itself.
+                fallback: None,
             }),
             ..ChatRequest::default()
         };
@@ -510,7 +512,7 @@ pub fn reported_pages(events: &[WebEvent]) -> HashMap<String, String> {
                     reported.entry(key).or_default();
                 }
             }
-            WebEvent::Cited { url, title } => {
+            WebEvent::Cited { url, title, .. } => {
                 if let Some(key) = normalize::canonical_url(url) {
                     reported.entry(key).or_insert_with(|| title.clone());
                 }
@@ -620,6 +622,8 @@ pub async fn structured(
                 required: true,
                 allowed_domains: hints.allowed_domains.clone(),
                 location: hints.location.clone(),
+                // ReMa's router falls back itself.
+                fallback: None,
             }),
             ..ChatRequest::default()
         };
@@ -689,6 +693,8 @@ pub async fn research(
                 required: true,
                 allowed_domains: hints.allowed_domains.clone(),
                 location: hints.location.clone(),
+                // ReMa's router falls back itself.
+                fallback: None,
             }),
             ..ChatRequest::default()
         };
@@ -717,10 +723,12 @@ pub async fn research(
             ));
         }
         let lists_sources = endpoint.connection != ConnectionMethod::ChatgptAccount;
-        return Ok((
-            findings(&text, &events, company_domains, lists_sources),
-            searches,
-        ));
+        let mut found = findings(&text, &events, company_domains, lists_sources);
+        // Each source says which route found it (its citation's provider).
+        for finding in &mut found {
+            finding.via = engine.to_string();
+        }
+        return Ok((found, searches));
     }
     Err(format!("{engine}: no search ran"))
 }
@@ -808,6 +816,8 @@ mod tests {
             WebEvent::Cited {
                 url: "https://jobs.donau.example/ml-7302".into(),
                 title: "ML Engineer".into(),
+                quote: None,
+                range: None,
             },
         ];
         let text = "```json\n{\"postings\":[{\"title\":\"AI Engineer\",\"company\":\"Nordlicht\",\"location\":\"Vienna\",\"url\":\"https://careers.nordlicht.example/jobs/ai-engineer-4411\",\"posted\":\"3 days ago\",\"salary\":\"\",\"summary\":\"Build LLM features.\"},{\"title\":\"Invented\",\"url\":\"https://nowhere.example/job/1\"},{\"title\":\"No link\"}]}\n```";

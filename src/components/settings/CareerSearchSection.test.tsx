@@ -29,6 +29,19 @@ const status: CareerSearchStatus = {
   automatic: true,
   model: 'Qwen 3 (local)',
   modelSearch: null,
+  capabilities: {
+    provider: 'OpenAI-Compatible',
+    authMode: 'local_server',
+    runtime: 'openai_compatible',
+    inferenceAvailable: true,
+    nativeSearchAvailable: false,
+    nativeSearchLive: false,
+    nativeDomainFiltering: false,
+    nativeCitations: false,
+    remaSearchAvailable: true,
+    nativeDetail: null,
+    note: 'no web search of its own; ReMa searches for it',
+  },
   routes: [
     { name: 'ReMa job sources', detail: 'Employers’ own job boards and public job boards. No key needed.', available: true },
     { name: 'Company and people research', detail: 'Wikidata, Wikipedia and company websites.', available: true },
@@ -68,8 +81,36 @@ describe('Settings → Career Search', () => {
     expect(within(routes).getByText('ReMa job sources')).toBeTruthy();
     expect(within(routes).getByText(/ReMa searches for it/)).toBeTruthy();
     expect(screen.getByText(/Selected model:/).textContent).toContain('Qwen 3 (local) — ReMa searches for it');
+    expect(screen.getByText('Local or compatible server · ReMa searches for it')).toBeTruthy();
     // Nothing asks the user to set up a search service.
     expect(document.body.textContent).not.toMatch(/configure|set up a search/i);
+  });
+
+  it('shows what the selected model’s runtime can do, not a setting', async () => {
+    mocks.careerSearchStatus.mockResolvedValue({
+      ...status,
+      model: 'Claude Sonnet 5',
+      modelSearch: 'Anthropic web search',
+      capabilities: {
+        ...status.capabilities!,
+        provider: 'Anthropic',
+        authMode: 'api_key',
+        runtime: 'anthropic_messages',
+        nativeSearchAvailable: true,
+        nativeSearchLive: true,
+        nativeDomainFiltering: true,
+        nativeCitations: true,
+        nativeDetail: 'web_search_20260318',
+        note: null,
+      },
+    });
+    render(<CareerSearchSection />);
+    expect(
+      await screen.findByText(
+        'Anthropic Messages API · own web search (web_search_20260318) · live · kept to career sites · reports its sources',
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByRole('checkbox')).toBeNull();
   });
 
   it('checks the sources on demand and shows recent searches', async () => {

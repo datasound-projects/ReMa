@@ -549,7 +549,7 @@ fn sections(page: &Page) -> Vec<(String, Vec<String>, Vec<String>)> {
         match block.kind {
             Kind::Heading(_) => out.push((block.text.to_lowercase(), vec![], vec![])),
             Kind::Item => out.last_mut().unwrap().1.push(block.text.clone()),
-            Kind::Text => out.last_mut().unwrap().2.push(block.text.clone()),
+            Kind::Text | Kind::Row => out.last_mut().unwrap().2.push(block.text.clone()),
         }
     }
     out

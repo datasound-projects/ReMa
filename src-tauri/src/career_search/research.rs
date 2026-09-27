@@ -69,7 +69,9 @@ impl SourceKind {
         }
         match registry::source_of(url).map(|s| s.kind) {
             Some(registry::SourceType::Ats) => Self::Official,
-            Some(registry::SourceType::JobBoard) => Self::JobPosting,
+            Some(registry::SourceType::JobBoard | registry::SourceType::Marketplace) => {
+                Self::JobPosting
+            }
             Some(registry::SourceType::Network) => Self::Professional,
             Some(registry::SourceType::CompanyInfo) => Self::Reference,
             Some(registry::SourceType::Market) => Self::Market,
@@ -96,6 +98,9 @@ pub struct Finding {
     /// ReMa read the page or its API itself, or a search engine reported
     /// it (not only a model's summary).
     pub checked: bool,
+    /// The route that found it ("Anthropic web search"); empty for ReMa's
+    /// own sources.
+    pub via: String,
 }
 
 impl Finding {
@@ -126,6 +131,7 @@ impl Finding {
                 SourceKind::Web => 40,
             },
             checked: true,
+            via: String::new(),
         })
     }
 }
@@ -146,6 +152,23 @@ pub fn redact(text: &str) -> String {
     re(&PHONE, r"\+\d{1,3}(?:[\s./-]?\(?\d{1,5}\)?){2,}")
         .replace_all(&text, "[phone left out]")
         .into_owned()
+}
+
+/// What may go to an outside search provider (§65): the words of the
+/// query only — no addresses, contact details, long numbers or line breaks,
+/// at most 120 characters.
+pub fn search_query(text: &str) -> String {
+    static URL: OnceLock<Regex> = OnceLock::new();
+    static NUMBER: OnceLock<Regex> = OnceLock::new();
+    let text = redact(text)
+        .replace("[email left out]", " ")
+        .replace("[phone left out]", " ");
+    let text = re(&URL, r"(?i)\b(?:https?://|www\.)\S+").replace_all(&text, " ");
+    // Account, IBAN or phone-like runs of digits (dates, years and
+    // salaries stay).
+    let text = re(&NUMBER, r"\d[\d\s./-]{10,}\d").replace_all(&text, " ");
+    let words: Vec<&str> = text.split_whitespace().collect();
+    extract::clip(&words.join(" "), 120)
 }
 
 /// Everything found for one request.
@@ -254,6 +277,9 @@ pub async fn own(
 ) -> OwnFindings {
     let mut out = OwnFindings::default();
     let people_words = people_words(plan);
+    // What the passages of pages are ranked against (§47).
+    let focus = super::discovery::focus_for(plan);
+    let mut company_domains: Vec<String> = Vec::new();
     for name in plan.companies.iter().take(3) {
         if ctx.cancel.is_cancelled() {
             return out;
@@ -279,6 +305,7 @@ pub async fn own(
             continue;
         };
         let domains: Vec<String> = company.domain.iter().cloned().collect();
+        company_domains.extend(domains.iter().cloned());
         if let Some(item) = &company.item {
             let facts: Vec<String> = company
                 .facts
@@ -330,7 +357,29 @@ pub async fn own(
             for (url, title, text) in company::team_pages(ctx, website).await {
                 out.lookups += 1;
                 out.used("Company websites");
-                let snippet = relevant_lines(&text, &people_words, 6);
+                // The passages that name the roles sought, ranked (BM25);
+                // lines naming them as a fallback.
+                let ranked = match company::page(ctx, &url).await {
+                    Ok((_, html)) => {
+                        let page = super::extract::read_html(&html);
+                        super::evidence::best(&page, &focus, 600)
+                            .iter()
+                            .map(super::evidence::Chunk::line)
+                            .filter(|line| {
+                                let lower = line.to_lowercase();
+                                people_words
+                                    .iter()
+                                    .any(|w| lower.contains(&w.to_lowercase()))
+                            })
+                            .collect::<Vec<_>>()
+                    }
+                    Err(_) => Vec::new(),
+                };
+                let snippet = if ranked.is_empty() {
+                    relevant_lines(&text, &people_words, 6)
+                } else {
+                    Some(ranked.join(" · "))
+                };
                 if let Some(mut finding) =
                     Finding::new(&title, &url, SourceKind::of(&url, &domains), snippet)
                 {
@@ -416,6 +465,39 @@ pub async fn own(
         }
         if plan.scopes.company || plan.scopes.jobs {
             out.findings.extend(hiring_evidence(&records));
+        }
+    }
+    // Few structured sources: discover pages on the open web (§34), read
+    // the ones ReMa may read, and keep their best passages.
+    let thin = out.findings.len() < 3;
+    let wants_web =
+        plan.scopes.people || plan.scopes.company || plan.scopes.market || plan.scopes.contracts;
+    if thin && wants_web && !ctx.cancel.is_cancelled() {
+        let found = super::discovery::discover(state, ctx, plan, 8, false).await;
+        out.lookups += found.answered.len();
+        for reason in &found.failed {
+            eprintln!("[career-search] discovery skipped: {reason}");
+        }
+        if !found.candidates.is_empty() {
+            let (findings, failed) = super::discovery::gather(
+                ctx,
+                plan,
+                &found.candidates,
+                &company_domains,
+                super::discovery::MAX_PAGES,
+            )
+            .await;
+            eprintln!(
+                "[career-search] discovery providers={} candidates={} pages_read={} pages_failed={}",
+                found.answered.join(","),
+                found.candidates.len(),
+                findings.len(),
+                failed.len()
+            );
+            if !findings.is_empty() {
+                out.used("Web discovery");
+            }
+            out.findings.extend(findings);
         }
     }
     out

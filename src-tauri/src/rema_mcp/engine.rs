@@ -62,6 +62,10 @@ pub struct Discovery {
     pub service: Option<Arc<Service>>,
     /// The chat model's own web search (hosted, or its local server's).
     pub provider: Option<(Endpoint, String)>,
+    /// ReMa's no-key open-web discovery (DuckDuckGo, where its robots
+    /// rules allow it): for models without a search of their own when no
+    /// service is set up.
+    pub open_web: bool,
 }
 
 impl Discovery {
@@ -82,7 +86,13 @@ impl Discovery {
         let provider = endpoint
             .filter(|(e, _)| retrieval::native::supported(e))
             .map(|(e, m)| (e.clone(), m.to_string()));
-        Self { service, provider }
+        // No search of its own and no service: ReMa's open-web discovery.
+        let open_web = provider.is_none() && service.is_none();
+        Self {
+            service,
+            provider,
+            open_web,
+        }
     }
 
     /// "ReMa job sources + Brave Search + OpenAI web search".
@@ -90,6 +100,9 @@ impl Discovery {
         let mut parts = vec![OWN_SOURCES.to_string()];
         if let Some(service) = &self.service {
             parts.push(service.name().to_string());
+        }
+        if self.open_web {
+            parts.push(OPEN_WEB.to_string());
         }
         if let Some((endpoint, _)) = &self.provider {
             parts.push(retrieval::native::engine_name(endpoint).to_string());
@@ -102,6 +115,9 @@ impl Discovery {
         if let Some(service) = &self.service {
             id.push_str(&format!("+service:{}", service.name()));
         }
+        if self.open_web {
+            id.push_str("+open-web");
+        }
         if let Some((endpoint, model_id)) = &self.provider {
             id.push_str(&format!("+provider:{}:{model_id}", endpoint.kind.as_str()));
         }
@@ -111,7 +127,7 @@ impl Discovery {
     /// Whether links of discovery-only sources (LinkedIn, XING, boards)
     /// can be found: they need a web search.
     pub fn searches_the_web(&self) -> bool {
-        self.service.is_some() || self.provider.is_some()
+        self.service.is_some() || self.provider.is_some() || self.open_web
     }
 
     pub fn deadline(&self) -> Duration {
@@ -125,6 +141,8 @@ impl Discovery {
 
 /// How ReMa's own job sources are named in coverage and status.
 pub const OWN_SOURCES: &str = "ReMa job sources";
+/// ReMa's open-web discovery, as coverage names it.
+pub const OPEN_WEB: &str = "ReMa web discovery";
 
 /// One tool session (one chat answer, or a Settings check).
 #[derive(Clone)]
@@ -465,7 +483,14 @@ async fn discover(
             None => None,
         }
     };
-    let (own, service, provider) = tokio::join!(own, service, provider);
+    let open_web = async {
+        if discovery.open_web {
+            Some(open_web_discovery(session, query, f, deadline, cancel).await)
+        } else {
+            None
+        }
+    };
+    let (own, service, provider, open_web) = tokio::join!(own, service, provider, open_web);
     if cancel.is_cancelled() {
         return Err(cancelled());
     }
@@ -474,7 +499,12 @@ async fn discover(
     let mut queries = 0;
     let mut answered = false;
     let mut reasons = Vec::new();
-    for part in [Some(own), service, provider].into_iter().flatten() {
+    // The open web is extra: its failure never makes the search fail when
+    // ReMa's own sources answered.
+    for part in [Some(own), service, provider, open_web]
+        .into_iter()
+        .flatten()
+    {
         coverage.sources_searched.extend(part.searched);
         coverage.sources_unavailable.extend(part.unavailable);
         coverage.bounded_by.extend(part.bounded);
@@ -719,6 +749,90 @@ async fn service_discovery(
         searched,
         unavailable,
         bounded,
+    }
+}
+
+/// ReMa's no-key open-web discovery (DuckDuckGo, when its robots rules let
+/// ReMa read it): site-scoped searches on the place's job boards and the
+/// employers' ATS hosts, then one open search. Only addresses come back;
+/// the engine reads and checks each posting like any other. Professional
+/// networks are not searched this way. A failure is logged, not shown:
+/// this route only adds to ReMa's own sources.
+async fn open_web_discovery(
+    session: &Session,
+    query: &str,
+    f: &SearchFilters,
+    deadline: Instant,
+    cancel: &CancellationToken,
+) -> Part {
+    use crate::career_search::discovery::{SearchDiscoveryProvider, DUCKDUCKGO};
+    let place = place_text(f);
+    let base = crate::career_search::research::search_query(&format!("{query} {place}"));
+    let countries: Vec<String> = f
+        .locations
+        .iter()
+        .filter_map(|l| l.country.clone())
+        .collect();
+    let mut plan: Vec<(String, String)> = sources::discovery_sources(&countries)
+        .into_iter()
+        .filter(|s| !matches!(s.id, "linkedin" | "xing") && wants(f, s.id))
+        .filter_map(|s| {
+            s.site
+                .map(|site| (s.id.to_string(), format!("site:{site} {base}")))
+        })
+        .take(3)
+        .collect();
+    if wants(f, "web") {
+        plan.push(("web".into(), format!("{base} job")));
+    }
+    let health = &session.state.career.health;
+    let mut hits = Vec::new();
+    let mut searched = Vec::new();
+    let mut queries = 0;
+    if health.state(DUCKDUCKGO) != crate::career_search::health::HealthState::TemporarilyUnavailable
+    {
+        let ctx = session.ctx(cancel, deadline, false);
+        let ddg = session.state.career.duckduckgo();
+        let scopes = crate::career_search::Scopes {
+            jobs: true,
+            ..Default::default()
+        };
+        for (id, text) in plan {
+            if cancel.is_cancelled() || Instant::now() >= deadline {
+                break;
+            }
+            match ddg.search(&ctx, &text, scopes, 10).await {
+                Ok(found) => {
+                    health.success(DUCKDUCKGO);
+                    queries += 1;
+                    searched.push(id.clone());
+                    hits.extend(found.into_iter().map(|c| Hit {
+                        url: c.url,
+                        title: c.title,
+                        snippet: c.snippet,
+                        via: id.clone(),
+                        company: None,
+                        location: None,
+                        record: None,
+                    }));
+                }
+                Err(reason) => {
+                    health.failure(DUCKDUCKGO, &reason, false);
+                    eprintln!("[career-search] discovery skipped: {reason}");
+                    break;
+                }
+            }
+        }
+    }
+    Part {
+        result: if queries == 0 {
+            Err(format!("{OPEN_WEB}: no search ran"))
+        } else {
+            Ok(Discovered { hits, queries })
+        },
+        searched,
+        unavailable: Vec::new(),
+        bounded: Vec::new(),
     }
 }
 

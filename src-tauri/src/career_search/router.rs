@@ -19,6 +19,7 @@ use std::{collections::HashMap, sync::Arc, time::Instant};
 use tokio_util::sync::CancellationToken;
 
 use super::{
+    capabilities::{self, RuntimeCapabilities},
     plan::{self, SearchPlan},
     research::{self, Research, ResearchOutcome},
     RouteReport, UNAVAILABLE,
@@ -125,6 +126,7 @@ fn work_mode_label(mode: WorkMode) -> &'static str {
 fn listing_of(
     job: &JobSummary,
     description: Option<&str>,
+    facts: retrieval::PostingFacts,
     query: &JobQuery,
     now: i64,
 ) -> Result<Listing, listings::Drop> {
@@ -216,27 +218,52 @@ fn listing_of(
             .map(|s| s.name.to_string())
             .unwrap_or_else(|| listings::source_label(&job.url)),
         notes,
+        facts,
     })
 }
 
+/// What the stored record states about the posting's life (§50).
+fn posting_facts(record: &crate::rema_mcp::contract::JobRecord) -> retrieval::PostingFacts {
+    retrieval::PostingFacts {
+        valid_through: record.dates.valid_through.clone(),
+        verified_at: record
+            .dates
+            .last_checked_at
+            .as_deref()
+            .or(record.dates.retrieved_at.as_deref())
+            .and_then(|t| t.parse::<jiff::Timestamp>().ok())
+            .map(|t| t.as_millisecond()),
+        apply_url: record.links.apply_url.clone(),
+        source_job_id: record
+            .source_ids
+            .first()
+            .map(|s| format!("{}:{}", s.source, s.id)),
+    }
+}
+
 /// The Jobs MCP search for a request (ReMa's own sources, and a search
-/// service when one is set up).
+/// service when one is set up). Without a model search that can run,
+/// ReMa's open-web discovery joins (§36: after the Jobs MCP, ATS and
+/// company sources).
 async fn own_jobs(
     state: &AppState,
     plan: &SearchPlan,
     query: &JobQuery,
     cancel: &CancellationToken,
+    open_web: bool,
 ) -> Result<OwnJobs, String> {
     let service = retrieval::backend::configured(state)
         .await
         .ok()
         .flatten()
         .map(Arc::new);
+    let open_web = open_web && service.is_none();
     let session = Session {
         state: state.clone(),
         discovery: Discovery {
             service,
             provider: None,
+            open_web,
         },
     };
     let role = plan
@@ -287,15 +314,16 @@ async fn own_jobs(
         .map_err(|e| e.message)?;
     let now = now_ms();
     let ids: Vec<String> = result.jobs.iter().map(|j| j.id.clone()).collect();
-    let descriptions: HashMap<String, String> = state
+    // The stored records: descriptions, and what each states about its
+    // life (valid through, last checked, application page, source id).
+    let records: HashMap<String, (Option<String>, retrieval::PostingFacts)> = state
         .db
         .call(move |c| {
             let mut out = HashMap::new();
             for id in ids {
                 if let Some(record) = store::get(c, &id)? {
-                    if let Some(text) = record.description.text {
-                        out.insert(id, text);
-                    }
+                    let facts = posting_facts(&record);
+                    out.insert(id, (record.description.text, facts));
                 }
             }
             Ok(out)
@@ -338,12 +366,11 @@ async fn own_jobs(
             own.excluded.not_postings += 1;
             continue;
         }
-        match listing_of(
-            job,
-            descriptions.get(&job.id).map(String::as_str),
-            query,
-            now,
-        ) {
+        let (description, facts) = records
+            .get(&job.id)
+            .map(|(text, facts)| (text.as_deref(), facts.clone()))
+            .unwrap_or_default();
+        match listing_of(job, description, facts, query, now) {
             Ok(listing) => own.listings.push(listing),
             Err(listings::Drop::Older) => own.excluded.older += 1,
             Err(listings::Drop::BelowSalary) => own.excluded.below_salary += 1,
@@ -411,6 +438,11 @@ fn fill(into: &mut Listing, from: &Listing) {
     if into.posted.is_none() {
         into.posted = from.posted;
     }
+    // What either copy states about the posting's life (§50).
+    take(&mut into.facts.valid_through, &from.facts.valid_through);
+    take(&mut into.facts.apply_url, &from.facts.apply_url);
+    take(&mut into.facts.source_job_id, &from.facts.source_job_id);
+    into.facts.verified_at = into.facts.verified_at.max(from.facts.verified_at);
     let note = if (from.verification as u8) < (into.verification as u8) {
         // The duplicate was checked: its check, and its caveats, stand for
         // this listing; its own page may not have opened.
@@ -486,12 +518,13 @@ pub async fn search_jobs_with(
     let started = Instant::now();
     let plan = plan::for_job_query(query);
     progress.status("Searching jobs…");
+    let (caps, run_native, skipped) = native_route(state, model).await;
     let company_domains = company_domains(state, &plan, cancel).await;
     let hints = plan::hints(&plan, &company_domains);
-    let own = own_jobs(state, &plan, query, cancel);
+    let own = own_jobs(state, &plan, query, cancel, !run_native);
     let web = async {
         match model {
-            Some((endpoint, model_id)) if native::supported(endpoint) => Some((
+            Some((endpoint, model_id)) if run_native => Some((
                 native::engine_name(endpoint).to_string(),
                 web_jobs(
                     state, endpoint, model_id, query, &plan, &hints, progress, cancel,
@@ -505,6 +538,13 @@ pub async fn search_jobs_with(
     if cancel.is_cancelled() {
         return Outcome::Cancelled;
     }
+    if let (Some((endpoint, _)), Some((_, result))) = (model, &web) {
+        state.career.note_native(
+            &capabilities::provider_key(endpoint),
+            result.as_ref().map(|_| ()).map_err(String::as_str),
+        );
+    }
+    let native_ran = web.as_ref().is_some_and(|(_, r)| r.is_ok());
     let mut report = RouteReport {
         at: now_ms(),
         requirement: plan.requirement,
@@ -525,6 +565,9 @@ pub async fn search_jobs_with(
     let mut searches = 0;
     let mut pages_read = 0;
     let mut reasons: Vec<String> = Vec::new();
+    // The model's own search was not asked: the account or organization
+    // turned it off (learned from the runtime or an earlier refusal).
+    reasons.extend(skipped);
     // The time of the oldest results shown.
     let mut retrieved_at = now_ms();
     let mut unreached: Vec<String> = Vec::new();
@@ -576,9 +619,21 @@ pub async fn search_jobs_with(
         }
     }
     report.duration_ms = research::millis_since(started) as u32;
+    let jobs_mcp = report.succeeded.iter().any(|s| s == REMA_JOBS);
     if engines.is_empty() {
         report.route = "none".into();
         report.fallbacks = reasons.clone();
+        diagnose(
+            caps.as_ref(),
+            &plan,
+            &[
+                ("executed", native_ran.to_string()),
+                ("jobs_mcp", jobs_mcp.to_string()),
+                ("sources", "0".into()),
+                ("fallback", "true".into()),
+                ("outcome", "unavailable".into()),
+            ],
+        );
         state.career.record(report);
         let mut all = vec![UNAVAILABLE.to_string()];
         all.extend(reasons);
@@ -590,6 +645,20 @@ pub async fn search_jobs_with(
     report.route = engines.join(" + ");
     report.fallbacks = fallbacks.clone();
     report.results = listings.len() as u32;
+    diagnose(
+        caps.as_ref(),
+        &plan,
+        &[
+            ("executed", native_ran.to_string()),
+            ("searches", searches.to_string()),
+            ("jobs_mcp", jobs_mcp.to_string()),
+            ("harness_search", "true".into()),
+            ("pages_fetched", pages_read.to_string()),
+            ("sources", listings.len().to_string()),
+            ("fallback", (!fallbacks.is_empty()).to_string()),
+            ("duration_ms", report.duration_ms.to_string()),
+        ],
+    );
     state.career.record(report);
     let retrieval = Retrieval {
         query: query.clone(),
@@ -608,6 +677,43 @@ pub async fn search_jobs_with(
     } else {
         Outcome::Found(retrieval)
     }
+}
+
+/// The model's own search for a request (§6, §54): its runtime's
+/// capabilities, whether it runs, and — when the provider has one that may
+/// not be used now (the account or organization turned it off) — why.
+async fn native_route(
+    state: &AppState,
+    model: Option<(&Endpoint, &str)>,
+) -> (Option<RuntimeCapabilities>, bool, Option<String>) {
+    let Some((endpoint, model_id)) = model else {
+        return (None, false, None);
+    };
+    let caps = capabilities::detect(state, endpoint, model_id).await;
+    let has_one = native::supported(endpoint);
+    let run = has_one && caps.native_search_available;
+    let skipped = (has_one && !run).then(|| {
+        format!(
+            "{}: {}",
+            native::engine_name(endpoint),
+            caps.note.as_deref().unwrap_or("not available right now")
+        )
+    });
+    (Some(caps), run, skipped)
+}
+
+/// The `[career-search]` line of one search (§66): runtime facts, the
+/// requirement and scopes, counts — never the query, a page or a secret.
+fn diagnose(caps: Option<&RuntimeCapabilities>, plan: &SearchPlan, fields: &[(&str, String)]) {
+    let mut all: Vec<(&str, String)> = vec![
+        (
+            "requirement",
+            format!("{:?}", plan.requirement).to_uppercase(),
+        ),
+        ("scopes", plan.scopes.names().join(",").to_lowercase()),
+    ];
+    all.extend(fields.iter().cloned());
+    eprintln!("{}", capabilities::log_line(caps, "search", &all));
 }
 
 /// The official domains of the companies a request names (Wikidata,
@@ -654,6 +760,7 @@ pub async fn research(
     } else {
         "Searching company sources…"
     });
+    let (caps, run_native, skipped) = native_route(state, model).await;
     let company_domains = company_domains(state, plan, cancel).await;
     let hints = plan::hints(plan, &company_domains);
     let deadline = Instant::now() + std::time::Duration::from_secs(30);
@@ -665,7 +772,7 @@ pub async fn research(
     };
     let web = async {
         match model {
-            Some((endpoint, model_id)) if native::supported(endpoint) => Some((
+            Some((endpoint, model_id)) if run_native => Some((
                 native::engine_name(endpoint).to_string(),
                 native::research(
                     state,
@@ -686,10 +793,18 @@ pub async fn research(
     if cancel.is_cancelled() {
         return ResearchOutcome::Cancelled;
     }
+    if let (Some((endpoint, _)), Some((_, result))) = (model, &web) {
+        state.career.note_native(
+            &capabilities::provider_key(endpoint),
+            result.as_ref().map(|_| ()).map_err(String::as_str),
+        );
+    }
+    let native_ran = web.as_ref().is_some_and(|(_, r)| r.is_ok());
     let mut findings = own.findings;
     let mut engines: Vec<String> = Vec::new();
     let mut sources_used = own.sources.clone();
-    let mut reasons: Vec<String> = own.failed.clone();
+    let mut reasons: Vec<String> = skipped.into_iter().collect();
+    reasons.extend(own.failed.clone());
     let mut searches = own.lookups;
     let own_answered = !own.sources.is_empty();
     if own_answered {
@@ -715,6 +830,26 @@ pub async fn research(
         }
     }
     let findings = research::merge(findings);
+    diagnose(
+        caps.as_ref(),
+        plan,
+        &[
+            ("executed", native_ran.to_string()),
+            ("searches", searches.to_string()),
+            ("harness_search", own_answered.to_string()),
+            ("sources", findings.len().to_string()),
+            ("fallback", (!reasons.is_empty()).to_string()),
+            (
+                "outcome",
+                if engines.is_empty() {
+                    "unavailable"
+                } else {
+                    "answered"
+                }
+                .into(),
+            ),
+        ],
+    );
     state.career.record(RouteReport {
         at: now_ms(),
         requirement: plan.requirement,
@@ -777,6 +912,7 @@ mod tests {
             verification,
             source: source.into(),
             notes: vec![],
+            facts: Default::default(),
         }
     }
 
@@ -829,6 +965,58 @@ mod tests {
         assert_eq!(
             excluded.incomplete, 1,
             "a posting without an employer is not shown"
+        );
+    }
+
+    #[test]
+    fn posting_facts_survive_the_merge_and_show_in_the_table() {
+        let mut board = listing(
+            "https://www.arbeitnow.com/jobs/companies/nordlicht/ml-engineer-2",
+            Some("Nordlicht AI"),
+            "Arbeitnow",
+            Verification::Posting,
+        );
+        board.facts.valid_through = Some("2026-10-31T23:59:00Z".into());
+        board.facts.verified_at = Some(1_790_380_800_000);
+        let mut official = listing(
+            "https://job-boards.greenhouse.io/nordlicht/jobs/4411001",
+            Some("Nordlicht AI"),
+            "Greenhouse",
+            Verification::Posting,
+        );
+        official.facts.apply_url =
+            Some("https://job-boards.greenhouse.io/nordlicht/jobs/4411001/apply".into());
+        official.facts.source_job_id = Some("greenhouse:nordlicht:4411001".into());
+        let merged = merge(vec![board, official], &mut Excluded::default());
+        assert_eq!(merged.len(), 1);
+        let kept = &merged[0];
+        assert_eq!(
+            kept.facts.valid_through.as_deref(),
+            Some("2026-10-31T23:59:00Z")
+        );
+        assert_eq!(
+            kept.facts.source_job_id.as_deref(),
+            Some("greenhouse:nordlicht:4411001")
+        );
+        assert_eq!(kept.facts.verified_at, Some(1_790_380_800_000));
+        let query = retrieval::detect("Find AI jobs in Vienna").unwrap();
+        let table = retrieval::render::listings_table(&Retrieval {
+            query,
+            engine: REMA_JOBS.into(),
+            searches: 1,
+            pages_read: 0,
+            listings: merged,
+            excluded: Excluded::default(),
+            retrieved_at: 1_790_380_800_000,
+            fallbacks: vec![],
+            sources: vec![],
+            unreached: vec![],
+        });
+        assert!(table.contains("open until 2026-10-31"), "{table}");
+        assert!(
+            table
+                .contains("[apply](https://job-boards.greenhouse.io/nordlicht/jobs/4411001/apply)"),
+            "{table}"
         );
     }
 
@@ -914,6 +1102,7 @@ mod tests {
         let fits = listing_of(
             &summary(Some((85_000.0, 100_000.0))),
             Some("Build models."),
+            Default::default(),
             &query,
             now,
         )
@@ -922,14 +1111,22 @@ mod tests {
         assert_eq!(fits.salary_status, SalaryStatus::Verified);
         assert_eq!(fits.verification, Verification::Posting);
         assert_eq!(fits.source, "Lever");
-        let unknown = listing_of(&summary(None), None, &query, now).ok().unwrap();
+        let unknown = listing_of(&summary(None), None, Default::default(), &query, now)
+            .ok()
+            .unwrap();
         assert_eq!(unknown.salary_status, SalaryStatus::NotListed);
         assert!(
             unknown.notes.iter().any(|n| n == "salary not stated"),
             "shown, and marked"
         );
         assert!(matches!(
-            listing_of(&summary(Some((60_000.0, 70_000.0))), None, &query, now),
+            listing_of(
+                &summary(Some((60_000.0, 70_000.0))),
+                None,
+                Default::default(),
+                &query,
+                now
+            ),
             Err(listings::Drop::BelowSalary)
         ));
     }

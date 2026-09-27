@@ -385,7 +385,7 @@ async fn anthropic_searches_the_web_and_resumes_a_paused_turn() {
         .iter()
         .map(|t| t["type"].as_str().unwrap())
         .collect();
-    assert_eq!(tools, ["web_search_20260209", "web_fetch_20260209"]);
+    assert_eq!(tools, ["web_search_20260318", "web_fetch_20260318"]);
 
     // The paused step goes back verbatim, with no extra user message.
     let second = body_of(&received.recv().await.unwrap());
@@ -443,6 +443,95 @@ async fn answers_without_web_search_when_the_provider_refuses_it() {
         &web.0.lock().unwrap()[0],
         WebEvent::Unavailable { reason } if reason.contains("not enabled")
     ));
+}
+
+#[tokio::test]
+async fn a_search_the_organization_turned_off_continues_with_remas_tools() {
+    let (base_url, mut received) = serve_sequence(vec![
+        (
+            400,
+            vec!["{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"web search is not enabled for this organization\"}}"],
+        ),
+        (
+            200,
+            vec![
+                "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"From ReMa's sources.\"}}\n\n",
+                "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+            ],
+        ),
+    ])
+    .await;
+    let endpoint = endpoint(ProviderKind::Anthropic, base_url, "sk-ant-test");
+    let web = Arc::new(RecordingWeb::default());
+    let llm = ProviderLanguageModel::new(None);
+    let mut request = request();
+    request.web = Some(WebSearch {
+        observer: Some(web.clone()),
+        fallback: Some(ToolBox {
+            specs: vec![ToolSpec {
+                name: "rema_career_search".into(),
+                description: "Search current career information.".into(),
+                input_schema: json!({ "type": "object" }),
+            }],
+            executor: Arc::new(fake::NoTools),
+        }),
+        ..WebSearch::default()
+    });
+    let mut text = String::new();
+    let mut sink = |delta: &str| text.push_str(delta);
+    let result = llm
+        .stream_chat(
+            &endpoint,
+            "claude-opus-5",
+            &request,
+            CancellationToken::new(),
+            &mut sink,
+        )
+        .await;
+    assert_eq!(result.unwrap(), Finish::Complete);
+    assert_eq!(text, "From ReMa's sources.");
+    let first = body_of(&received.recv().await.unwrap());
+    assert_eq!(first["tools"][0]["type"], "web_search_20260318");
+    // The answer goes on with ReMa's career tools instead, and says why.
+    let second = body_of(&received.recv().await.unwrap());
+    let tools = second["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0]["name"], "rema_career_search");
+    assert!(matches!(
+        &web.0.lock().unwrap()[0],
+        WebEvent::Unavailable { reason } if reason.contains("not enabled")
+    ));
+}
+
+#[tokio::test]
+async fn a_model_told_to_search_directly_is_asked_again_directly() {
+    let (base_url, mut received) = serve_sequence(vec![
+        (
+            400,
+            vec!["{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"tools.0: this model does not support programmatic tool calling; set allowed_callers to [\\\"direct\\\"]\"}}"],
+        ),
+        (
+            200,
+            vec![
+                "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Searched.\"}}\n\n",
+                "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+            ],
+        ),
+    ])
+    .await;
+    let endpoint = endpoint(ProviderKind::Anthropic, base_url, "sk-ant-test");
+    let web = Arc::new(RecordingWeb::default());
+    let (result, text) =
+        collect_with_web(&endpoint, "claude-sonnet-9-directtest", web.clone()).await;
+    assert_eq!(result.unwrap(), Finish::Complete);
+    assert_eq!(text, "Searched.");
+    let first = body_of(&received.recv().await.unwrap());
+    assert!(first["tools"][0].get("allowed_callers").is_none());
+    let second = body_of(&received.recv().await.unwrap());
+    assert_eq!(second["tools"][0]["allowed_callers"], json!(["direct"]));
+    assert_eq!(second["tools"][0]["type"], "web_search_20260318");
+    // Search stayed on: nothing was reported unavailable.
+    assert!(web.0.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

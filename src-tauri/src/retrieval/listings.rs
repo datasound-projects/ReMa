@@ -519,6 +519,15 @@ fn build_with(
         .and_then(summary)
         .or_else(|| candidate.snippet.as_deref().map(|s| clip(s, 240)));
     let source = source_label(&url);
+    // What the posting states about its life (§50); checked now when its
+    // page was read.
+    let posting_facts = super::PostingFacts {
+        valid_through: facts.valid_through.clone(),
+        verified_at: (verification != Verification::SearchOnly).then_some(now),
+        apply_url: None,
+        source_job_id: normalize::platform_id(&url)
+            .map(|(platform, id)| format!("{platform}:{id}")),
+    };
     Ok(Listing {
         title,
         company: facts
@@ -536,6 +545,7 @@ fn build_with(
         verification,
         source,
         notes,
+        facts: posting_facts,
     })
 }
 
