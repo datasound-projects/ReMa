@@ -464,6 +464,7 @@ function ProspectGroup({
                             <span className="biz-person">{contact.name ?? contact.role}</span>
                             {contact.name && <span className="biz-muted biz-person__title">{contact.title ?? contact.role}</span>}
                             <span className="biz-muted biz-person__title">{AUTHORITY_LABELS[contact.authority]}</span>
+                            {contact.suppressed && <span className="badge badge--danger">Do not contact</span>}
                           </>
                         ) : (
                           <span className="biz-muted">Role not identified</span>

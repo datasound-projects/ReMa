@@ -872,9 +872,11 @@ pub async fn draft(
     };
     if let Some(c) = &contact {
         if state.db.call(|db| store::suppressed(db, "person", &c.id))? {
-            return Err(AppError::validation(
-                "This person is marked Do not contact; ReMa does not draft messages to them.",
-            ));
+            return Err(AppError::validation(if c.name.is_some() {
+                "This person is marked Do not contact; ReMa does not draft messages to them."
+            } else {
+                "This buyer role is marked Do not contact here; ReMa does not draft messages to it."
+            }));
         }
     }
     // A named professional only where the policy allows the export.
@@ -893,6 +895,19 @@ pub async fn draft(
         .or_else(|| request.role.clone())
         .filter(|r| !r.trim().is_empty())
         .ok_or_else(|| AppError::validation("Choose a contact or a buyer role to address."))?;
+    // A buyer role marked Do not contact at this company stays blocked when
+    // it is typed in rather than chosen from the contacts.
+    if contact.is_none() {
+        if let Some(key) = opportunity.as_ref().and_then(|o| o.company_key.as_deref()) {
+            let id = super::pipeline::role_contact_id(key, &role);
+            if state.db.call(|db| store::suppressed(db, "person", &id))? {
+                return Err(AppError::validation(
+                    "This buyer role is marked Do not contact here; ReMa does not draft messages \
+                     to it.",
+                ));
+            }
+        }
+    }
     let recipient = named.clone().unwrap_or_else(|| role.clone());
     let greeting = named.clone().unwrap_or_else(|| format!("{role} team"));
     let company = opportunity.as_ref().and_then(|o| o.company_name.clone());

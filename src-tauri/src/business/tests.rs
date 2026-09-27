@@ -862,6 +862,20 @@ async fn a_suppressed_buyer_role_stays_with_its_company() {
     .await
     .unwrap_err();
     assert!(refused.to_string().contains("Do not contact"), "{refused}");
+    // Typing the role instead of choosing the contact is refused too.
+    let typed = gtm::draft(
+        &state,
+        gtm::DraftRequest {
+            contact_id: None,
+            role: Some(format!(" {} ", role.role.to_uppercase())),
+            ..request(&marked.id, &role.id, "d1-typed")
+        },
+        None,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+    assert!(typed.to_string().contains("Do not contact"), "{typed}");
     // The same role at another company is untouched.
     gtm::draft(
         &state,
