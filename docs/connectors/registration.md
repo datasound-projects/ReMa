@@ -147,3 +147,46 @@ Nothing to register. XING's "Login with XING" is a website plugin bound to
 a registered domain, and XING's official API clients state that new API
 applications can no longer be registered. ReMa therefore shows XING as
 unavailable and never asks for a XING password or cookies.
+
+## Release checklists (Spec B §81–§82)
+
+Implementation and provider approval are separate. "ReMa" means the code in
+this repository does it; "Publisher" means ReMa's owner has to do it in the
+provider's console, and it was **not** done by this work (no access to the
+publisher's accounts). A public Gmail rollout is not ready until every
+Publisher row is done.
+
+### Google
+
+| Item | Who | Status |
+|---|---|---|
+| Google Cloud production project | Publisher | pending |
+| Gmail API enabled | Publisher | pending (ReMa reports API_NOT_ENABLED precisely if not) |
+| Google Calendar API enabled | Publisher | pending (same) |
+| Desktop app OAuth client created | Publisher | pending |
+| External audience configured | Publisher | pending |
+| Branding, support contact, privacy policy | Publisher | pending ([compliance.md](compliance.md) lists what the policy must say) |
+| Required scopes declared: `openid`, `email`, `profile`, `gmail.readonly`, `calendar.events`, `calendar.freebusy` | Publisher | pending |
+| Restricted Gmail scope justification and demo | Publisher | pending |
+| OAuth verification | Publisher (Google) | pending |
+| Security assessment (restricted scope; job mail may be sent to the user's cloud model) | Publisher (assessor) | pending |
+| Production client ID and secret in the release | ReMa + Publisher | ReMa: build fails without them; Publisher: set `GOOGLE_DESKTOP_CLIENT_ID` (variable) and `GOOGLE_DESKTOP_CLIENT_SECRET` (secret) for the release workflow |
+| System browser, PKCE S256, state, loopback, refresh, revoke | ReMa | done |
+| Clean-machine sign-in with a real Google account | Publisher | pending (verified here against stand-ins only) |
+
+### Microsoft
+
+| Item | Who | Status |
+|---|---|---|
+| ReMa Entra app registration | Publisher | pending |
+| Account types: any organizational directory and personal accounts | Publisher | pending |
+| "Mobile and desktop applications" platform with `http://localhost` | Publisher | pending |
+| Allow public client flows | Publisher | pending (ReMa sends no secret; a confidential registration fails with PROVIDER_CONFIGURATION_ERROR) |
+| Production client ID in the release | ReMa + Publisher | ReMa: build fails without it; Publisher: set `MICROSOFT_PUBLIC_CLIENT_ID` |
+| `User.Read`, `Mail.Read`, `Calendars.ReadWrite` configured | Publisher | pending |
+| `offline_access` requested at run time | ReMa | done |
+| Publisher verification | Publisher | pending (recommended; some tenants require it) |
+| Personal account tested | Publisher | pending (stand-ins only here) |
+| Microsoft 365 account tested | Publisher | pending |
+| Admin-policy refusal handled | ReMa | done ("Your organization requires administrator approval …"); real tenant test pending |
+| Clean-machine release tested | Publisher | pending on macOS/Windows; Linux package verified here against stand-ins |

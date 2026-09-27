@@ -132,6 +132,12 @@ fn listing_noun() -> &'static Regex {
     )
 }
 
+/// Whether a message names listings ("jobs", "openings", …): a search then,
+/// whatever else it mentions ("job emails" names none).
+pub fn names_listings(message: &str) -> bool {
+    listing_noun().is_match(message)
+}
+
 fn search_cue() -> &'static Regex {
     static CELL: OnceLock<Regex> = OnceLock::new();
     re(

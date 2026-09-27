@@ -96,3 +96,88 @@ Findings fixed during the run:
 - Google verification and the security assessment (see [compliance.md](compliance.md)).
 - The system tray menu itself (Xvfb has no tray host) and native notifications on macOS and Windows.
 - Release packaging of this change.
+
+## 4. Production desktop connectors (specification B)
+
+Specification: `05d000ff-ReMa_Production_Desktop_Connectors_Google_Microsoft.md`
+(§1–§93). Implementation: [implementation.md §5](implementation.md). Root
+cause, gap analysis and checklist: [../production-plan.md §6–§8](../production-plan.md).
+
+### 4.1 Automated checks
+
+| Check | Result |
+|---|---|
+| `cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings` | clean |
+| `cargo test --locked` | 713 passed, 3 ignored (explicit-only) |
+| `pnpm lint`, `pnpm typecheck` | clean |
+| `pnpm test` | 121 passed (23 files) |
+| `pnpm build` | built |
+| `cargo check --release` with no registrations | **fails**, naming `GOOGLE_DESKTOP_CLIENT_ID`, `GOOGLE_DESKTOP_CLIENT_SECRET`, `MICROSOFT_PUBLIC_CLIENT_ID` and where to put them (B §6, §80) |
+| Test suite through a proxy that refuses and records every request | no request leaves the test servers (after the fixes recorded in [../career-search/validation.md §6.3](../career-search/validation.md)) |
+
+| Spec | Tests |
+|---|---|
+| §70 PKCE, S256 | `pkce_matches_the_rfc_7636_example`, `gmail_signs_in_with_pkce_through_the_loopback_redirect` (verifier ↔ challenge) |
+| §70 state; mismatch refused | `states_are_random_and_long`, `validates_state_and_reads_denials`, `denied_consent_and_a_forged_state_connect_nothing`, `linkedin_cancel_and_forged_state_connect_nothing` |
+| §70 loopback, random port | `dual_stack_accepts_whichever_loopback_address_the_browser_uses`, the sign-in tests (`http://127.0.0.1:<port>`, Microsoft `http://localhost:<port>`) |
+| §70 timeout; callback after timeout | `an_unanswered_sign_in_times_out_and_a_late_callback_finds_nothing`, `times_out_and_can_be_cancelled` |
+| §70 user denied | `denied_consent_and_a_forged_state_connect_nothing` |
+| §70 code exchange | `gmail_signs_in_with_pkce_through_the_loopback_redirect`, `outlook_signs_in_as_a_public_client_on_localhost` (no secret) |
+| §70 duplicate callback; §12 path | `the_redirect_is_taken_once_and_only_on_its_own_path` |
+| §70 parallel attempt blocked (§54) | `a_second_sign_in_is_refused_while_one_is_open` |
+| §13 pages after the exchange | `the_tab_gets_its_page_only_when_the_sign_in_has_ended`, `a_failed_code_exchange_says_so_in_the_browser_and_offers_retry` |
+| §71 refresh token not in SQLite, logs, frontend; access token not persisted | `tokens_live_only_in_the_credential_store` (database scan, overview JSON, debug output, `[oauth]` lines, raw keychain value) |
+| §40 single flight, refresh, rotation | `concurrent_requests_share_one_refresh`, `access_tokens_are_refreshed_silently_before_they_expire`, `microsoft_refresh_tokens_rotate` |
+| §69 per-account key, migration | `grants_move_from_the_provider_key_to_the_account_key` |
+| §27, §78 revoked → REAUTH_REQUIRED, never a browser | `a_revoked_grant_requires_reconnecting_and_never_retries_on_its_own` |
+| §77 offline keeps the connection | `offline_keeps_the_connection_and_its_grant` |
+| §47–§49 checks after sign-in | `a_connector_is_connected_only_when_its_api_answers`, `a_check_the_provider_cannot_answer_leaves_the_connector_connected`, `an_outlook_account_without_a_mailbox_is_explained`, `a_permission_left_unchecked_is_reported` |
+| §25, §79 union of scopes | `adding_a_second_google_connector_asks_for_the_union_of_scopes` |
+| §37, §60–§62 error taxonomy | `redirect_errors_become_actionable_categories`, `token_errors_depend_on_the_phase`, `api_answers_tell_permission_from_configuration`, `messages_never_carry_what_was_sent`, `an_organization_that_requires_admin_approval_is_named_as_the_reason` |
+| §57 disconnect | `disconnecting_revokes_the_grant_once_the_last_connector_is_removed`, `microsoft_disconnect_deletes_local_tokens` |
+| §65 scheduled run, revoked grant | `a_scheduled_job_mail_sync_with_a_revoked_grant_asks_to_reconnect` (run failed as `connector`, card Reconnect required, one refresh attempt, no browser) |
+| §6, §80 build configuration | `a_release_build_without_google_or_microsoft_fails`, `a_development_build_without_them_names_what_is_missing`, `the_environment_overrides_the_file_and_every_value_is_checked`, `google_needs_the_desktop_clients_secret`, `a_release_accepts_every_organization_and_personal_accounts`, `the_compiled_source_holds_the_values_as_string_literals`, `the_committed_file_names_every_setting` |
+| §51, §80 packaging | `the_opener_plugin_is_registered_and_no_webview_can_open_addresses`, `the_tauri_npm_packages_match_the_rust_crate` |
+| §41–§42 states | `a_card_opening_the_browser_says_so_before_it_asks_to_finish_there`, `a_sign_in_shows_connecting_and_can_be_cancelled`, `builds_without_an_app_registration_offer_no_sign_in`, Vitest `ConnectorsSection` (Retry, capabilities, Sync now, where job mail goes) |
+| Keychain resilience | `settings_never_wait_on_the_keychain_for_cards_that_were_never_connected` |
+| §92 connectors usable from chat | `questions_about_applications_get_connector_tools_and_no_web`, `questions_about_job_mail_read_the_connectors_not_job_listings` (found in the packaged run, §4.2) |
+### 4.2 Packaged release, clean install (B §74–§79, §92)
+
+Setup, standing in for a clean machine:
+
+- `pnpm tauri build --bundles deb` in release mode with test registrations
+  in the environment (`GOOGLE_DESKTOP_CLIENT_ID=123456789012-rematestdesktop…`,
+  a test `GOCSPX-…` secret, a test Microsoft GUID); `dpkg -i
+  ReMa_0.1.0_amd64.deb` installs `/usr/bin/rema`.
+- ReMa started with `env -i`: a new, empty home; no repository, `.env`,
+  shell exports, proxy or development variables; a private D-Bus session
+  with a GNOME keyring (Secret Service) as on a desktop login.
+- The provider stand-in (`scripts/e2e/mock-providers.mjs`) answers at the
+  **real host names** — `accounts.google.com`, `oauth2.googleapis.com`,
+  `gmail.googleapis.com`, `www.googleapis.com`, `login.microsoftonline.com`,
+  `graph.microsoft.com` — over HTTPS (names mapped to 127.0.0.1, a test CA
+  added to the trusted roots). Like the providers, it requires Google's
+  Desktop client secret, refuses a secret from Microsoft's public client,
+  verifies PKCE S256 and accepts a code once.
+- The default browser (`xdg-open`) is played by a script that loads the
+  sign-in address and follows the redirect back to ReMa's loopback address.
+
+| # | Spec | Scenario | Result |
+|---|---|---|---|
+| 1 | §74 | Fresh install → Settings → Connectors | Gmail, Google Calendar, Outlook Mail, Outlook Calendar each show **+**; none "Unavailable". LinkedIn and XING show product wording (no developer text). Startup log: `[connector] config google=ready microsoft=ready linkedin=off tenant=common source=connectors.toml_and_the_environment` |
+| 2 | §70, §74 | Gmail **+** | Browser opened `https://accounts.google.com/o/oauth2/v2/auth` with the build's client ID, `redirect_uri=http://127.0.0.1:<random port>`, `code_challenge_method=S256`, `state`, `access_type=offline`, `prompt=consent select_account`, scope `openid email profile gmail.readonly`. Exchange at `oauth2.googleapis.com/token` with `client_secret`; the stand-in verified PKCE. Gmail profile checked with the new token. Tab: "ReMa connected successfully." Card: ✓ `ana@gmail.com`. Log: `[oauth] … started / listener_bound / browser_opened / callback_received / token_exchange_success / account_identified`, `[connector] provider=google capability=gmail validation=success` — no code, token, secret or address |
+| 3 | §71 | Where the grants are | The keychain holds one item per account: `connector:google:g-123`, later `connector:microsoft:m-oid`. After two sign-ins and one refresh per provider, no issued token value appears in the new home (SQLite database and WAL, webview localStorage, HSTS store) or any app log |
+| 4 | §79 | Google Calendar **+** after Gmail | Authorization asked for the union: `gmail.readonly calendar.events calendar.freebusy`; Gmail and Calendar (one event, `fields=kind`) checked; still one keychain item for the account |
+| 5 | §62 | Outlook Mail **+**, organization requires admin approval (`AADSTS90094`) | `login.microsoftonline.com/common/…/authorize` with `redirect_uri=http://localhost:<port>`, S256, `offline_access`. Card: "**Connection failed.** Your organization requires administrator approval before ReMa can access this Microsoft account. Ask your IT administrator to approve ReMa, or connect a personal Microsoft account." with Retry; "Show details" shows the provider's code. Tab: "ReMa could not complete authorization." Log: `phase=failed category=PROVIDER_ADMIN_POLICY` |
+| 6 | §73 | Retry with consent allowed | Token request without `client_secret` (public client; the stand-in refuses one), PKCE verified; identity from Graph `/me`; `/me/messages?$top=1&$select=id` checked. Card ✓ `ana@outlook.com`; keychain item `connector:microsoft:m-oid` |
+| 7 | §79 | Outlook Calendar **+** | Authorization adds `Calendars.ReadWrite` to the granted scopes; `/me/messages` and `/me/calendar` checked |
+| 8 | §43–§46 | Gmail details | Account, Capabilities (Gmail, Google Calendar: Connected), "Mail — Read only", "Last sync: Not yet", "Not read automatically: turn on Job Mail & Interview Sync…", Reconnect, Disconnect, myaccount.google.com |
+| 9 | §75 | Quit, start again | All four ✓ with no browser; Settings made no provider request. First use (calendar panel): Google refreshed (with the Desktop client secret) and Microsoft refreshed (public client); events from both calendars shown. Log: `phase=token_refreshed` for both |
+| 10 | §65, §92 | Local model endpoint added; Job Mail & Interview Sync set up (every 15 minutes), Run now | Gmail and Outlook read (metadata first, full text only for job mail), 11 new, 9 job-related, 8 applications updated, both calendars checked for conflicts, one interview added to Google Calendar, one conflict flagged. Every request to the model: `leaked: false` — "Dinner on Sunday" and the newsletter never reached it |
+| 11 | §92 | Applications | Interviews, applications and the Contoso offer (from Outlook) listed, "Updated by Job Mail & Interview Sync" |
+| 12 | §64 | Where job mail goes | "Job-related email is read by mock-classifier on this computer: mail leaves it only between ReMa and Google or Microsoft. Sign-in tokens never reach the interface or a model." |
+| 13 | §92 | Chat: "Which job emails did I get recently, and is tomorrow at 09:00 free for a call?" | **Failed**: ReMa ran a public job-listing search ("ReMa could not retrieve live career sources…") instead of the mail and calendar tools. Fixed (`listing_search` in `services/chat.rs`, test `questions_about_job_mail_read_the_connectors_not_job_listings`, red before the fix); re-run on a rebuilt package below |
+
+Still running on the rebuilt package: the chat re-run, §76 (window closed with
+background mode on), §77 (providers unreachable), §78 (revoked grant),
+reconnect and disconnect.

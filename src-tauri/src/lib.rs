@@ -39,6 +39,8 @@ pub mod models;
 pub mod network;
 pub mod oauth_loopback;
 pub mod protocol;
+#[cfg(test)]
+mod release_checks;
 pub mod rema_mcp;
 pub mod retrieval;
 pub mod secrets;

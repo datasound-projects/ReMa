@@ -173,3 +173,37 @@ configuration, never as a security boundary.
 | B7 | Tests (§70–§71 and the rest) | Planned |
 | B8 | Packaged release build, clean install, E2E with stand-ins | Planned |
 | B9 | Docs, provider checklists (§81–§82), blockers, commit, push, CI | Planned |
+
+## 9. External blockers for B (need the publisher, the providers or other machines)
+
+The implementation is complete and verified against provider stand-ins; the
+following cannot be done from this container:
+
+- **ReMa's own app registrations.** A Google Cloud "Desktop app" OAuth
+  client (ID and its non-confidential secret; Gmail API and Google
+  Calendar API enabled) and a Microsoft Entra registration (public client,
+  "Mobile and desktop applications" with `http://localhost`, accounts in any
+  organization and personal Microsoft accounts, delegated `User.Read`,
+  `Mail.Read`, `Calendars.ReadWrite`, `offline_access`). Their values go
+  into `src-tauri/connectors.toml` or the release workflow's variables;
+  until then a release build fails on purpose. Steps:
+  [connectors/registration.md](connectors/registration.md).
+- **Google verification** (brand, domain, privacy policy) and, for
+  `gmail.readonly` (a restricted scope), the annual security assessment.
+  Until both pass, Gmail works only for the project's own test users, so
+  the status is **implementation complete, provider verification
+  pending** — not a public Gmail rollout. Calendar scopes need
+  verification but no assessment.
+- **Microsoft publisher verification** (recommended: without it the consent
+  screen shows "unverified"); organizations that require admin consent get
+  ReMa's `PROVIDER_ADMIN_POLICY` message until an administrator approves.
+- **Real accounts on clean macOS and Windows machines** (B §72–§74): this
+  container runs Linux (GNOME keyring through Secret Service); the macOS
+  Keychain and Windows Credential Manager paths of the same `keyring` crate
+  and the platforms' default browsers were not run.
+- **Signed installers.** The release workflow builds unsigned packages;
+  Gatekeeper (macOS notarization) and SmartScreen (Windows code signing)
+  need the publisher's certificates.
+- **System tray.** The container has no tray host: the tray menu (Open,
+  Run Job Mail & Interview Sync, Quit) was not clicked; §76 was run by
+  closing the window with background mode on (validation §4.2).

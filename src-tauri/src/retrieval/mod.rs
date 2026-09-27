@@ -36,7 +36,7 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
-pub use intent::{detect, JobQuery};
+pub use intent::{detect, names_listings, JobQuery};
 
 use crate::{
     llm::{Endpoint, WebObserver},

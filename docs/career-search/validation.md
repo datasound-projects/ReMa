@@ -145,7 +145,7 @@ SerpAPI were never configured.
 |---|---|
 | `cargo fmt --check` | clean |
 | `cargo clippy --all-targets --locked -- -D warnings` | clean |
-| `cargo test --locked` | 684 passed, 3 ignored (explicit-only tests) |
+| `cargo test --locked` | 684 passed, 3 ignored (explicit-only tests); 685 after the CI fix below |
 | `pnpm lint`, `pnpm typecheck` | clean |
 | `pnpm test` | 118 passed (23 files) |
 | `pnpm build` | built |
@@ -204,6 +204,7 @@ empty data directory again (§80).
 | A refused page read was not visible | Shown in the activity by its host only |
 | Scheduled job runs showed a second "Searching the web" stage after the assessment | Provider searches count inside the stage that runs them |
 | Unsloth's detail read "web_search (Unsloth Studio)" in logs and Settings | "web_search" (the runtime names Unsloth Studio) |
+| **CI** failed `business::tests::a_total_outage_is_a_failure_not_an_empty_market` on the first Spec A push: the shared test state left DuckDuckGo discovery on its public address, so on a runner with internet access the "outage" still found employers (the container blocks DuckDuckGo, so it passed locally) | The test state points discovery at a closed local address, like ReMa's job sources. The whole suite was then run through a proxy that refuses and records every request: it also found a test fetching `http://169.254.169.254/latest` (test fetchers accept local addresses) and Google's real token endpoint. Link-local addresses (cloud metadata) are now refused in every mode, and the test state's Google and Microsoft endpoints are closed local addresses. CI green on e3138be |
 
 ### 6.4 Acceptance (§69–§82)
 

@@ -59,6 +59,22 @@
 // and `web.run`'s searches (/codex/v1/alpha/search). MOCK_DUMP=<file> keeps
 // every Codex request body for inspection.
 //
+// Production connector runs (Spec B) can put this server behind the real
+// provider host names of a *release* build: start it with MOCK_TLS_DIR
+// holding a certificate for accounts.google.com, oauth2.googleapis.com,
+// gmail.googleapis.com, www.googleapis.com, login.microsoftonline.com and
+// graph.microsoft.com and port 442 (HTTPS on 443), and map those names to
+// 127.0.0.1. Like the real providers, Google's token endpoint requires the
+// Desktop client's secret, Microsoft's refuses any secret (public client),
+// PKCE S256 is verified and a code works once. `POST /__e2e/oauth
+// {consent, refresh, gmailApi, accessTtl}` plays an organization that
+// requires admin approval (consent "admin_policy") or a user who declines
+// ("deny"), a revoked grant (refresh "revoked") or an unreachable provider
+// ("down"), a Gmail API that is not enabled (gmailApi "disabled") and
+// short-lived access tokens (accessTtl, in seconds). Its local model
+// (`/v1/chat/completions`) answers "… job emails …" with ReMa's connector
+// tools (mail_search, then calendar_check_availability).
+//
 // Network Connect runs add REMA_LINKEDIN_BASE_URL=http://127.0.0.1:8777 and
 // REMA_DEV_LINKEDIN_CLIENT_ID=e2e-linkedin: Sign In with LinkedIn (OpenID
 // Connect, PKCE) grants identity only. To play an app LinkedIn approved for
@@ -67,6 +83,7 @@
 // `POST /__e2e/linkedin {connections: true}`; the Connections API then
 // returns two Nordlicht AI connections and one at a similarly named company.
 
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
@@ -212,6 +229,41 @@ function localToolCalls(body) {
     refused_own_address: results.some((r) => r.includes('reads only pages')),
     injected: INJECTED.test(JSON.stringify(body)), cookie_banner: /Accept all cookies/.test(JSON.stringify(body)) });
   return null;
+}
+
+// A local model that answers a question about the user's job mail and
+// calendar with ReMa's connector tools: it searches job mail, then checks
+// tomorrow 09:00–09:30 (the "Weekly sync"), then answers. It records what
+// reached it: its tools, and whether personal mail or a sign-in token was
+// anywhere in its context.
+const CONNECTOR_QUESTION = /job emails/i;
+function connectorToolCalls(body) {
+  const names = (body.tools ?? []).map((t) => t.function?.name);
+  if (!names.includes('mail_search')) return null;
+  const messages = body.messages ?? [];
+  const lastUser = [...messages].reverse().find((m) => m.role === 'user');
+  if (!CONNECTOR_QUESTION.test(JSON.stringify(lastUser?.content ?? ''))) return null;
+  const called = messages.flatMap((m) => (m.tool_calls ?? []).map((c) => c.function?.name));
+  if (!called.includes('mail_search')) return [{ name: 'mail_search', arguments: { limit: 10 } }];
+  if (!called.includes('calendar_check_availability')) {
+    const day = isoDate(inDays(1));
+    return [{ name: 'calendar_check_availability', arguments: { start: `${day}T09:00`, end: `${day}T09:30`, timezone: 'UTC' } }];
+  }
+  return null;
+}
+
+function connectorAnswer(body) {
+  const names = (body.tools ?? []).map((t) => t.function?.name);
+  const results = (body.messages ?? []).filter((m) => m.role === 'tool')
+    .map((m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content)));
+  if (!names.includes('mail_search') || results.length < 2) return null;
+  const context = JSON.stringify(body);
+  const subjects = [...results[0].matchAll(/\\?"subject\\?":\s*\\?"([^"\\]+)/g)].map((m) => m[1]);
+  const busy = /Weekly sync/.test(results[1]);
+  log({ model: 'connector-tools', step: 'answer', tools: names, job_mail: subjects.length,
+    personal_mail: context.includes('PRIVATE-'), sign_in_tokens: /\b[gm]-(at|rt)-\d/.test(context) });
+  return `You have ${subjects.length} job emails; the newest: ${subjects.slice(0, 3).join('; ')}. `
+    + `Tomorrow 09:00–09:30 is ${busy ? 'taken by "Weekly sync"' : 'free'}.`;
 }
 
 function modelReply(body) {
@@ -686,6 +738,8 @@ function unslothCompletions(req, body, res) {
 const idToken = (claims) => `h.${b64url(JSON.stringify(claims))}.s`;
 const codes = new Map();
 let linkedinConnections = false;
+/** POST /__e2e/oauth: consent allow|deny|admin_policy, refresh ok|revoked|down, gmailApi ok|disabled, accessTtl seconds. */
+let oauthMode = { consent: 'allow', refresh: 'ok', gmailApi: 'ok', accessTtl: 3599 };
 const log = (entry) => process.stdout.write(`${JSON.stringify({ at: new Date().toISOString(), ...entry })}\n`);
 
 function send(res, status, body, headers = {}) {
@@ -777,7 +831,7 @@ function route(req, url, body, res) {
   if (p === '/v1/models') return send(res, 200, { data: [{ id: 'mock-classifier', object: 'model' }] });
   if (p === '/v1/chat/completions') {
     const request = JSON.parse(body || '{}');
-    const calls = localToolCalls(request);
+    const calls = localToolCalls(request) ?? connectorToolCalls(request);
     if (calls) {
       log({ model: 'local-tools', step: 'call', calls: calls.map((c) => `${c.name} ${JSON.stringify(c.arguments)}`) });
       res.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -789,7 +843,7 @@ function route(req, url, body, res) {
     }
     const text = /Wien AI Labs/i.test(JSON.stringify(request.messages?.at(-1) ?? ''))
       ? 'Wien AI Labs builds retrieval systems for Austrian public services in Vienna; its team page lists Sophie Lehner as Head of AI.'
-      : modelReply(request);
+      : connectorAnswer(request) ?? modelReply(request);
     res.writeHead(200, { 'content-type': 'text/event-stream' });
     const finish = () => {
       res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: text } }] })}\n\n`);
@@ -802,25 +856,47 @@ function route(req, url, body, res) {
     return;
   }
 
-  // Authorization: the user signs in and allows access.
+  // Authorization: the user signs in and allows access (or, after
+  // POST /__e2e/oauth, declines or meets an admin-approval policy).
   if (p === '/o/oauth2/v2/auth' || p === '/common/oauth2/v2.0/authorize') {
+    const state = encodeURIComponent(q.get('state'));
+    const microsoft = p.startsWith('/common/');
+    log({ oauth: 'authorize', provider: microsoft ? 'microsoft' : 'google', pkce: q.get('code_challenge_method'), scope: q.get('scope') });
+    if (oauthMode.consent === 'deny' || (oauthMode.consent === 'admin_policy' && microsoft)) {
+      const description = oauthMode.consent === 'deny'
+        ? 'AADSTS65004: User declined to consent to access the app.'
+        : 'AADSTS90094: An administrator of Contoso has set a policy that prevents you from granting ReMa the permissions it is requesting.';
+      res.writeHead(302, { location: `${q.get('redirect_uri')}/?error=access_denied&error_description=${encodeURIComponent(description)}&state=${state}` });
+      return res.end();
+    }
     const code = `code-${codes.size + 1}`;
     codes.set(code, { scope: q.get('scope'), challenge: q.get('code_challenge'), redirect: q.get('redirect_uri') });
-    const target = `${q.get('redirect_uri')}/?code=${code}&state=${encodeURIComponent(q.get('state'))}`;
+    const target = `${q.get('redirect_uri')}/?code=${code}&state=${state}`;
     res.writeHead(302, { location: target });
     return res.end();
   }
   if (p === '/token' || p === '/common/oauth2/v2.0/token') {
     const google = p === '/token';
+    // Like the real endpoints: Google Desktop clients must send their
+    // (non-confidential) secret; Microsoft public clients must not.
+    if (google && !form.get('client_secret')) return send(res, 400, { error: 'invalid_request', error_description: 'client_secret is missing.' });
+    if (!google && form.get('client_secret')) {
+      return send(res, 401, { error: 'invalid_client', error_description: "AADSTS700025: Client is public so neither 'client_assertion' nor 'client_secret' should be presented." });
+    }
     if (form.get('grant_type') === 'authorization_code') {
       const grant = codes.get(form.get('code'));
-      if (!grant || grant.redirect !== form.get('redirect_uri') || !form.get('code_verifier')) {
+      const verifier = form.get('code_verifier') ?? '';
+      const s256 = crypto.createHash('sha256').update(verifier).digest('base64url');
+      if (!grant || grant.redirect !== form.get('redirect_uri') || s256 !== grant.challenge) {
+        log({ oauth: 'exchange', provider: google ? 'google' : 'microsoft', ok: false });
         return send(res, 400, { error: 'invalid_grant' });
       }
+      codes.delete(form.get('code')); // a code works once
+      log({ oauth: 'exchange', provider: google ? 'google' : 'microsoft', ok: true, pkce: 'S256 verified' });
       return send(res, 200, {
         access_token: `${google ? 'g' : 'm'}-at-${Date.now()}`,
         refresh_token: `${google ? 'g' : 'm'}-rt-1`,
-        expires_in: 3599,
+        expires_in: oauthMode.accessTtl,
         token_type: 'Bearer',
         scope: grant.scope,
         id_token: google
@@ -828,7 +904,12 @@ function route(req, url, body, res) {
           : idToken({ oid: 'm-oid', preferred_username: 'ana@outlook.com', name: 'Ana Example' }),
       });
     }
-    return send(res, 200, { access_token: `${google ? 'g' : 'm'}-at-${Date.now()}`, expires_in: 3599, ...(google ? {} : { refresh_token: `m-rt-${Date.now()}` }) });
+    log({ oauth: 'refresh', provider: google ? 'google' : 'microsoft', mode: oauthMode.refresh });
+    if (oauthMode.refresh === 'down') return send(res, 503, 'Service Unavailable');
+    if (oauthMode.refresh === 'revoked') {
+      return send(res, 400, { error: 'invalid_grant', error_description: google ? 'Token has been expired or revoked.' : 'AADSTS70000: The provided grant has been revoked.' });
+    }
+    return send(res, 200, { access_token: `${google ? 'g' : 'm'}-at-${Date.now()}`, expires_in: oauthMode.accessTtl, ...(google ? {} : { refresh_token: `m-rt-${Date.now()}` }) });
   }
   if (p === '/revoke') return send(res, 200, {});
 
@@ -874,7 +955,12 @@ function route(req, url, body, res) {
   }
 
   // Gmail
-  if (p === '/gmail/v1/users/me/profile') return send(res, 200, { emailAddress: 'ana@gmail.com', historyId: String(historyId) });
+  if (p === '/gmail/v1/users/me/profile') {
+    if (oauthMode.gmailApi === 'disabled') {
+      return send(res, 403, { error: { code: 403, message: 'Gmail API has not been used in project 123456 before or it is disabled.', status: 'PERMISSION_DENIED', details: [{ reason: 'SERVICE_DISABLED' }] } });
+    }
+    return send(res, 200, { emailAddress: 'ana@gmail.com', historyId: String(historyId) });
+  }
   if (p === '/gmail/v1/users/me/messages') {
     const after = Number((q.get('q') ?? '').match(/after:(\d+)/)?.[1] ?? 0) * 1000;
     const before = Number((q.get('q') ?? '').match(/before:(\d+)/)?.[1] ?? Infinity) * 1000;
@@ -967,6 +1053,7 @@ function route(req, url, body, res) {
     return send(res, 200, { value: outlookEvents.filter((e) => graphMs(e.start) < max && min < graphMs(e.end)) });
   }
   if (p === '/graph/v1.0/me/events') return send(res, 200, { value: [] });
+  if (p === '/graph/v1.0/me/calendar') return send(res, 200, { id: 'calendar-1' });
   if (p === '/graph/v1.0/me/calendar/getSchedule') {
     const request = JSON.parse(body);
     const min = graphMs(request.startTime);
@@ -1003,6 +1090,10 @@ function route(req, url, body, res) {
     accountsCheck = JSON.parse(body);
     return send(res, 200, { ok: true });
   }
+  if (p === '/__e2e/oauth' && req.method === 'POST') {
+    oauthMode = { ...oauthMode, ...JSON.parse(body) };
+    return send(res, 200, { ok: true, oauthMode });
+  }
   if (p === '/__e2e/next' && req.method === 'POST') {
     deliverNext();
     return send(res, 200, { ok: true });
@@ -1030,8 +1121,14 @@ function handle(req, res) {
     if (req.headers['content-encoding'] === 'zstd') raw = zlib.zstdDecompressSync(raw);
     const body = raw.toString('utf8');
     const url = new URL(req.url, base);
+    // Microsoft Graph at its own host name (release builds): /v1.0/… here
+    // is /graph/v1.0/… in the debug setup.
+    if ((req.headers.host ?? '').startsWith('graph.microsoft.com') && !url.pathname.startsWith('/graph/')) {
+      url.pathname = `/graph${url.pathname}`;
+    }
     const auth = req.headers.authorization ?? '';
     log({
+      host: req.headers.host,
       method: req.method,
       path: url.pathname,
       query: url.search.length > 300 ? `${url.search.slice(0, 300)}…` : url.search,

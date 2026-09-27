@@ -1315,31 +1315,6 @@ async fn old_google_tokens_from_a_user_client_are_revoked_and_reconnect_is_asked
     assert!(gmail.detail.unwrap().contains("its own Google sign-in"));
 }
 
-/// Release checks (B §51, §80): the backend opens the system browser through
-/// the opener plugin, and no webview may open addresses itself.
-#[test]
-fn the_opener_plugin_is_registered_and_no_webview_can_open_addresses() {
-    let lib = include_str!("../lib.rs");
-    assert!(lib.contains(".plugin(tauri_plugin_opener::init())"));
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("capabilities");
-    let mut files = 0;
-    for entry in std::fs::read_dir(dir).unwrap() {
-        let path = entry.unwrap().path();
-        if path.extension().is_some_and(|e| e == "json") {
-            files += 1;
-            let capability: serde_json::Value =
-                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-            let permissions = capability["permissions"].to_string();
-            assert!(
-                !permissions.contains("opener:") && !permissions.contains("shell:"),
-                "{}: {permissions}",
-                path.display()
-            );
-        }
-    }
-    assert!(files >= 1);
-}
-
 // ── Spec B: one sign-in at a time, pages, checks, errors ─────────────
 
 #[tokio::test]

@@ -1260,6 +1260,17 @@ fn about_own_data(text: &str) -> bool {
             .any(|w| lower.contains(w))
 }
 
+/// A request for current job listings. A question about the user's own
+/// mail, calendar or applications is not one unless it names listings:
+/// "Which job emails did I get?" is answered from the connectors, "Find jobs
+/// like my applications" is searched.
+fn listing_search(text: &str) -> Option<retrieval::JobQuery> {
+    if about_own_data(text) && !retrieval::names_listings(text) {
+        return None;
+    }
+    retrieval::detect(text)
+}
+
 /// What the model is told when ReMa MCP's tools are offered.
 const REMA_MCP_PROMPT: &str = "\n\nReMa MCP, ReMa's built-in job-search tools, is available: \
 mcp_rema_search_jobs finds current vacancies (strict filters, source links, coverage), \
@@ -1440,7 +1451,7 @@ async fn generate(
             .last()
             .filter(|t| t.role == MessageRole::User)
             .filter(|_| business.is_none())
-            .and_then(|t| retrieval::detect(&t.content));
+            .and_then(|t| listing_search(&t.content));
         if let Some(query) = job {
             return search_then_answer(
                 state,
@@ -2075,6 +2086,57 @@ mod tests {
             .tool_specs()
             .iter()
             .all(|s| !s.name.starts_with("applications_")));
+    }
+
+    #[tokio::test]
+    async fn questions_about_job_mail_read_the_connectors_not_job_listings() {
+        // Found in the packaged-release run: "job emails" started a public
+        // job-listing search instead of answering from the user's mail.
+        let question =
+            "Which job emails did I get recently, and is tomorrow at 09:00 free for a call?";
+        assert!(retrieval::detect(question).is_some(), "reads like a search");
+        let (state, _, llm) = setup(FakeLanguageModel::replying(&["Two job emails."])).await;
+        let now = now_ms();
+        state
+            .db
+            .call(|c| {
+                crate::db::jobs::insert_application(
+                    c,
+                    &crate::db::jobs::ApplicationRecord::new(
+                        "Acme",
+                        crate::models::jobs::ApplicationStatus::InProcess,
+                        now,
+                    ),
+                )
+            })
+            .unwrap();
+
+        let sent = send_message(&state, send(None, question)).await.unwrap();
+        let done = wait_until_done(&state, sent.assistant_message.id).await;
+        assert_eq!(done.content, "Two job emails.");
+        let requests = llm.requests.lock().unwrap().clone();
+        assert_eq!(requests.len(), 1, "answered directly, no search first");
+        let (_, request) = requests[0].clone();
+        assert!(request.web.is_none(), "no web access next to private data");
+        let names: Vec<String> = request
+            .tool_specs()
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
+        assert!(names.contains(&connector_tools::APPLICATIONS_FIND_MATCH.to_string()));
+        // No web search or career search tools next to private data (MCP
+        // tools stay, and need approval once private data was read).
+        assert!(!names.iter().any(|n| n.starts_with("rema_")), "{names:?}");
+
+        // Named listings stay a search, whatever else the message says.
+        assert!(listing_search(question).is_none());
+        for search in [
+            "Find data engineer jobs in Vienna and email me the list.",
+            "Find jobs similar to my applications.",
+            "Find senior AI engineering jobs in Vienna",
+        ] {
+            assert!(listing_search(search).is_some(), "{search}");
+        }
     }
 
     #[tokio::test]
@@ -3074,6 +3136,7 @@ mod tests {
         assert!(about_own_data("What did my recruiter say about the offer?"));
         assert!(about_own_data("Any emails from recruiters this week?"));
         assert!(about_own_data("When is my interview with Bitpanda?"));
+        assert!(about_own_data("Which job emails did I get recently?"));
     }
 
     #[test]
