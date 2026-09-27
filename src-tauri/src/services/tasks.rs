@@ -11,8 +11,7 @@ use crate::{
     models::{
         connectors::ConnectorKind,
         task::{
-            BuiltinTask, EndCondition, Schedule, ScheduledTask, TaskExecution, TaskInput, TaskKind,
-            TaskStatus,
+            BuiltinTask, EndCondition, Schedule, ScheduledTask, TaskInput, TaskKind, TaskStatus,
         },
     },
     services::{
@@ -302,7 +301,7 @@ pub fn run_job_mail_sync_now(state: &AppState) -> AppResult<()> {
         .db
         .call(|c| repo::builtin(c, BuiltinTask::JobMailSync))?
     {
-        Some(task) if task.enabled => run_now(state, task.id),
+        Some(task) if task.enabled => run_now(state, task.id).map(|_| ()),
         _ => Ok(()),
     }
 }
@@ -354,8 +353,9 @@ pub fn delete(state: &AppState, id: i64) -> AppResult<()> {
     Ok(())
 }
 
-/// Starts a run immediately. Does not change the schedule or run count.
-pub fn run_now(state: &AppState, id: i64) -> AppResult<()> {
+/// Starts a run immediately and returns its id: a manual run in the same
+/// run history as scheduled ones. Does not change the schedule or run count.
+pub fn run_now(state: &AppState, id: i64) -> AppResult<i64> {
     let task = state.db.call(|c| repo::get(c, id))?;
     // Mail is read only by the built-in task while it is on, by hand too.
     if is_old_mail_task(&task) {
@@ -384,13 +384,6 @@ pub fn list(state: &AppState) -> AppResult<Vec<ScheduledTask>> {
     rows.into_iter().map(|row| to_view(state, row)).collect()
 }
 
-pub fn executions(state: &AppState, task_id: i64) -> AppResult<Vec<TaskExecution>> {
-    state.db.call(|c| {
-        repo::get(c, task_id)?; // 404 for unknown tasks
-        repo::list_executions(c, task_id, 200)
-    })
-}
-
 fn to_view(state: &AppState, row: TaskRow) -> AppResult<ScheduledTask> {
     let tz = schedule::timezone(&row.timezone)?;
     let (start_date, start_time) = schedule::millis_to_local(row.start_at, &tz)?;
@@ -408,7 +401,7 @@ fn to_view(state: &AppState, row: TaskRow) -> AppResult<ScheduledTask> {
     } else {
         TaskStatus::Active
     };
-    let last_run_status = state.db.call(|c| repo::last_execution_status(c, row.id))?;
+    let last_run_status = state.db.call(|c| crate::db::runs::last_status(c, row.id))?;
     Ok(ScheduledTask {
         id: row.id,
         running: state.scheduler.is_running(row.id),
@@ -784,11 +777,14 @@ mod tests {
                 model: &task.model,
                 max_output_tokens: None,
             },
-            "",
-            30,
-            true,
+            crate::services::mail_monitor::MailTask {
+                instructions: "",
+                lookback_days: 30,
+                calendar: true,
+            },
             &tokio_util::sync::CancellationToken::new(),
             now_ms(),
+            std::sync::Arc::new(crate::services::runs::NoActivity),
         )
         .await
         .unwrap_err();

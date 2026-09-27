@@ -14,6 +14,7 @@ pub mod notifications;
 pub mod portfolio;
 pub mod profile;
 pub mod providers;
+pub mod runs;
 pub mod tasks;
 
 use std::{
@@ -36,6 +37,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0007_rema_mcp.sql"),
     include_str!("migrations/0008_connectors.sql"),
     include_str!("migrations/0009_job_mail_sync.sql"),
+    include_str!("migrations/0010_run_history.sql"),
 ];
 
 #[derive(Clone)]
@@ -254,6 +256,161 @@ mod tests {
             (false, None),
             "connectors no longer read mail on their own"
         );
+    }
+
+    #[test]
+    fn runs_keep_their_ids_results_and_links_when_run_history_arrives() {
+        // A database as ReMa 0009 found it: a task with four runs (the newest
+        // deleted), one searched jobs that Analytics holds, one a mail report,
+        // one cancelled, one interrupted.
+        let mut conn = Connection::open_in_memory().unwrap();
+        for sql in &MIGRATIONS[..9] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 9).unwrap();
+        conn.execute_batch(
+            r#"INSERT INTO scheduled_tasks
+                 (id, name, prompt, provider_id, model_id, schedule, timezone, start_at, status,
+                  created_at, updated_at, kind)
+             VALUES (1, 'Jobs', 'Find jobs', 'p', 'm', '{"kind":"daily","every":1}', 'UTC', 0,
+                     'active', 0, 0, '{"type":"prompt"}');
+             INSERT INTO task_executions
+                 (id, task_id, trigger, scheduled_for, started_at, finished_at, status, provider_id,
+                  model_id, prompt, result, error, report)
+             VALUES (1, 1, 'scheduled', 10, 11, 20, 'succeeded', 'p', 'm', 'Find jobs', '| a |', NULL, NULL),
+                    (2, 1, 'manual', NULL, 30, 40, 'succeeded', 'p', 'm', 'Find jobs', 'done', NULL,
+                     '{"windowStart":0,"windowEnd":1}'),
+                    (3, 1, 'manual', NULL, 50, 60, 'failed', 'p', 'm', 'Find jobs', NULL,
+                     'The run was cancelled.', NULL),
+                    (4, 1, 'scheduled', 70, 71, 80, 'failed', 'p', 'm', 'Find jobs', NULL,
+                     'Interrupted: ReMa was closed while this task was running.', NULL),
+                    (5, 1, 'manual', NULL, 90, 95, 'succeeded', 'p', 'm', 'Find jobs', 'x', NULL, NULL);
+             DELETE FROM task_executions WHERE id = 5;
+             INSERT INTO job_search_runs (id, origin, title, query, source, task_id, execution_id,
+                                          result_count, created_at)
+             VALUES (7, 'task:1', 'Jobs', 'Find jobs', 'task', 1, 1, 1, 21);"#,
+        )
+        .unwrap();
+
+        migrate(&mut conn).unwrap();
+        type Run = (
+            i64,
+            String,
+            i64,
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+        );
+        let runs: Vec<Run> = conn
+            .prepare(
+                "SELECT id, status, queued_at, started_at, error_category, result
+                 FROM task_executions ORDER BY id",
+            )
+            .unwrap()
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            runs,
+            [
+                (
+                    1,
+                    "succeeded".into(),
+                    11,
+                    Some(11),
+                    None,
+                    Some("| a |".into())
+                ),
+                (
+                    2,
+                    "succeeded".into(),
+                    30,
+                    Some(30),
+                    None,
+                    Some("done".into())
+                ),
+                (
+                    3,
+                    "cancelled".into(),
+                    50,
+                    Some(50),
+                    Some("cancelled".into()),
+                    None
+                ),
+                (
+                    4,
+                    "failed".into(),
+                    71,
+                    Some(71),
+                    Some("interrupted".into()),
+                    None
+                ),
+            ]
+        );
+        let outputs: Vec<(i64, String, String)> = conn
+            .prepare(
+                "SELECT execution_id, kind, reference FROM task_run_outputs ORDER BY execution_id",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            outputs,
+            [
+                (
+                    1,
+                    "job_search_results".into(),
+                    r#"{"type":"job_search","id":7}"#.into()
+                ),
+                (
+                    2,
+                    "application_watch".into(),
+                    r#"{"type":"run_report"}"#.into()
+                ),
+            ]
+        );
+        // Analytics still points at its run, and a deleted run's id is not
+        // handed out again.
+        let linked: i64 = conn
+            .query_row(
+                "SELECT execution_id FROM job_search_runs WHERE id = 7",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(linked, 1);
+        conn.execute(
+            "INSERT INTO task_executions (task_id, trigger, status, queued_at, provider_id,
+                                          model_id, prompt)
+             VALUES (1, 'manual', 'queued', 100, 'p', 'm', 'Find jobs')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(conn.last_insert_rowid(), 6);
+        // Deleting the task deletes its runs and everything they recorded.
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        conn.execute("DELETE FROM scheduled_tasks WHERE id = 1", [])
+            .unwrap();
+        let left: i64 = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM task_executions) + (SELECT COUNT(*) FROM task_run_outputs)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(left, 0);
     }
 
     #[test]

@@ -10,6 +10,8 @@
 //!
 //! At most one synchronization per mailbox runs at a time.
 
+use std::sync::Arc;
+
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -21,6 +23,7 @@ use crate::{
         connectors::{ConnectorId, ConnectorKind},
         jobs::JobRunReport,
     },
+    services::runs::{Activity, ActivitySink},
     state::AppState,
     time::now_ms,
 };
@@ -88,6 +91,16 @@ async fn no_mailbox(state: &AppState) -> AppError {
     AppError::configuration("Connect Gmail or Outlook Mail in Settings → Connectors first.")
 }
 
+/// What "Job Mail & Interview Sync" is set to do.
+pub struct MailTask<'a> {
+    /// The user's instructions (interpretation only).
+    pub instructions: &'a str,
+    /// Initial lookback in days.
+    pub lookback_days: u32,
+    /// Add confirmed interviews to the connected calendars.
+    pub calendar: bool,
+}
+
 /// One run of "Job Mail & Interview Sync" with the task's model, over every
 /// connected mailbox (Gmail and Outlook without duplicates):
 ///
@@ -101,12 +114,16 @@ async fn no_mailbox(state: &AppState) -> AppError {
 pub async fn run_task(
     state: &AppState,
     model: RunModel<'_>,
-    instructions: &str,
-    lookback_days: u32,
-    calendar: bool,
+    task: MailTask<'_>,
     cancel: &CancellationToken,
     now: i64,
+    activity: Arc<dyn Activity>,
 ) -> AppResult<JobRunReport> {
+    let MailTask {
+        instructions,
+        lookback_days,
+        calendar,
+    } = task;
     let ready = connectors::ready(state, ConnectorKind::Mail).await;
     if ready.is_empty() {
         return Err(no_mailbox(state).await);
@@ -154,15 +171,11 @@ pub async fn run_task(
             .collect(),
         calendars: calendars.iter().map(|c| c.as_ref()).collect(),
     };
-    let result = jobs::run(
-        state,
-        Some(model),
-        sources,
-        RunConfig::new(instructions, calendar),
-        cancel,
-        now,
-    )
-    .await;
+    let config = RunConfig {
+        activity: ActivitySink(activity),
+        ..RunConfig::new(instructions, calendar)
+    };
+    let result = jobs::run(state, Some(model), sources, config, cancel, now).await;
     let finished = now_ms();
     let error = result.as_ref().err().map(describe);
     for (id, ..) in &mailboxes {

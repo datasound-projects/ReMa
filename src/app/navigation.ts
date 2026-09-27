@@ -7,7 +7,8 @@ export type ProfileSection = 'documents' | 'custom';
 export type View =
   | { page: 'chat'; conversationId: number | null; agentIds?: string[] }
   | { page: 'agents' }
-  | { page: 'tasks' }
+  /** `taskId`: the task whose runs are open; `runId`: the run shown (the newest when absent). */
+  | { page: 'tasks'; taskId?: number | null; runId?: number | null }
   | { page: 'profile'; section?: ProfileSection }
   /** `portfolioId`: the Portfolio Studio document open in the editor. */
   | { page: 'portfolio'; portfolioId?: number | null }

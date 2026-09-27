@@ -884,7 +884,8 @@ pub struct TaskResultRow {
 }
 
 const RESULT_SELECT: &str =
-    "SELECT e.id, e.task_id, t.name, e.prompt, e.result, e.started_at, e.provider_id, e.model_id
+    "SELECT e.id, e.task_id, t.name, e.prompt, e.result, COALESCE(e.started_at, e.queued_at),
+            e.provider_id, e.model_id
      FROM task_executions e JOIN scheduled_tasks t ON t.id = e.task_id";
 
 fn result_from_row(r: &Row) -> rusqlite::Result<TaskResultRow> {

@@ -53,12 +53,16 @@ use crate::{
     },
     error::{AppError, AppResult},
     llm::{ChatRequest, Endpoint, Finish},
+    models::task::StageStatus,
     models::{
-        connectors::{ConnectorId, ProviderId},
+        connectors::{ConnectorId, ConnectorKind, ProviderId},
         jobs::{CalendarOutcome, CalendarReport, EmailCategory, JobRunReport, ProposedSlot},
         provider::ModelRef,
     },
-    services::notifications::{self, Notice},
+    services::{
+        notifications::{self, Notice},
+        runs::{count, join_names, ActivitySink},
+    },
     state::AppState,
 };
 use calendar_sync::CalendarPolicy;
@@ -110,6 +114,8 @@ pub struct RunConfig {
     /// Check calendars and handle confirmed interviews.
     pub calendar: bool,
     pub policy: CalendarPolicy,
+    /// Where the run's stages are recorded (the task run's progress).
+    pub activity: ActivitySink,
 }
 
 impl RunConfig {
@@ -118,6 +124,7 @@ impl RunConfig {
             instructions: instructions.to_string(),
             calendar,
             policy: CalendarPolicy::default(),
+            activity: ActivitySink::default(),
         }
     }
 }
@@ -604,6 +611,20 @@ async fn classify(
         .filter(|m| by_provider.contains_key(&m.provider))
         .collect();
     report.deferred_emails += pending.len().saturating_sub(MAX_EXTRACTIONS_PER_RUN) as u32;
+    let to_read = pending.len().min(MAX_EXTRACTIONS_PER_RUN) as u32;
+    if to_read == 0 {
+        config
+            .activity
+            .done("classify", "No job-related messages to read");
+    } else {
+        config.activity.running(
+            "classify",
+            &format!(
+                "Reading {}",
+                count(to_read, "job-related message", "job-related messages")
+            ),
+        );
+    }
     let known = state.db.call(|c| applications::known_applications(c, 20))?;
     let today = jiff::Timestamp::from_millisecond(now)
         .map(|t| t.to_zoned(jiff::tz::TimeZone::system()).date().to_string())
@@ -786,6 +807,15 @@ async fn classify(
         };
         state.db.call(|c| repo::upsert_mail(c, &record))?;
     }
+    if to_read > 0 {
+        config.activity.done(
+            "classify",
+            &format!(
+                "Read {}",
+                count(to_read, "job-related message", "job-related messages")
+            ),
+        );
+    }
     Ok(())
 }
 
@@ -811,16 +841,43 @@ pub async fn run(
         ..JobRunReport::default()
     };
 
+    let activity = config.activity.clone();
+    let mut stages = vec![
+        ("mail", "Read new mail"),
+        ("triage", "Find job-related messages"),
+        ("classify", "Read job-related messages"),
+        ("applications", "Update applications"),
+    ];
+    if config.calendar {
+        stages.push(("calendar", "Check calendars"));
+    }
+    activity.plan(&stages);
+
     // 1. Sync every mailbox (errors stay with their mailbox).
+    activity.running(
+        "mail",
+        &format!(
+            "Reading new mail from {}",
+            join_names(sources.mail.iter().map(|s| s.connector.name()))
+        ),
+    );
     let mut synced = Vec::new();
     for source in &sources.mail {
         if cancel.is_cancelled() {
             return Err(cancelled());
         }
         match sync_mailbox(state, source, &mut report, now).await {
-            Ok(()) => synced.push(source),
+            Ok(()) => {
+                activity.used_connector(source.connector.name());
+                synced.push(source)
+            }
             Err(error @ AppError::Authentication(_)) if sources.mail.len() == 1 => {
-                return Err(error)
+                activity.stage(
+                    "mail",
+                    StageStatus::Failed,
+                    &format!("{} could not be read", source.connector.name()),
+                );
+                return Err(error);
             }
             Err(error) => report.issues.push(format!(
                 "{} could not be synchronized: {}",
@@ -829,15 +886,39 @@ pub async fn run(
             )),
         }
     }
+    if synced.is_empty() && !sources.mail.is_empty() {
+        activity.stage("mail", StageStatus::Failed, "No mailbox could be read");
+    } else {
+        activity.done(
+            "mail",
+            &format!(
+                "Synchronized {} · {}",
+                join_names(synced.iter().map(|s| s.connector.name())),
+                count(report.new_emails, "new message", "new messages")
+            ),
+        );
+    }
 
     // 2–3. Relevance and classification need a model.
     let mut touched = HashSet::new();
     match &model {
         Some(model) => {
+            activity.running("triage", "Finding job-related messages");
             for source in &synced {
                 let provider = source.provider.provider();
                 triage(state, model, provider, &config, &mut report, cancel).await?;
             }
+            activity.done(
+                "triage",
+                &format!(
+                    "Found {}",
+                    count(
+                        report.relevant_emails,
+                        "job-related message",
+                        "job-related messages"
+                    )
+                ),
+            );
             classify(
                 state,
                 model,
@@ -851,18 +932,35 @@ pub async fn run(
             )
             .await?;
         }
-        None => report.issues.push(
-            "No model is set up: new job emails wait until you choose a model for the task.".into(),
-        ),
+        None => {
+            activity.skipped("triage", "No model is set up");
+            activity.skipped("classify", "No model is set up");
+            report.issues.push(
+                "No model is set up: new job emails wait until you choose a model for the task."
+                    .into(),
+            )
+        }
     }
     report.applications_updated = touched.len() as u32;
     state
         .db
         .call(|c| applications::settle_past_interviews(c, now))?;
+    activity.done(
+        "applications",
+        &if touched.is_empty() {
+            "No application changed".to_string()
+        } else {
+            format!(
+                "Updated {}",
+                count(touched.len() as u64, "application", "applications")
+            )
+        },
+    );
 
     // 4. Calendars.
     if config.calendar {
         if sources.calendars.is_empty() {
+            activity.skipped("calendar", "No calendar is connected");
             let waiting = state.db.call(|c| repo::interviews_to_sync(c, now))?;
             if waiting.iter().any(|i| {
                 i.state == repo::InterviewState::Confirmed && i.calendar_event_id.is_none()
@@ -874,6 +972,15 @@ pub async fn run(
                 );
             }
         } else {
+            let names: Vec<&str> = sources
+                .calendars
+                .iter()
+                .map(|c| ConnectorId::of(c.provider(), ConnectorKind::Calendar).name())
+                .collect();
+            activity.running(
+                "calendar",
+                &format!("Checking {}", join_names(names.iter().copied())),
+            );
             let calendar = sync_calendars(
                 state,
                 &sources.calendars,
@@ -883,6 +990,10 @@ pub async fn run(
                 &mut report.issues,
             )
             .await?;
+            for name in &names {
+                activity.used_connector(name);
+            }
+            activity.done("calendar", &calendar_label(&calendar));
             report.calendar = Some(calendar);
         }
     }
@@ -892,6 +1003,31 @@ pub async fn run(
     report::count(&mut report);
     state.events.applications_changed();
     Ok(report)
+}
+
+/// "Calendar checked · 1 interview added, 1 conflict".
+fn calendar_label(calendar: &CalendarReport) -> String {
+    let mut parts = Vec::new();
+    if calendar.created > 0 {
+        parts.push(format!(
+            "{} added",
+            count(calendar.created, "interview", "interviews")
+        ));
+    }
+    if calendar.updated > 0 {
+        parts.push(format!(
+            "{} moved",
+            count(calendar.updated, "interview", "interviews")
+        ));
+    }
+    if calendar.conflicts > 0 {
+        parts.push(count(calendar.conflicts, "conflict", "conflicts"));
+    }
+    if parts.is_empty() {
+        "Calendar checked · no changes".to_string()
+    } else {
+        format!("Calendar checked · {}", parts.join(", "))
+    }
 }
 
 /// The calendar step for every interview that needs it.

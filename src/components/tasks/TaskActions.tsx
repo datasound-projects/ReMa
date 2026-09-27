@@ -18,10 +18,12 @@ interface TaskActionsProps {
   onEdit: () => void;
   onDeleted?: () => void;
   onError: (message: string) => void;
+  /** A run started with Run now (its id). */
+  onRan?: (runId: number) => void;
 }
 
 /** The "⋯" menu of a task: run now, edit, pause/resume, delete. */
-export function TaskActions({ task, onEdit, onDeleted, onError }: TaskActionsProps) {
+export function TaskActions({ task, onEdit, onDeleted, onError, onRan }: TaskActionsProps) {
   const [confirming, setConfirming] = useState(false);
 
   const attempt = (action: () => Promise<unknown>) => {
@@ -29,7 +31,11 @@ export function TaskActions({ task, onEdit, onDeleted, onError }: TaskActionsPro
   };
 
   const items: MenuItem[] = [
-    { label: 'Run now', disabled: !canRunNow(task), onSelect: () => attempt(() => runTaskNow(task.id)) },
+    {
+      label: 'Run now',
+      disabled: !canRunNow(task),
+      onSelect: () => attempt(() => runTaskNow(task.id).then((runId) => onRan?.(runId))),
+    },
     { label: 'Edit', onSelect: onEdit },
     task.enabled
       ? { label: 'Pause', onSelect: () => attempt(() => setTaskEnabled(task.id, false)) }

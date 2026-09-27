@@ -19,7 +19,7 @@ use crate::models::{
     portfolio::PortfolioChanged,
     profile::ProfileChanged,
     provider::ProvidersChanged,
-    task::TasksChanged,
+    task::{TaskRunChanged, TasksChanged},
 };
 
 pub trait EventSink: Send + Sync {
@@ -27,6 +27,8 @@ pub trait EventSink: Send + Sync {
     fn conversations_changed(&self);
     fn providers_changed(&self);
     fn tasks_changed(&self);
+    /// A run was created or changed (status, progress, outputs).
+    fn task_run_changed(&self, task_id: i64, run_id: i64);
     fn connectors_changed(&self);
     fn applications_changed(&self);
     fn notifications_changed(&self);
@@ -58,6 +60,10 @@ impl EventSink for TauriEvents {
 
     fn tasks_changed(&self) {
         let _ = TasksChanged.emit(&self.0);
+    }
+
+    fn task_run_changed(&self, task_id: i64, run_id: i64) {
+        let _ = TaskRunChanged { task_id, run_id }.emit(&self.0);
     }
 
     fn connectors_changed(&self) {
@@ -115,6 +121,8 @@ pub struct RecordingEvents {
     pub conversations: Mutex<usize>,
     pub providers: Mutex<usize>,
     pub tasks: Mutex<usize>,
+    /// (task id, run id) of every run change.
+    pub runs: Mutex<Vec<(i64, i64)>>,
     pub connectors: Mutex<usize>,
     pub applications: Mutex<usize>,
     pub notifications: Mutex<usize>,
@@ -143,6 +151,10 @@ impl EventSink for RecordingEvents {
 
     fn tasks_changed(&self) {
         *self.tasks.lock().unwrap() += 1;
+    }
+
+    fn task_run_changed(&self, task_id: i64, run_id: i64) {
+        self.runs.lock().unwrap().push((task_id, run_id));
     }
 
     fn connectors_changed(&self) {

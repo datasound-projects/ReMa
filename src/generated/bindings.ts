@@ -226,8 +226,13 @@ export const commands = {
 	updateTask: (id: number, input: TaskInput) => __TAURI_INVOKE<ScheduledTask>("update_task", { id, input }),
 	setTaskEnabled: (id: number, enabled: boolean) => __TAURI_INVOKE<ScheduledTask>("set_task_enabled", { id, enabled }),
 	deleteTask: (id: number) => __TAURI_INVOKE<null>("delete_task", { id }),
-	runTaskNow: (id: number) => __TAURI_INVOKE<null>("run_task_now", { id }),
-	listTaskExecutions: (taskId: number) => __TAURI_INVOKE<TaskExecution[]>("list_task_executions", { taskId }),
+	/**  Starts a manual run; returns its id. */
+	runTaskNow: (id: number) => __TAURI_INVOKE<number>("run_task_now", { id }),
+	/**  A task's runs, newest first; `before` is the last run id already shown. */
+	listTaskRuns: (taskId: number, before: number | null) => __TAURI_INVOKE<TaskRunPage>("list_task_runs", { taskId, before }),
+	getTaskRun: (runId: number) => __TAURI_INVOKE<TaskRun>("get_task_run", { runId }),
+	/**  Stops a run that is still going. */
+	cancelTaskRun: (runId: number) => __TAURI_INVOKE<null>("cancel_task_run", { runId }),
 	getAnalyticsPreferences: () => __TAURI_INVOKE<AnalyticsPreferences>("get_analytics_preferences"),
 	saveAnalyticsPreferences: (preferences: AnalyticsPreferences) => __TAURI_INVOKE<null>("save_analytics_preferences", { preferences }),
 	listJobSearchRuns: () => __TAURI_INVOKE<JobSearchRun[]>("list_job_search_runs"),
@@ -265,6 +270,7 @@ export const events = {
 	portfolioChanged: makeEvent<PortfolioChanged>("portfolio-changed"),
 	profileChanged: makeEvent<ProfileChanged>("profile-changed"),
 	providersChanged: makeEvent<ProvidersChanged>("providers-changed"),
+	taskRunChanged: makeEvent<TaskRunChanged>("task-run-changed"),
 	tasksChanged: makeEvent<TasksChanged>("tasks-changed"),
 };
 
@@ -530,6 +536,8 @@ export type CalendarEntry = {
 };
 
 export type CalendarItem = {
+	/**  The application the interview belongs to (absent in older reports). */
+	applicationId?: number | null,
 	company: string,
 	role: string | null,
 	outcome: CalendarOutcome,
@@ -876,7 +884,11 @@ export type ErrorPayload = {
 	message: string,
 };
 
-export type ExecutionStatus = "running" | "succeeded" | "failed";
+/**
+ *  Where a run is in its lifecycle: created (queued) before the task
+ *  executes, then running, then one of the three final states.
+ */
+export type ExecutionStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 
 export type ExecutionTrigger = "scheduled" | 
 /**  Started with "Run now". */
@@ -1719,6 +1731,87 @@ export type ResearchStatus = "running" | "done" | "failed";
 
 export type ResourceType = "certification" | "course" | "university" | "documentation" | "book" | "lab" | "tutorial" | "project" | "program";
 
+/**  What took part in a run: names and flags only, never credentials. */
+export type RunContext = {
+	/**  The user's Profile was given to the model. */
+	profile: boolean,
+	/**  Connected services the run used ("Gmail", "Google Calendar"). */
+	connectors: string[],
+	/**  The run could search the web. */
+	webSearch: boolean,
+	/**  Searches that ran. */
+	searches: number,
+	/**  What ran them ("ChatGPT web search"). */
+	searchEngines: string[],
+};
+
+/**  Why a run did not succeed; decides the guidance shown with its error. */
+export type RunErrorCategory = 
+/**  The run took longer than the limit. */
+"timeout" | 
+/**  ReMa closed or stopped before the run finished. */
+"interrupted" | 
+/**  Stopped by the user. */
+"cancelled" | 
+/**  A scheduled occurrence came while the previous run was still going. */
+"skipped" | 
+/**  The model declined or returned nothing. */
+"model" | 
+/**  The model's provider is not connected or its sign-in expired. */
+"model_access" | 
+/**  The provider reported an error (rate limit, outage, rejected request). */
+"provider" | 
+/**  The provider account has no credits left. */
+"billing" | 
+/**  A connected service (mail, calendar) needs attention. */
+"connector" | 
+/**  The network could not be reached. */
+"network" | 
+/**  No search could run. */
+"search" | 
+/**  The task cannot run as it is set up. */
+"task" | "internal";
+
+export type RunOutput = {
+	id: number,
+	kind: RunOutputKind,
+	title: string,
+	reference: RunOutputRef,
+	createdAt: number,
+};
+
+/**  What an output is. */
+export type RunOutputKind = 
+/**  Listings a job search found (held by Analytics). */
+"job_search_results" | 
+/**  The report of a Job Mail & Interview Sync run. */
+"application_watch" | 
+/**  An interview the run added to or changed in a calendar. */
+"calendar_event";
+
+/**  Where an output lives (outputs are references, never copies). */
+export type RunOutputRef = 
+/**  The run's own structured report. */
+{ type: "run_report" } | 
+/**  A job search in Analytics. */
+{ type: "job_search"; id: number } | 
+/**  An application in Applications. */
+{ type: "application"; id: number };
+
+/**
+ *  One stage of a run as it happened ("Searched jobs · 3 searches"):
+ *  concise activity, never the model's reasoning.
+ */
+export type RunProgressEvent = {
+	id: number,
+	/**  Stable key within the run ("search", "mail"). */
+	stage: string,
+	label: string,
+	status: StageStatus,
+	startedAt: number | null,
+	updatedAt: number,
+};
+
 /**  How a search run reached ReMa. */
 export type RunSource = "chat" | "task" | "manual" | "tool";
 
@@ -1744,6 +1837,15 @@ export type Schedule =
 { kind: "daily"; every: number } | 
 /**  On the selected weekdays at the start's time of day. */
 { kind: "weekly"; days: Weekday[] };
+
+/**  The task's schedule when a run was created. */
+export type ScheduleSnapshot = {
+	schedule: Schedule,
+	timezone: string,
+	/**  `YYYY-MM-DD` and `HH:MM`, local to `timezone`. */
+	startDate: string,
+	startTime: string,
+};
 
 export type ScheduledTask = {
 	id: number,
@@ -1887,28 +1989,15 @@ export type SourceSummary = {
 	lastError: string | null,
 };
 
+/**  State of one stage of a run. */
+export type StageStatus = "pending" | "running" | "completed" | "failed" | "skipped";
+
 /**  Share of all requirement mentions per Profile state. */
 export type StateShare = {
 	state: MatchState,
 	requirements: number,
 	mentions: number,
 	percent: number | null,
-};
-
-export type TaskExecution = {
-	id: number,
-	taskId: number,
-	trigger: ExecutionTrigger,
-	scheduledFor: number | null,
-	startedAt: number,
-	finishedAt: number | null,
-	status: ExecutionStatus,
-	model: ModelRef,
-	/**  The answer (prompt tasks) or a plain-text summary (job tasks). */
-	result: string | null,
-	error: string | null,
-	/**  Structured result of a job-application run. */
-	report: JobRunReport | null,
 };
 
 /**  Create or edit a task. Dates and times are local to `timezone`. */
@@ -1950,6 +2039,71 @@ lookbackDays: number;
 /**  Add confirmed interviews to the connected calendar. */
 syncCalendar: boolean };
 
+/**
+ *  One run with everything it recorded. Its snapshot is the task as it was
+ *  when the run was created; later edits never change it.
+ */
+export type TaskRun = {
+	id: number,
+	taskId: number,
+	trigger: ExecutionTrigger,
+	status: ExecutionStatus,
+	scheduledFor: number | null,
+	queuedAt: number,
+	startedAt: number | null,
+	finishedAt: number | null,
+	/**  Start to finish, for finished runs. */
+	durationMs: number | null,
+	/**
+	 *  Snapshot fields are `None` for runs recorded before snapshots were
+	 *  kept (the prompt and model always were).
+	 */
+	taskName: string | null,
+	kind: TaskKind | null,
+	prompt: string,
+	model: ModelRef,
+	schedule: ScheduleSnapshot | null,
+	useProfile: boolean | null,
+	context: RunContext | null,
+	/**  The answer (prompt tasks) or a plain-text summary (job tasks). */
+	result: string | null,
+	/**  Structured result of a Job Mail & Interview Sync run. */
+	report: JobRunReport | null,
+	/**  A safe, user-facing message. */
+	error: string | null,
+	errorCategory: RunErrorCategory | null,
+	progress: RunProgressEvent[],
+	outputs: RunOutput[],
+};
+
+/**  A run was created or changed (status, progress, outputs). */
+export type TaskRunChanged = {
+	taskId: number,
+	runId: number,
+};
+
+/**  A page of a task's runs, newest first. */
+export type TaskRunPage = {
+	runs: TaskRunSummary[],
+	/**  Older runs exist (ask again with the last id). */
+	hasMore: boolean,
+};
+
+/**  One run in a task's history list. */
+export type TaskRunSummary = {
+	id: number,
+	taskId: number,
+	trigger: ExecutionTrigger,
+	status: ExecutionStatus,
+	/**  The occurrence a scheduled run belongs to. */
+	scheduledFor: number | null,
+	/**  When the run was created. */
+	queuedAt: number,
+	startedAt: number | null,
+	finishedAt: number | null,
+	errorCategory: RunErrorCategory | null,
+};
+
 /**  Lifecycle of a task as shown to the user. */
 export type TaskStatus = 
 /**  Enabled and has a next run. */
@@ -1959,7 +2113,7 @@ export type TaskStatus =
 /**  No runs left (one-time task done, end date passed or run limit hit). */
 "completed";
 
-/**  Tasks or their executions changed (created, edited, ran, finished). */
+/**  Tasks or their runs changed (created, edited, ran, finished). */
 export type TasksChanged = null;
 
 /**  One entry of an application's audit timeline. */

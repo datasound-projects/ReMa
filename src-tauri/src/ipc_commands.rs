@@ -115,7 +115,9 @@ pub const APP_COMMANDS: &[&str] = &[
     "set_task_enabled",
     "delete_task",
     "run_task_now",
-    "list_task_executions",
+    "list_task_runs",
+    "get_task_run",
+    "cancel_task_run",
     // Job analytics
     "get_analytics_preferences",
     "save_analytics_preferences",

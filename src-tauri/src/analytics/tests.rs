@@ -732,19 +732,36 @@ async fn scheduled_task_results_are_ingested_automatically() {
     .await
     .unwrap();
     let row = state.db.call(|c| task_repo::get(c, task.id)).unwrap();
+    let mut task_runs = Vec::new();
     for _ in 0..2 {
-        scheduler::execute(
-            &state,
-            &row,
-            ExecutionTrigger::Manual,
-            None,
-            CancellationToken::new(),
-        )
-        .await
-        .unwrap();
+        task_runs.push(
+            scheduler::run_once(
+                &state,
+                &row,
+                ExecutionTrigger::Manual,
+                None,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap(),
+        );
     }
     let runs = runs(&state).unwrap();
     assert_eq!(runs.len(), 2, "every run is kept as history");
+    // Each task run lists its job search as an output (a reference into
+    // Analytics, not a copy).
+    for task_run in &task_runs {
+        let run = crate::services::runs::get(&state, task_run.id).unwrap();
+        assert_eq!(run.outputs.len(), 1);
+        assert_eq!(
+            run.outputs[0].kind,
+            crate::models::task::RunOutputKind::JobSearchResults
+        );
+        let crate::models::task::RunOutputRef::JobSearch { id } = run.outputs[0].reference else {
+            panic!("{:?}", run.outputs[0].reference);
+        };
+        assert!(runs.iter().any(|r| r.id == id));
+    }
     assert!(runs
         .iter()
         .all(|r| r.source == RunSource::Task && r.task_id == Some(task.id)));
@@ -990,7 +1007,7 @@ async fn scheduled_job_searches_search_first_and_fail_without_a_search() {
         .await
         .unwrap();
     let row = state.db.call(|c| task_repo::get(c, task.id)).unwrap();
-    let run = scheduler::execute(
+    let run = scheduler::run_once(
         &state,
         &row,
         ExecutionTrigger::Manual,
@@ -1000,10 +1017,16 @@ async fn scheduled_job_searches_search_first_and_fail_without_a_search() {
     .await
     .unwrap();
     assert_eq!(run.status, ExecutionStatus::Failed);
+    assert_eq!(
+        run.error_category,
+        Some(crate::models::task::RunErrorCategory::Search)
+    );
     assert!(run
         .error
         .unwrap()
         .starts_with("ReMa couldn't search the web"));
+    let search = run.progress.iter().find(|s| s.stage == "search").unwrap();
+    assert_eq!(search.status, crate::models::task::StageStatus::Failed);
     assert!(
         runs(&state).unwrap().is_empty(),
         "no unverified jobs reach Analytics"

@@ -11,7 +11,10 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU32, Ordering},
+        Arc, Mutex,
+    },
     time::Duration,
 };
 
@@ -19,21 +22,29 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    db::tasks::{self as repo, Finished, NewExecution, TaskRow},
+    db::{
+        self,
+        tasks::{self as repo, TaskRow},
+    },
     error::{AppError, AppResult},
     jobs::{self, RunModel},
-    llm::{ChatRequest, Finish, Turn, WebSearch},
+    llm::{ChatRequest, Finish, Turn, WebEvent, WebKind, WebObserver, WebSearch},
     models::{
         chat::MessageRole,
-        jobs::JobRunReport,
-        task::{ExecutionStatus, ExecutionTrigger, TaskExecution, TaskKind},
+        jobs::{CalendarOutcome, JobRunReport},
+        task::{
+            ExecutionTrigger, RunErrorCategory, RunOutputKind, RunOutputRef, StageStatus, TaskKind,
+            TaskRun,
+        },
     },
-    retrieval::{self, render, Outcome},
+    retrieval::{self, render, Outcome, Retrieval},
     services::{
         chat::{
-            assessment_prompt, assessment_request, can_search_web, system_prompt, with_profile,
+            assessment_prompt, assessment_request, can_search_web, profile_prompt, system_prompt,
+            ProfileUse,
         },
         mail_monitor, providers,
+        runs::{self, Activity, Ending, Failure, RunRecorder},
         schedule::{self, Limits},
         tasks,
     },
@@ -88,6 +99,11 @@ impl SchedulerHandle {
     /// Stops the loop and cancels running tasks.
     pub fn shutdown(&self) {
         self.shutdown.cancel();
+    }
+
+    /// ReMa is closing: runs stopped now were interrupted, not cancelled.
+    pub fn is_shutting_down(&self) -> bool {
+        self.shutdown.is_cancelled()
     }
 }
 
@@ -187,117 +203,159 @@ pub fn claim_due(state: &AppState, now: i64) -> AppResult<Vec<Claim>> {
     Ok(claims)
 }
 
-/// Starts a run in the background. Fails if the task is already running.
+/// Creates a run and starts it in the background; returns the run's id.
+/// A task busy with its previous run gets no second one: a scheduled
+/// occurrence is recorded as skipped, Run now is refused.
 pub fn spawn_run(
     state: &AppState,
     task: TaskRow,
     trigger: ExecutionTrigger,
     scheduled_for: Option<i64>,
-) -> AppResult<()> {
-    let cancel = state
-        .scheduler
-        .try_mark_running(task.id)
-        .ok_or_else(|| AppError::validation("This task is already running."))?;
+) -> AppResult<i64> {
+    let Some(cancel) = state.scheduler.try_mark_running(task.id) else {
+        if let (ExecutionTrigger::Scheduled, Some(at)) = (trigger, scheduled_for) {
+            runs::record_skipped(state, &task, at)?;
+            state.events.tasks_changed();
+        }
+        return Err(AppError::validation("This task is already running."));
+    };
+    let run_id = match runs::create(state, &task, trigger, scheduled_for) {
+        Ok(id) => id,
+        Err(error) => {
+            state.scheduler.mark_finished(task.id);
+            return Err(error);
+        }
+    };
     let background = state.clone();
     tauri::async_runtime::spawn(async move {
         let task_id = task.id;
-        if let Err(error) = execute(&background, &task, trigger, scheduled_for, cancel).await {
-            eprintln!("scheduler: task {task_id} could not be recorded: {error}");
+        if let Err(error) = execute(&background, &task, run_id, cancel).await {
+            eprintln!("scheduler: run {run_id} of task {task_id} could not be recorded: {error}");
         }
         background.scheduler.mark_finished(task_id);
         background.events.tasks_changed();
     });
     state.events.tasks_changed();
-    Ok(())
+    Ok(run_id)
 }
 
-/// Runs a task's prompt once and records the execution.
+/// Executes a created run and records how it ended: the run's final
+/// output, its outputs and its stages, or a safe error.
 pub async fn execute(
+    state: &AppState,
+    task: &TaskRow,
+    run_id: i64,
+    cancel: CancellationToken,
+) -> AppResult<TaskRun> {
+    let started_at = runs::start(state, task.id, run_id)?;
+    state.events.tasks_changed();
+    let recorder = RunRecorder::new(state, task, run_id);
+
+    let outcome = tokio::time::timeout(
+        RUN_TIMEOUT,
+        run_task(state, task, started_at, &recorder, cancel),
+    )
+    .await;
+
+    let ending = match &outcome {
+        Err(_) => Ending::Failed(Failure::new(
+            RunErrorCategory::Timeout,
+            "The run did not finish within 15 minutes and was stopped.",
+        )),
+        Ok(Err(failure)) => Ending::Failed(failure.clone()),
+        Ok(Ok(output)) => match output.finish {
+            Finish::Cancelled if state.scheduler.is_shutting_down() => Ending::Failed(
+                Failure::new(RunErrorCategory::Interrupted, db::runs::INTERRUPTED),
+            ),
+            Finish::Cancelled => Ending::Cancelled,
+            Finish::Refused if output.text.trim().is_empty() => Ending::Failed(Failure::new(
+                RunErrorCategory::Model,
+                "The model declined to answer this prompt.",
+            )),
+            _ if output.text.trim().is_empty() => Ending::Failed(Failure::new(
+                RunErrorCategory::Model,
+                "The model returned an empty response.",
+            )),
+            _ => Ending::Succeeded {
+                result: &output.text,
+                report: output.report.as_ref(),
+            },
+        },
+    };
+    let succeeded = matches!(ending, Ending::Succeeded { .. });
+    runs::finish(state, task.id, run_id, ending)?;
+
+    if succeeded {
+        if let Ok(Ok(output)) = &outcome {
+            record_outputs(state, task, run_id, output, recorder.as_ref());
+        }
+    }
+    runs::get(state, run_id)
+}
+
+/// Creates a run and executes it in place (tests).
+#[cfg(test)]
+pub(crate) async fn run_once(
     state: &AppState,
     task: &TaskRow,
     trigger: ExecutionTrigger,
     scheduled_for: Option<i64>,
     cancel: CancellationToken,
-) -> AppResult<TaskExecution> {
-    let started_at = now_ms();
-    let execution = state.db.call(|conn| {
-        let execution = repo::insert_execution(
-            conn,
-            NewExecution {
-                task_id: task.id,
-                trigger,
-                scheduled_for,
-                started_at,
-                model: &task.model,
-                prompt: &task.prompt,
-            },
-        )?;
-        repo::set_last_run_at(conn, task.id, started_at)?;
-        Ok(execution)
-    })?;
-    state.events.tasks_changed();
+) -> AppResult<TaskRun> {
+    let run_id = runs::create(state, task, trigger, scheduled_for)?;
+    execute(state, task, run_id, cancel).await
+}
 
-    let outcome =
-        tokio::time::timeout(RUN_TIMEOUT, run_task(state, task, started_at, cancel)).await;
-
-    let (status, result, error, report) = match outcome {
-        Err(_) => (
-            ExecutionStatus::Failed,
-            None,
-            Some("The run timed out.".to_string()),
-            None,
-        ),
-        Ok(Err(error)) => (ExecutionStatus::Failed, None, Some(error.to_string()), None),
-        Ok(Ok(Output {
-            finish: Finish::Cancelled,
-            ..
-        })) => (
-            ExecutionStatus::Failed,
-            None,
-            Some("The run was cancelled.".to_string()),
-            None,
-        ),
-        Ok(Ok(Output {
-            finish: Finish::Refused,
-            text,
-            ..
-        })) if text.trim().is_empty() => (
-            ExecutionStatus::Failed,
-            None,
-            Some("The model declined to answer this prompt.".to_string()),
-            None,
-        ),
-        Ok(Ok(Output { text, .. })) if text.trim().is_empty() => (
-            ExecutionStatus::Failed,
-            None,
-            Some("The model returned an empty response.".to_string()),
-            None,
-        ),
-        Ok(Ok(Output { text, report, .. })) => {
-            (ExecutionStatus::Succeeded, Some(text), None, report)
+/// What a finished run produced besides its text, as references.
+fn record_outputs(
+    state: &AppState,
+    task: &TaskRow,
+    run_id: i64,
+    output: &Output,
+    activity: &dyn Activity,
+) {
+    if let Some(report) = &output.report {
+        activity.output(
+            RunOutputKind::ApplicationWatch,
+            "Application Watch",
+            RunOutputRef::RunReport,
+        );
+        for item in report.calendar.iter().flat_map(|c| &c.items) {
+            let (Some(id), Some(verb)) = (
+                item.application_id,
+                match item.outcome {
+                    CalendarOutcome::Created => Some("added to your calendar"),
+                    CalendarOutcome::Updated => Some("moved in your calendar"),
+                    _ => None,
+                },
+            ) else {
+                continue;
+            };
+            activity.output(
+                RunOutputKind::CalendarEvent,
+                &format!("Interview · {} — {verb}", item.company),
+                RunOutputRef::Application { id },
+            );
         }
-    };
-
-    let finished_at = now_ms();
-    let execution = state.db.call(|conn| {
-        repo::finish_execution(
-            conn,
-            execution.id,
-            Finished {
-                status,
-                result: result.as_deref(),
-                error: error.as_deref(),
-                report: report.as_ref(),
-                finished_at,
-            },
-        )?;
-        repo::get_execution(conn, execution.id)
-    })?;
-    // Job listings in a prompt task's result become available to Analytics.
-    if status == ExecutionStatus::Succeeded && task.kind == TaskKind::Prompt {
-        crate::analytics::ingest::after_task_result(state, execution.id);
     }
-    Ok(execution)
+    // Job listings in a prompt task's result become available to Analytics.
+    if task.kind == TaskKind::Prompt {
+        match crate::analytics::ingest::from_task_result(state, run_id) {
+            Ok(Some(ingested)) => activity.output(
+                RunOutputKind::JobSearchResults,
+                &format!(
+                    "Job Search Results · {} {}",
+                    ingested.jobs,
+                    if ingested.jobs == 1 { "job" } else { "jobs" }
+                ),
+                RunOutputRef::JobSearch {
+                    id: ingested.run_id,
+                },
+            ),
+            Ok(None) => {}
+            Err(error) => eprintln!("analytics: could not read jobs from run {run_id}: {error}"),
+        }
+    }
 }
 
 /// What one run produced.
@@ -308,49 +366,132 @@ struct Output {
     report: Option<JobRunReport>,
 }
 
+impl Output {
+    fn cancelled() -> Self {
+        Self {
+            finish: Finish::Cancelled,
+            text: String::new(),
+            report: None,
+        }
+    }
+}
+
+/// The Profile stage, when the task uses the Profile.
+fn record_profile(activity: &dyn Activity, used: ProfileUse) {
+    match used {
+        ProfileUse::Off => {}
+        ProfileUse::Included => activity.done("profile", "Loaded your Profile"),
+        ProfileUse::Empty => activity.done("profile", "Your Profile is empty; nothing was added"),
+    }
+}
+
+fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// Counts the searches of a prompt task's model as they happen.
+struct WebStage {
+    recorder: Arc<RunRecorder>,
+    searches: AtomicU32,
+}
+
+impl WebObserver for WebStage {
+    fn observe(&self, event: WebEvent) {
+        match event {
+            WebEvent::Started {
+                kind: WebKind::Search,
+                ..
+            } if self.searches.load(Ordering::Relaxed) == 0 => {
+                self.recorder.running("web", "Searching the web");
+            }
+            WebEvent::Finished {
+                kind: WebKind::Search,
+                error: None,
+                ..
+            } => {
+                let n = self.searches.fetch_add(1, Ordering::Relaxed) + 1;
+                self.recorder.tick(
+                    "web",
+                    &format!(
+                        "Searching the web · {}",
+                        plural(n as usize, "search", "searches")
+                    ),
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+/// A job search's progress, recorded as the run's stages.
+struct SearchStages {
+    recorder: Arc<RunRecorder>,
+    searches: Arc<WebStage>,
+    checking: AtomicU32,
+    read: AtomicU32,
+}
+
+impl retrieval::Progress for SearchStages {
+    fn status(&self, text: &str) {
+        let text = text.trim_end_matches('…');
+        if text.starts_with("Checking") {
+            self.recorder.done("search", "Search finished");
+            self.recorder.running("check", text);
+            let count = text
+                .split_whitespace()
+                .find_map(|w| w.parse::<u32>().ok())
+                .unwrap_or(0);
+            self.checking.store(count, Ordering::Relaxed);
+        } else if text.starts_with("Searching") {
+            self.recorder.running("search", text);
+        }
+    }
+
+    fn web(&self) -> Option<Arc<dyn WebObserver>> {
+        Some(self.searches.clone())
+    }
+
+    fn page(&self, _url: &str, _result: Result<(), String>) {
+        let read = self.read.fetch_add(1, Ordering::Relaxed) + 1;
+        let total = self.checking.load(Ordering::Relaxed).max(read);
+        self.recorder.tick(
+            "check",
+            &format!(
+                "Checking {} · {read} read",
+                plural(total as usize, "posting", "postings")
+            ),
+        );
+    }
+}
+
 async fn run_task(
     state: &AppState,
     task: &TaskRow,
     started_at: i64,
+    recorder: &Arc<RunRecorder>,
     cancel: CancellationToken,
-) -> AppResult<Output> {
-    let endpoint = providers::resolve_endpoint(state, &task.model.provider_id).await?;
-    let max_output_tokens = providers::max_output_tokens(state, &task.model)?;
+) -> Result<Output, Failure> {
+    let model_access = |e: AppError| Failure::from_error(&e, RunErrorCategory::ModelAccess);
+    let endpoint = providers::resolve_endpoint(state, &task.model.provider_id)
+        .await
+        .map_err(model_access)?;
+    let max_output_tokens =
+        providers::max_output_tokens(state, &task.model).map_err(model_access)?;
     match task.kind {
         TaskKind::Prompt if retrieval::detect(&task.prompt).is_some() => {
             // A job search: search and validate first, as in chat.
             let query = retrieval::detect(&task.prompt).unwrap_or_default();
-            let found = match retrieval::run(
-                state,
-                &endpoint,
-                &task.model.model_id,
-                &query,
-                &retrieval::Silent,
-                &cancel,
-            )
-            .await
-            {
-                Outcome::Cancelled => {
-                    return Ok(Output {
-                        finish: Finish::Cancelled,
-                        text: String::new(),
-                        report: None,
-                    })
-                }
-                Outcome::Failed { reasons } => {
-                    return Err(AppError::provider(render::failed_text(&reasons)))
-                }
-                Outcome::Empty(found) => {
-                    return Ok(Output {
-                        finish: Finish::Complete,
-                        text: render::empty_text(&found),
-                        report: None,
-                    })
-                }
-                Outcome::Found(found) => found,
-            };
-            let mut text = render::listings_table(&found);
-            let system = with_profile(
+            let mut stages = Vec::new();
+            if task.use_profile {
+                stages.push(("profile", "Load your Profile"));
+            }
+            stages.extend([
+                ("search", "Search for jobs"),
+                ("check", "Check the postings"),
+                ("assess", "Assess the listings"),
+            ]);
+            recorder.plan(&stages);
+            let (system, profile) = profile_prompt(
                 state,
                 format!(
                     "{} This request is a scheduled task running automatically.",
@@ -358,7 +499,56 @@ async fn run_task(
                 ),
                 task.use_profile,
                 &task.prompt,
-            )?;
+            )
+            .map_err(|e| Failure::from_error(&e, RunErrorCategory::Task))?;
+            record_profile(recorder.as_ref(), profile);
+
+            recorder.update_context(|c| c.web_search = true);
+            let progress = SearchStages {
+                recorder: recorder.clone(),
+                searches: Arc::new(WebStage {
+                    recorder: recorder.clone(),
+                    searches: AtomicU32::new(0),
+                }),
+                checking: AtomicU32::new(0),
+                read: AtomicU32::new(0),
+            };
+            let outcome = retrieval::run(
+                state,
+                &endpoint,
+                &task.model.model_id,
+                &query,
+                &progress,
+                &cancel,
+            )
+            .await;
+            let found = match outcome {
+                Outcome::Cancelled => return Ok(Output::cancelled()),
+                Outcome::Failed { reasons } => {
+                    recorder.stage("search", StageStatus::Failed, "No search could run");
+                    return Err(Failure::new(
+                        RunErrorCategory::Search,
+                        render::failed_text(&reasons),
+                    ));
+                }
+                Outcome::Empty(found) => {
+                    record_search(recorder, &found);
+                    recorder.skipped("assess", "Nothing to assess");
+                    return Ok(Output {
+                        finish: Finish::Complete,
+                        text: render::empty_text(&found),
+                        report: None,
+                    });
+                }
+                Outcome::Found(found) => found,
+            };
+            record_search(recorder, &found);
+            let mut text = render::listings_table(&found);
+            let count = found.listings.len();
+            recorder.running(
+                "assess",
+                &format!("Assessing {}", plural(count, "listing", "listings")),
+            );
             let request = assessment_request(
                 system,
                 vec![Turn {
@@ -382,19 +572,25 @@ async fn run_task(
                 .await;
             providers::note_outcome(state, &task.model.provider_id, &outcome);
             match outcome {
-                Ok(Finish::Cancelled) => {
-                    return Ok(Output {
-                        finish: Finish::Cancelled,
-                        text: String::new(),
-                        report: None,
-                    })
-                }
+                Ok(Finish::Cancelled) => return Ok(Output::cancelled()),
                 Ok(_) => {
+                    recorder.done(
+                        "assess",
+                        &format!("Assessed {}", plural(count, "listing", "listings")),
+                    );
                     text.push_str("\n\n");
                     text.push_str(assessment.trim());
                 }
                 Err(error) => {
-                    text.push_str(&format!("\n\n_ReMa could not add an assessment: {error}_"))
+                    recorder.stage(
+                        "assess",
+                        StageStatus::Failed,
+                        "The assessment could not be added",
+                    );
+                    text.push_str(&format!(
+                        "\n\n_ReMa could not add an assessment: {}_",
+                        runs::safe_message(&error.to_string())
+                    ))
                 }
             }
             Ok(Output {
@@ -404,25 +600,44 @@ async fn run_task(
             })
         }
         TaskKind::Prompt => {
+            let web = can_search_web(&endpoint);
+            let mut stages = Vec::new();
+            if task.use_profile {
+                stages.push(("profile", "Load your Profile"));
+            }
+            stages.push(("answer", "Get the answer"));
+            recorder.plan(&stages);
+            let (system, profile) = profile_prompt(
+                state,
+                format!(
+                    "{} This request is a scheduled task running automatically; \
+                     reply with the finished result.",
+                    system_prompt(started_at, web)
+                ),
+                task.use_profile,
+                &task.prompt,
+            )
+            .map_err(|e| Failure::from_error(&e, RunErrorCategory::Task))?;
+            record_profile(recorder.as_ref(), profile);
+            recorder.update_context(|c| c.web_search = web);
+            let observer = Arc::new(WebStage {
+                recorder: recorder.clone(),
+                searches: AtomicU32::new(0),
+            });
             let request = ChatRequest {
-                system: Some(with_profile(
-                    state,
-                    format!(
-                        "{} This request is a scheduled task running automatically; \
-                         reply with the finished result.",
-                        system_prompt(started_at, can_search_web(&endpoint))
-                    ),
-                    task.use_profile,
-                    &task.prompt,
-                )?),
+                system: Some(system),
                 turns: vec![Turn {
                     role: MessageRole::User,
                     content: task.prompt.clone(),
                 }],
                 max_output_tokens,
-                web: can_search_web(&endpoint).then(WebSearch::default),
+                web: web.then(|| WebSearch {
+                    observer: Some(observer.clone()),
+                    ..WebSearch::default()
+                }),
                 ..ChatRequest::default()
             };
+            recorder.running("answer", "Waiting for the model's answer");
             let mut text = String::new();
             let mut on_delta = |delta: &str| text.push_str(delta);
             let outcome = state
@@ -436,7 +651,30 @@ async fn run_task(
                 )
                 .await;
             providers::note_outcome(state, &task.model.provider_id, &outcome);
-            let finish = outcome?;
+            let searches = observer.searches.load(Ordering::Relaxed);
+            if searches > 0 {
+                recorder.done(
+                    "web",
+                    &format!(
+                        "Searched the web · {}",
+                        plural(searches as usize, "search", "searches")
+                    ),
+                );
+                recorder.update_context(|c| {
+                    c.searches += searches;
+                    let engine = retrieval::native::engine_name(&endpoint).to_string();
+                    if !c.search_engines.contains(&engine) {
+                        c.search_engines.push(engine);
+                    }
+                });
+            }
+            let finish = outcome.map_err(|e| {
+                recorder.stage("answer", StageStatus::Failed, "The model did not answer");
+                Failure::from_error(&e, RunErrorCategory::ModelAccess)
+            })?;
+            if finish != Finish::Cancelled && !text.trim().is_empty() {
+                recorder.done("answer", "Answer received");
+            }
             Ok(Output {
                 finish,
                 text,
@@ -450,7 +688,10 @@ async fn run_task(
             // Only the built-in task reads mail; a mail task left from before
             // it existed never runs.
             if tasks::is_old_mail_task(task) {
-                return Err(AppError::validation(tasks::ONLY_BUILT_IN_READS_MAIL));
+                return Err(Failure::new(
+                    RunErrorCategory::Task,
+                    tasks::ONLY_BUILT_IN_READS_MAIL,
+                ));
             }
             let report = mail_monitor::run_task(
                 state,
@@ -459,20 +700,66 @@ async fn run_task(
                     model: &task.model,
                     max_output_tokens,
                 },
-                &task.prompt,
-                lookback_days,
-                sync_calendar,
+                mail_monitor::MailTask {
+                    instructions: &task.prompt,
+                    lookback_days,
+                    calendar: sync_calendar,
+                },
                 &cancel,
                 started_at,
+                recorder.clone(),
             )
-            .await?;
-            Ok(Output {
-                finish: Finish::Complete,
-                text: jobs::report::summary(&report),
-                report: Some(report),
-            })
+            .await;
+            match report {
+                Ok(report) => Ok(Output {
+                    finish: Finish::Complete,
+                    text: jobs::report::summary(&report),
+                    report: Some(report),
+                }),
+                Err(_) if cancel.is_cancelled() => Ok(Output::cancelled()),
+                Err(error) => Err(Failure::from_error(&error, RunErrorCategory::Connector)),
+            }
         }
     }
+}
+
+/// The search and check stages of a job search that ran.
+fn record_search(recorder: &RunRecorder, found: &Retrieval) {
+    recorder.done(
+        "search",
+        &format!(
+            "Searched with {} · {}",
+            found.engine,
+            plural(found.searches, "search", "searches")
+        ),
+    );
+    let excluded = found.excluded.total();
+    recorder.done(
+        "check",
+        &if found.listings.is_empty() {
+            format!(
+                "Checked {} · none matched the request",
+                plural(found.pages_read, "posting", "postings")
+            )
+        } else {
+            format!(
+                "Checked {} · {} matched{}",
+                plural(found.pages_read, "posting", "postings"),
+                found.listings.len(),
+                if excluded > 0 {
+                    format!(", {excluded} left out")
+                } else {
+                    String::new()
+                }
+            )
+        },
+    );
+    recorder.update_context(|c| {
+        c.searches += found.searches as u32;
+        if !c.search_engines.contains(&found.engine) {
+            c.search_engines.push(found.engine.clone());
+        }
+    });
 }
 
 #[cfg(test)]
@@ -482,7 +769,7 @@ mod tests {
         llm::fake::FakeLanguageModel,
         models::{
             provider::{ModelRef, ProviderKind},
-            task::{EndCondition, IntervalUnit, Schedule, TaskInput},
+            task::{EndCondition, ExecutionStatus, IntervalUnit, Schedule, TaskInput},
         },
         services::{providers, tasks},
         state::testing,
@@ -590,7 +877,7 @@ mod tests {
         let task = tasks::create(&state, every_4_hours(None)).await.unwrap();
         let row = state.db.call(|c| repo::get(c, task.id)).unwrap();
 
-        let execution = execute(
+        let execution = run_once(
             &state,
             &row,
             ExecutionTrigger::Manual,
@@ -608,7 +895,7 @@ mod tests {
         assert_eq!(model_id, "model-a");
         assert_eq!(request.turns[0].content, "Summarize the market");
 
-        let history = tasks::executions(&state, task.id).unwrap();
+        let history = runs::list(&state, task.id, None).unwrap().runs;
         assert_eq!(history.len(), 1);
         assert!(tasks::get(&state, task.id).unwrap().last_run_at.is_some());
     }
@@ -621,7 +908,7 @@ mod tests {
         let task = tasks::create(&state, every_4_hours(None)).await.unwrap();
         let row = state.db.call(|c| repo::get(c, task.id)).unwrap();
 
-        let execution = execute(
+        let execution = run_once(
             &state,
             &row,
             ExecutionTrigger::Scheduled,
@@ -657,8 +944,477 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        let history = tasks::executions(&state, task.id).unwrap();
+        let history = runs::list(&state, task.id, None).unwrap().runs;
         assert_eq!(history[0].status, ExecutionStatus::Succeeded);
         assert_eq!(history[0].trigger, ExecutionTrigger::Manual);
+    }
+    // ── Run history ────────────────────────────────────────────────────
+
+    /// Waits until the task's background run has ended.
+    async fn wait_idle(state: &AppState, task_id: i64) {
+        for _ in 0..500 {
+            if !state.scheduler.is_running(task_id) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("the run did not finish");
+    }
+
+    fn history(state: &AppState, task_id: i64) -> Vec<TaskRun> {
+        runs::list(state, task_id, None)
+            .unwrap()
+            .runs
+            .into_iter()
+            .map(|r| runs::get(state, r.id).unwrap())
+            .collect()
+    }
+
+    fn replying(state: &AppState, text: &str) -> AppState {
+        let mut state = state.clone();
+        state.llm = Arc::new(FakeLanguageModel::replying(&[text]));
+        state
+    }
+
+    #[tokio::test]
+    async fn every_firing_and_every_run_now_is_one_run_with_its_own_result() {
+        let first = state(FakeLanguageModel::replying(&["Monday: 9 roles"])).await;
+        let task = tasks::create(&first, every_4_hours(None)).await.unwrap();
+
+        // The scheduler fires: one scheduled run.
+        assert_eq!(tick(&first, task.start_at).unwrap(), vec![task.id]);
+        wait_idle(&first, task.id).await;
+        // Run now: one manual run, whose id is returned at once.
+        let second = replying(&first, "Tuesday: 14 roles");
+        let manual = tasks::run_now(&second, task.id).unwrap();
+        wait_idle(&second, task.id).await;
+
+        let runs = history(&first, task.id);
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].id, manual, "newest first");
+        assert_ne!(runs[0].id, runs[1].id);
+        assert!(runs.iter().all(|r| r.task_id == task.id));
+        assert_eq!(runs[0].trigger, ExecutionTrigger::Manual);
+        assert_eq!(runs[0].scheduled_for, None);
+        assert_eq!(runs[1].trigger, ExecutionTrigger::Scheduled);
+        assert_eq!(runs[1].scheduled_for, Some(task.start_at));
+        assert!(runs.iter().all(|r| r.status == ExecutionStatus::Succeeded));
+        // Each run keeps its own result: the newer one did not overwrite it.
+        assert_eq!(runs[0].result.as_deref(), Some("Tuesday: 14 roles"));
+        assert_eq!(runs[1].result.as_deref(), Some("Monday: 9 roles"));
+        for run in &runs {
+            let (queued, started, finished) = (
+                run.queued_at,
+                run.started_at.unwrap(),
+                run.finished_at.unwrap(),
+            );
+            assert!(queued <= started && started <= finished);
+            assert_eq!(run.duration_ms, Some(finished - started));
+        }
+        // Run now counts no scheduled run.
+        assert_eq!(tasks::get(&first, task.id).unwrap().run_count, 1);
+    }
+
+    #[tokio::test]
+    async fn a_run_is_visible_while_running_and_records_its_stages() {
+        let mut llm = FakeLanguageModel::replying(&["Three ", "new roles"]);
+        llm.delay = Duration::from_millis(300);
+        let (state, events) = testing::state(Arc::new(llm));
+        providers::connect(&state, ProviderKind::Anthropic, "k")
+            .await
+            .unwrap();
+        let task = tasks::create(
+            &state,
+            TaskInput {
+                use_profile: true,
+                ..every_4_hours(None)
+            },
+        )
+        .await
+        .unwrap();
+        let id = tasks::run_now(&state, task.id).unwrap();
+
+        // Visible at once, and running while the model answers.
+        let mut saw_running = false;
+        for _ in 0..100 {
+            let run = runs::get(&state, id).unwrap();
+            if run.status == ExecutionStatus::Running {
+                saw_running = true;
+                let answer = run.progress.iter().find(|s| s.stage == "answer").unwrap();
+                assert_eq!(answer.status, StageStatus::Running);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(saw_running);
+        assert!(tasks::get(&state, task.id).unwrap().running);
+        wait_idle(&state, task.id).await;
+
+        let run = runs::get(&state, id).unwrap();
+        assert_eq!(run.status, ExecutionStatus::Succeeded);
+        let stages: Vec<_> = run
+            .progress
+            .iter()
+            .map(|s| (s.stage.as_str(), s.status, s.label.as_str()))
+            .collect();
+        assert_eq!(
+            stages,
+            [
+                (
+                    "profile",
+                    StageStatus::Completed,
+                    "Your Profile is empty; nothing was added"
+                ),
+                ("answer", StageStatus::Completed, "Answer received"),
+            ]
+        );
+        let context = run.context.unwrap();
+        assert!(context.profile);
+        assert!(context.web_search, "Anthropic models can search the web");
+        assert!(context.connectors.is_empty());
+        assert!(run.outputs.is_empty(), "a plain answer has no outputs");
+        // The interface heard about every change of this run.
+        let changes = events.runs.lock().unwrap().clone();
+        assert!(changes.len() >= 4, "{changes:?}");
+        assert!(changes.iter().all(|&(t, r)| t == task.id && r == id));
+    }
+
+    #[tokio::test]
+    async fn runs_keep_the_task_as_it_was_through_edits_pause_and_resume() {
+        let state = state(FakeLanguageModel::replying(&["ok"])).await;
+        let task = tasks::create(
+            &state,
+            TaskInput {
+                name: "Vienna Jobs".into(),
+                prompt: "Search Vienna".into(),
+                ..every_4_hours(None)
+            },
+        )
+        .await
+        .unwrap();
+        let first = tasks::run_now(&state, task.id).unwrap();
+        wait_idle(&state, task.id).await;
+
+        let mut edited = TaskInput {
+            name: "DACH AI Jobs".into(),
+            prompt: "Search Vienna + Munich".into(),
+            use_profile: true,
+            schedule: Schedule::Daily { every: 1 },
+            ..every_4_hours(None)
+        };
+        edited.model.model_id = "model-b".into();
+        tasks::update(&state, task.id, edited).await.unwrap();
+        tasks::set_enabled(&state, task.id, false).unwrap();
+        tasks::set_enabled(&state, task.id, true).unwrap();
+        let second = tasks::run_now(&state, task.id).unwrap();
+        wait_idle(&state, task.id).await;
+
+        let old = runs::get(&state, first).unwrap();
+        assert_eq!(old.task_name.as_deref(), Some("Vienna Jobs"));
+        assert_eq!(old.prompt, "Search Vienna");
+        assert_eq!(old.model.model_id, "model-a");
+        assert_eq!(old.use_profile, Some(false));
+        let schedule = old.schedule.unwrap();
+        assert_eq!(
+            schedule.schedule,
+            Schedule::Interval {
+                every: 4,
+                unit: IntervalUnit::Hours
+            }
+        );
+        assert_eq!(schedule.start_time, "08:00");
+        assert_eq!(old.result.as_deref(), Some("ok"));
+
+        let new = runs::get(&state, second).unwrap();
+        assert_eq!(new.task_name.as_deref(), Some("DACH AI Jobs"));
+        assert_eq!(new.prompt, "Search Vienna + Munich");
+        assert_eq!(new.model.model_id, "model-b");
+        assert_eq!(new.use_profile, Some(true));
+        assert_eq!(new.schedule.unwrap().schedule, Schedule::Daily { every: 1 });
+        // One task, both runs; the task shows its current name.
+        assert_eq!(history(&state, task.id).len(), 2);
+        assert_eq!(tasks::get(&state, task.id).unwrap().name, "DACH AI Jobs");
+    }
+
+    #[tokio::test]
+    async fn a_failed_run_keeps_a_safe_error_and_no_secret() {
+        let mut llm = FakeLanguageModel::replying(&[]);
+        llm.fail_with = Some(
+            "Anthropic rate limit reached (request Authorization: Bearer sk-ant-live-0123456789abcdef)"
+                .into(),
+        );
+        let state = state(llm).await;
+        let task = tasks::create(&state, every_4_hours(None)).await.unwrap();
+        let id = tasks::run_now(&state, task.id).unwrap();
+        wait_idle(&state, task.id).await;
+
+        let run = runs::get(&state, id).unwrap();
+        assert_eq!(run.status, ExecutionStatus::Failed);
+        assert_eq!(run.error_category, Some(RunErrorCategory::Provider));
+        let error = run.error.unwrap();
+        assert!(error.contains("rate limit"), "{error}");
+        assert!(!error.contains("sk-ant-live"), "{error}");
+        assert_eq!(run.result, None);
+        let answer = run.progress.iter().find(|s| s.stage == "answer").unwrap();
+        assert_eq!(answer.status, StageStatus::Failed);
+        // The failure is kept in the history.
+        assert_eq!(history(&state, task.id).len(), 1);
+        assert_eq!(
+            tasks::get(&state, task.id).unwrap().last_run_status,
+            Some(ExecutionStatus::Failed)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_firing_while_the_last_run_is_busy_is_recorded_as_skipped() {
+        let mut llm = FakeLanguageModel::replying(&["slow"]);
+        llm.delay = Duration::from_millis(200);
+        let state = state(llm).await;
+        let task = tasks::create(&state, every_4_hours(None)).await.unwrap();
+        let row = state.db.call(|c| repo::get(c, task.id)).unwrap();
+        let busy = tasks::run_now(&state, task.id).unwrap();
+
+        assert!(spawn_run(
+            &state,
+            row,
+            ExecutionTrigger::Scheduled,
+            Some(task.start_at)
+        )
+        .is_err());
+        assert!(
+            tasks::run_now(&state, task.id).is_err(),
+            "Run now is refused, and records nothing"
+        );
+        wait_idle(&state, task.id).await;
+
+        let runs = history(&state, task.id);
+        assert_eq!(
+            runs.len(),
+            2,
+            "one run per firing, none for the refused Run now"
+        );
+        let skipped = runs.iter().find(|r| r.id != busy).unwrap();
+        assert_eq!(skipped.status, ExecutionStatus::Cancelled);
+        assert_eq!(skipped.error_category, Some(RunErrorCategory::Skipped));
+        assert_eq!(skipped.scheduled_for, Some(task.start_at));
+        let done = runs.iter().find(|r| r.id == busy).unwrap();
+        assert_eq!(done.status, ExecutionStatus::Succeeded);
+    }
+
+    #[tokio::test]
+    async fn a_stopped_run_is_recorded_as_cancelled() {
+        let mut llm = FakeLanguageModel::replying(&["a", "b", "c"]);
+        llm.delay = Duration::from_millis(300);
+        let state = state(llm).await;
+        let task = tasks::create(&state, every_4_hours(None)).await.unwrap();
+        let id = tasks::run_now(&state, task.id).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        runs::cancel(&state, id).unwrap();
+        wait_idle(&state, task.id).await;
+
+        let run = runs::get(&state, id).unwrap();
+        assert_eq!(run.status, ExecutionStatus::Cancelled);
+        assert_eq!(run.error_category, Some(RunErrorCategory::Cancelled));
+        assert_eq!(
+            run.result, None,
+            "no partial answer is presented as a result"
+        );
+        assert!(runs::cancel(&state, id).is_err(), "it has already ended");
+    }
+
+    #[tokio::test]
+    async fn runs_their_outputs_and_progress_survive_a_restart() {
+        let dir =
+            std::env::temp_dir().join(format!("rema-runs-{}-{}", std::process::id(), now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("rema.db");
+        let (id, running, task_id) = {
+            let mut state = state(FakeLanguageModel::replying(&["Kept"])).await;
+            // Move the connected provider over to a database on disk.
+            state.db = crate::db::Database::open(&path).unwrap();
+            providers::connect(&state, ProviderKind::Anthropic, "k")
+                .await
+                .unwrap();
+            let task = tasks::create(&state, every_4_hours(None)).await.unwrap();
+            let id = tasks::run_now(&state, task.id).unwrap();
+            wait_idle(&state, task.id).await;
+            let row = state.db.call(|c| repo::get(c, task.id)).unwrap();
+            // A run that was still going when ReMa closed.
+            let running = runs::create(&state, &row, ExecutionTrigger::Manual, None).unwrap();
+            runs::start(&state, task.id, running).unwrap();
+            (id, running, task.id)
+        };
+
+        let db = crate::db::Database::open(&path).unwrap();
+        db.call(|c| crate::db::runs::mark_interrupted(c, now_ms()))
+            .unwrap();
+        let (mut state, _) = testing::state(Arc::new(FakeLanguageModel::replying(&[])));
+        state.db = db;
+        let run = runs::get(&state, id).unwrap();
+        assert_eq!(run.status, ExecutionStatus::Succeeded);
+        assert_eq!(run.result.as_deref(), Some("Kept"));
+        assert!(!run.progress.is_empty());
+        let stale = runs::get(&state, running).unwrap();
+        assert_eq!(stale.status, ExecutionStatus::Failed);
+        assert_eq!(stale.error.as_deref(), Some(crate::db::runs::INTERRUPTED));
+        assert_eq!(runs::list(&state, task_id, None).unwrap().runs.len(), 2);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn job_mail_sync_records_a_normal_run_with_progress_outputs_and_no_tokens() {
+        use crate::{
+            connectors::{
+                google::GoogleEndpoints, microsoft::MicrosoftEndpoints, oauth::OAuthApp, Apps,
+            },
+            db::connectors::{self as connector_repo, AccountRecord, AccountStatus},
+            models::connectors::{ConnectorId, ProviderId},
+            secrets::Credential,
+            test_support::MockServer,
+        };
+        let gmail = MockServer::start(|req| {
+            let t = req.target.as_str();
+            if t.starts_with("/gmail/v1/users/me/profile") {
+                return Some((
+                    200,
+                    r#"{"emailAddress":"ana@gmail.com","historyId":"900"}"#.into(),
+                ));
+            }
+            if t.starts_with("/gmail/v1/users/me/messages?") {
+                return Some((200, r#"{"resultSizeEstimate":0}"#.into()));
+            }
+            None
+        })
+        .await;
+        let mut state = state(FakeLanguageModel::replying(&[])).await;
+        let base = gmail.base_url.clone();
+        state.connectors = crate::connectors::ConnectorsContext::new(
+            GoogleEndpoints::at(&base),
+            MicrosoftEndpoints::at(&base, &format!("{base}/graph/v1.0")),
+            Apps {
+                google: Some(OAuthApp {
+                    client_id: "client".into(),
+                    client_secret: Some("client-secret-value".into()),
+                }),
+                microsoft: None,
+            },
+        );
+        state
+            .vault
+            .set(
+                &crate::connectors::tokens::vault_account(ProviderId::Google),
+                Credential::OAuth {
+                    access_token: "g-access-token-secret".into(),
+                    refresh_token: Some("g-refresh-token-secret".into()),
+                    expires_at: Some(now_ms() + 3_600_000),
+                },
+            )
+            .await
+            .unwrap();
+        let now = now_ms();
+        state
+            .db
+            .call(|c| {
+                connector_repo::save_account(
+                    c,
+                    &AccountRecord {
+                        provider: ProviderId::Google,
+                        account_id: Some("g-1".into()),
+                        email: Some("ana@gmail.com".into()),
+                        display_name: None,
+                        granted_scopes: crate::connectors::google::scopes(&[ConnectorId::Gmail]),
+                        status: AccountStatus::Connected,
+                        status_reason: None,
+                        connected_at: now,
+                        updated_at: now,
+                    },
+                )?;
+                connector_repo::set_enabled(c, ConnectorId::Gmail, true, now)
+            })
+            .unwrap();
+        let task = tasks::create(
+            &state,
+            TaskInput {
+                kind: TaskKind::JobApplications {
+                    lookback_days: 30,
+                    sync_calendar: true,
+                },
+                prompt: String::new(),
+                ..every_4_hours(None)
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(task.name, "Job Mail & Interview Sync");
+
+        let id = tasks::run_now(&state, task.id).unwrap();
+        wait_idle(&state, task.id).await;
+        let run = runs::get(&state, id).unwrap();
+        assert_eq!(run.status, ExecutionStatus::Succeeded, "{:?}", run.error);
+        assert_eq!(run.task_name.as_deref(), Some("Job Mail & Interview Sync"));
+        assert!(run.report.is_some(), "its result can be viewed");
+        let stages: Vec<_> = run
+            .progress
+            .iter()
+            .map(|s| (s.stage.as_str(), s.status, s.label.as_str()))
+            .collect();
+        assert_eq!(
+            stages,
+            [
+                (
+                    "mail",
+                    StageStatus::Completed,
+                    "Synchronized Gmail · 0 new messages"
+                ),
+                (
+                    "triage",
+                    StageStatus::Completed,
+                    "Found 0 job-related messages"
+                ),
+                (
+                    "classify",
+                    StageStatus::Completed,
+                    "No job-related messages to read"
+                ),
+                (
+                    "applications",
+                    StageStatus::Completed,
+                    "No application changed"
+                ),
+                ("calendar", StageStatus::Skipped, "No calendar is connected"),
+            ]
+        );
+        assert_eq!(run.context.unwrap().connectors, ["Gmail"]);
+        assert_eq!(run.outputs.len(), 1);
+        assert_eq!(run.outputs[0].kind, RunOutputKind::ApplicationWatch);
+        assert_eq!(run.outputs[0].reference, RunOutputRef::RunReport);
+
+        // Nothing a run keeps holds a credential.
+        let stored: String = state
+            .db
+            .call(|c| {
+                let mut out = String::new();
+                for table in ["task_executions", "task_run_events", "task_run_outputs"] {
+                    let mut statement = c.prepare(&format!("SELECT * FROM {table}"))?;
+                    let columns = statement.column_count();
+                    let mut rows = statement.query([])?;
+                    while let Some(row) = rows.next()? {
+                        for i in 0..columns {
+                            let value: rusqlite::types::Value = row.get(i)?;
+                            out.push_str(&format!("{value:?}\n"));
+                        }
+                    }
+                }
+                Ok(out)
+            })
+            .unwrap();
+        for secret in [
+            "g-access-token-secret",
+            "g-refresh-token-secret",
+            "client-secret-value",
+            "Bearer",
+        ] {
+            assert!(!stored.contains(secret), "{secret} found in run history");
+        }
     }
 }

@@ -27,7 +27,7 @@ use crate::{
         portfolio::PortfolioChanged,
         profile::ProfileChanged,
         provider::ProvidersChanged,
-        task::TasksChanged,
+        task::{TaskRunChanged, TasksChanged},
     },
 };
 
@@ -147,7 +147,9 @@ pub fn builder() -> Builder<tauri::Wry> {
             commands::tasks::set_task_enabled,
             commands::tasks::delete_task,
             commands::tasks::run_task_now,
-            commands::tasks::list_task_executions,
+            commands::tasks::list_task_runs,
+            commands::tasks::get_task_run,
+            commands::tasks::cancel_task_run,
             // Job analytics
             commands::analytics::get_analytics_preferences,
             commands::analytics::save_analytics_preferences,
@@ -176,6 +178,7 @@ pub fn builder() -> Builder<tauri::Wry> {
             PortfolioChanged,
             ProfileChanged,
             ProvidersChanged,
+            TaskRunChanged,
             TasksChanged,
         ])
         // Ids and epoch-millisecond timestamps are far below 2^53.

@@ -103,7 +103,9 @@ export function App() {
           <ChatPage conversationId={view.conversationId} initialAgentIds={view.agentIds} />
         )}
         {view.page === 'agents' && <AgentsPage />}
-        {view.page === 'tasks' && <ScheduledTasksPage />}
+        {view.page === 'tasks' && (
+          <ScheduledTasksPage taskId={view.taskId ?? null} runId={view.runId ?? null} />
+        )}
         {view.page === 'profile' && <ProfilePage section={view.section ?? 'documents'} />}
         {view.page === 'portfolio' && <PortfolioStudioPage portfolioId={view.portfolioId ?? null} />}
         {view.page === 'applications' && <ApplicationsPage applicationId={view.applicationId ?? null} />}

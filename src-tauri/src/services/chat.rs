@@ -368,23 +368,47 @@ pub fn with_agents(
 /// the same text.
 pub fn with_profile(
     state: &AppState,
-    mut system: String,
+    system: String,
     use_profile: bool,
     request: &str,
 ) -> AppResult<String> {
-    if use_profile {
-        match profile_context::load(state)? {
-            Some(context) => {
-                system.push_str("\n\n");
-                system.push_str(&context.prompt(request));
-            }
-            None => system.push_str(
+    Ok(profile_prompt(state, system, use_profile, request)?.0)
+}
+
+/// Whether a request gave the model the user's Profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileUse {
+    Off,
+    /// Turned on, but the Profile has nothing in it.
+    Empty,
+    Included,
+}
+
+/// [`with_profile`], also telling what was added.
+pub fn profile_prompt(
+    state: &AppState,
+    mut system: String,
+    use_profile: bool,
+    request: &str,
+) -> AppResult<(String, ProfileUse)> {
+    if !use_profile {
+        return Ok((system, ProfileUse::Off));
+    }
+    let used = match profile_context::load(state)? {
+        Some(context) => {
+            system.push_str("\n\n");
+            system.push_str(&context.prompt(request));
+            ProfileUse::Included
+        }
+        None => {
+            system.push_str(
                 "\n\nThe user turned on their ReMa Profile, but it is empty. If personal \
                  details matter, suggest adding a CV or details on the Profile page.",
-            ),
+            );
+            ProfileUse::Empty
         }
-    }
-    Ok(system)
+    };
+    Ok((system, used))
 }
 
 /// Whether the endpoint's provider hosts a web search the model can use

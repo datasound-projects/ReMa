@@ -84,6 +84,9 @@ const events = [
   { id: 'sync1', summary: 'Weekly sync', start: at(inDays(1), '09:00'), end: at(inDays(1), '09:30'), transparency: 'opaque', status: 'confirmed', hangoutLink: 'https://meet.google.com/abc-defg-hij', htmlLink: 'https://calendar.google.com/event?eid=sync1' },
 ];
 let eventSeq = 1;
+let replyDelay = 0;
+// Event ids stay unique across mock sessions, as real calendars' ids do.
+const session = Date.now().toString(36);
 const outlookEvents = [
   { id: 'ol-dentist', subject: 'Dentist', start: { dateTime: `${isoDate(inDays(2))}T07:00:00`, timeZone: 'UTC' }, end: { dateTime: `${isoDate(inDays(2))}T08:00:00`, timeZone: 'UTC' }, showAs: 'busy', isAllDay: false, isCancelled: false, location: { displayName: 'Dental clinic' }, webLink: 'https://outlook.live.com/calendar/item/ol-dentist' },
 ];
@@ -222,9 +225,15 @@ function route(req, url, body, res) {
   if (p === '/v1/chat/completions') {
     const text = modelReply(JSON.parse(body || '{}'));
     res.writeHead(200, { 'content-type': 'text/event-stream' });
-    res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: text } }] })}\n\n`);
-    res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`);
-    return res.end('data: [DONE]\n\n');
+    const finish = () => {
+      res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: text } }] })}\n\n`);
+      res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`);
+      res.end('data: [DONE]\n\n');
+    };
+    // POST /__e2e/delay {ms}: answers take that long (to catch a run mid-way).
+    if (replyDelay > 0) setTimeout(finish, replyDelay);
+    else finish();
+    return;
   }
 
   // Authorization: the user signs in and allows access.
@@ -296,7 +305,7 @@ function route(req, url, body, res) {
     return send(res, 200, { items });
   }
   if (p === '/calendar/v3/calendars/primary/events' && req.method === 'POST') {
-    const event = { ...JSON.parse(body), id: `evt${eventSeq++}`, status: 'confirmed' };
+    const event = { ...JSON.parse(body), id: `evt-${session}-${eventSeq++}`, status: 'confirmed' };
     events.push(event);
     return send(res, 200, event);
   }
@@ -362,9 +371,23 @@ function route(req, url, body, res) {
   }
 
   // Test control
+  if (p === '/__e2e/delay' && req.method === 'POST') {
+    replyDelay = Number(JSON.parse(body).ms) || 0;
+    return send(res, 200, { ok: true, replyDelay });
+  }
   if (p === '/__e2e/next' && req.method === 'POST') {
     deliverNext();
     return send(res, 200, { ok: true });
+  }
+  // One more Gmail message, with the classification the model gives it:
+  // {id, from, subject, body, answer?}. Its history id is past any cursor
+  // an earlier mock session handed out.
+  if (p === '/__e2e/mail' && req.method === 'POST') {
+    const m = JSON.parse(body);
+    historyId += 100;
+    addGmail(m.id, m.thread ?? m.id, m.from, m.subject, m.body, m.hoursAgo ?? 0);
+    if (m.answer) answers[m.subject] = { ...plain, ...m.answer };
+    return send(res, 200, { ok: true, historyId });
   }
 
   return send(res, 404, { error: 'not mocked', path: p });

@@ -240,7 +240,7 @@ fn init_state(app: &App) -> Result<AppState, Box<dyn std::error::Error>> {
     let now = time::now_ms();
     db.call(|conn| {
         db::conversations::mark_interrupted(conn)?;
-        db::tasks::mark_interrupted_executions(conn, now)?;
+        db::runs::mark_interrupted(conn, now)?;
         db::analytics::mark_interrupted_research(conn)?;
         Ok(())
     })?;

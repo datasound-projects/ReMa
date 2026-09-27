@@ -1,13 +1,12 @@
-//! Scheduled tasks and their execution history.
+//! Scheduled tasks (their runs are in `db::runs`).
 
 use rusqlite::{params, Connection, OptionalExtension, Row};
 
 use crate::{
     error::{AppError, AppResult},
     models::{
-        jobs::JobRunReport,
         provider::ModelRef,
-        task::{BuiltinTask, ExecutionStatus, ExecutionTrigger, Schedule, TaskExecution, TaskKind},
+        task::{BuiltinTask, Schedule, TaskKind},
     },
 };
 
@@ -39,9 +38,6 @@ pub struct TaskRow {
 const TASK_COLUMNS: &str = "id, name, prompt, provider_id, model_id, schedule, timezone, start_at,
     end_at, max_runs, run_count, enabled, status, last_run_at, next_run_at, created_at, updated_at,
     kind, use_profile, builtin";
-
-const EXECUTION_COLUMNS: &str = "id, task_id, trigger, scheduled_for, started_at, finished_at,
-    status, provider_id, model_id, result, error, report";
 
 fn task_from_row(row: &Row) -> rusqlite::Result<TaskRow> {
     let schedule: String = row.get(5)?;
@@ -75,30 +71,6 @@ fn task_from_row(row: &Row) -> rusqlite::Result<TaskRow> {
         next_run_at: row.get(14)?,
         created_at: row.get(15)?,
         updated_at: row.get(16)?,
-    })
-}
-
-fn execution_from_row(row: &Row) -> rusqlite::Result<TaskExecution> {
-    let trigger: String = row.get(2)?;
-    let status: String = row.get(6)?;
-    Ok(TaskExecution {
-        id: row.get(0)?,
-        task_id: row.get(1)?,
-        trigger: ExecutionTrigger::parse(&trigger).unwrap_or(ExecutionTrigger::Scheduled),
-        scheduled_for: row.get(3)?,
-        started_at: row.get(4)?,
-        finished_at: row.get(5)?,
-        status: ExecutionStatus::parse(&status).unwrap_or(ExecutionStatus::Failed),
-        model: ModelRef {
-            provider_id: row.get(7)?,
-            model_id: row.get(8)?,
-        },
-        result: row.get(9)?,
-        error: row.get(10)?,
-        // An unreadable report (older format) is shown as text only.
-        report: row
-            .get::<_, Option<String>>(11)?
-            .and_then(|r| serde_json::from_str(&r).ok()),
     })
 }
 
@@ -271,111 +243,8 @@ pub fn earliest_next_run(conn: &Connection) -> AppResult<Option<i64>> {
     )?)
 }
 
-pub struct NewExecution<'a> {
-    pub task_id: i64,
-    pub trigger: ExecutionTrigger,
-    pub scheduled_for: Option<i64>,
-    pub started_at: i64,
-    pub model: &'a ModelRef,
-    pub prompt: &'a str,
-}
-
-pub fn insert_execution(conn: &Connection, execution: NewExecution) -> AppResult<TaskExecution> {
-    conn.execute(
-        "INSERT INTO task_executions
-             (task_id, trigger, scheduled_for, started_at, status, provider_id, model_id, prompt)
-         VALUES (?1, ?2, ?3, ?4, 'running', ?5, ?6, ?7)",
-        params![
-            execution.task_id,
-            execution.trigger.as_str(),
-            execution.scheduled_for,
-            execution.started_at,
-            execution.model.provider_id,
-            execution.model.model_id,
-            execution.prompt,
-        ],
-    )?;
-    get_execution(conn, conn.last_insert_rowid())
-}
-
-pub fn get_execution(conn: &Connection, id: i64) -> AppResult<TaskExecution> {
-    conn.query_row(
-        &format!("SELECT {EXECUTION_COLUMNS} FROM task_executions WHERE id = ?1"),
-        [id],
-        execution_from_row,
-    )
-    .optional()?
-    .ok_or_else(|| AppError::not_found("Execution not found"))
-}
-
-/// How a run ended.
-pub struct Finished<'a> {
-    pub status: ExecutionStatus,
-    pub result: Option<&'a str>,
-    pub error: Option<&'a str>,
-    pub report: Option<&'a JobRunReport>,
-    pub finished_at: i64,
-}
-
-pub fn finish_execution(conn: &Connection, id: i64, finished: Finished) -> AppResult<()> {
-    let report = finished.report.map(to_json).transpose()?;
-    conn.execute(
-        "UPDATE task_executions SET status = ?2, result = ?3, error = ?4, report = ?5, finished_at = ?6
-         WHERE id = ?1",
-        params![
-            id,
-            finished.status.as_str(),
-            finished.result,
-            finished.error,
-            report,
-            finished.finished_at
-        ],
-    )?;
-    Ok(())
-}
-
-/// Newest first.
-pub fn list_executions(
-    conn: &Connection,
-    task_id: i64,
-    limit: u32,
-) -> AppResult<Vec<TaskExecution>> {
-    let mut stmt = conn.prepare(&format!(
-        "SELECT {EXECUTION_COLUMNS} FROM task_executions WHERE task_id = ?1
-         ORDER BY started_at DESC, id DESC LIMIT ?2"
-    ))?;
-    let rows = stmt.query_map(params![task_id, limit], execution_from_row)?;
-    Ok(rows.collect::<Result<_, _>>()?)
-}
-
-pub fn last_execution_status(
-    conn: &Connection,
-    task_id: i64,
-) -> AppResult<Option<ExecutionStatus>> {
-    let status: Option<String> = conn
-        .query_row(
-            "SELECT status FROM task_executions WHERE task_id = ?1
-             ORDER BY started_at DESC, id DESC LIMIT 1",
-            [task_id],
-            |row| row.get(0),
-        )
-        .optional()?;
-    Ok(status.as_deref().and_then(ExecutionStatus::parse))
-}
-
-/// Fails executions left running by a previous session.
-pub fn mark_interrupted_executions(conn: &Connection, now: i64) -> AppResult<usize> {
-    Ok(conn.execute(
-        "UPDATE task_executions
-         SET status = 'failed', finished_at = ?1,
-             error = 'Interrupted: ReMa was closed while this task was running.'
-         WHERE status = 'running'",
-        [now],
-    )?)
-}
-
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::{db::Database, models::task::IntervalUnit};
 
@@ -472,68 +341,6 @@ mod tests {
             assert_eq!(due_now.len(), 1);
             assert_eq!(due_now[0].id, due_id);
             assert_eq!(earliest_next_run(c)?, Some(1_000));
-            Ok(())
-        })
-        .unwrap();
-    }
-
-    #[test]
-    fn records_execution_history() {
-        let db = Database::open_in_memory().unwrap();
-        db.call(|c| {
-            let task = sample_task();
-            let id = insert(c, &task)?;
-            let first = insert_execution(
-                c,
-                NewExecution {
-                    task_id: id,
-                    trigger: ExecutionTrigger::Scheduled,
-                    scheduled_for: Some(1_000),
-                    started_at: 1_000,
-                    model: &task.model,
-                    prompt: &task.prompt,
-                },
-            )?;
-            assert_eq!(first.status, ExecutionStatus::Running);
-            finish_execution(
-                c,
-                first.id,
-                Finished {
-                    status: ExecutionStatus::Succeeded,
-                    result: Some("done"),
-                    error: None,
-                    report: Some(&JobRunReport {
-                        emails_checked: 3,
-                        ..JobRunReport::default()
-                    }),
-                    finished_at: 1_500,
-                },
-            )?;
-
-            let second = insert_execution(
-                c,
-                NewExecution {
-                    task_id: id,
-                    trigger: ExecutionTrigger::Manual,
-                    scheduled_for: None,
-                    started_at: 2_000,
-                    model: &task.model,
-                    prompt: &task.prompt,
-                },
-            )?;
-            assert_eq!(mark_interrupted_executions(c, 3_000)?, 1);
-
-            let history = list_executions(c, id, 10)?;
-            assert_eq!(history.len(), 2);
-            assert_eq!(history[0].id, second.id);
-            assert_eq!(history[0].status, ExecutionStatus::Failed);
-            assert_eq!(history[1].result.as_deref(), Some("done"));
-            assert_eq!(
-                history[1].report.as_ref().map(|r| r.emails_checked),
-                Some(3)
-            );
-            assert_eq!(history[0].report, None);
-            assert_eq!(last_execution_status(c, id)?, Some(ExecutionStatus::Failed));
             Ok(())
         })
         .unwrap();

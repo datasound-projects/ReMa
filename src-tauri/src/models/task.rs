@@ -105,18 +105,78 @@ pub enum TaskStatus {
     Completed,
 }
 
+/// Where a run is in its lifecycle: created (queued) before the task
+/// executes, then running, then one of the three final states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionStatus {
+    Queued,
     Running,
     Succeeded,
     Failed,
+    Cancelled,
 }
 
 text_enum!(ExecutionStatus {
+    Queued => "queued",
     Running => "running",
     Succeeded => "succeeded",
     Failed => "failed",
+    Cancelled => "cancelled",
+});
+
+impl ExecutionStatus {
+    /// Not finished yet.
+    pub fn is_active(self) -> bool {
+        matches!(self, Self::Queued | Self::Running)
+    }
+}
+
+/// Why a run did not succeed; decides the guidance shown with its error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum RunErrorCategory {
+    /// The run took longer than the limit.
+    Timeout,
+    /// ReMa closed or stopped before the run finished.
+    Interrupted,
+    /// Stopped by the user.
+    Cancelled,
+    /// A scheduled occurrence came while the previous run was still going.
+    Skipped,
+    /// The model declined or returned nothing.
+    Model,
+    /// The model's provider is not connected or its sign-in expired.
+    ModelAccess,
+    /// The provider reported an error (rate limit, outage, rejected request).
+    Provider,
+    /// The provider account has no credits left.
+    Billing,
+    /// A connected service (mail, calendar) needs attention.
+    Connector,
+    /// The network could not be reached.
+    Network,
+    /// No search could run.
+    Search,
+    /// The task cannot run as it is set up.
+    Task,
+    Internal,
+}
+
+text_enum!(RunErrorCategory {
+    Timeout => "timeout",
+    Interrupted => "interrupted",
+    Cancelled => "cancelled",
+    Skipped => "skipped",
+    Model => "model",
+    ModelAccess => "model_access",
+    Provider => "provider",
+    Billing => "billing",
+    Connector => "connector",
+    Network => "network",
+    Search => "search",
+    Task => "task",
+    Internal => "internal",
 });
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -181,24 +241,175 @@ pub struct ScheduledTask {
     pub updated_at: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+/// The task's schedule when a run was created.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
-pub struct TaskExecution {
+pub struct ScheduleSnapshot {
+    pub schedule: Schedule,
+    pub timezone: String,
+    /// `YYYY-MM-DD` and `HH:MM`, local to `timezone`.
+    pub start_date: String,
+    pub start_time: String,
+}
+
+/// What took part in a run: names and flags only, never credentials.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RunContext {
+    /// The user's Profile was given to the model.
+    pub profile: bool,
+    /// Connected services the run used ("Gmail", "Google Calendar").
+    pub connectors: Vec<String>,
+    /// The run could search the web.
+    pub web_search: bool,
+    /// Searches that ran.
+    pub searches: u32,
+    /// What ran them ("ChatGPT web search").
+    pub search_engines: Vec<String>,
+}
+
+/// State of one stage of a run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum StageStatus {
+    Pending,
+    Running,
+    Completed,
+    Failed,
+    Skipped,
+}
+
+text_enum!(StageStatus {
+    Pending => "pending",
+    Running => "running",
+    Completed => "completed",
+    Failed => "failed",
+    Skipped => "skipped",
+});
+
+/// One stage of a run as it happened ("Searched jobs · 3 searches"):
+/// concise activity, never the model's reasoning.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RunProgressEvent {
+    pub id: i64,
+    /// Stable key within the run ("search", "mail").
+    pub stage: String,
+    pub label: String,
+    pub status: StageStatus,
+    pub started_at: Option<i64>,
+    pub updated_at: i64,
+}
+
+/// What an output is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum RunOutputKind {
+    /// Listings a job search found (held by Analytics).
+    JobSearchResults,
+    /// The report of a Job Mail & Interview Sync run.
+    ApplicationWatch,
+    /// An interview the run added to or changed in a calendar.
+    CalendarEvent,
+}
+
+text_enum!(RunOutputKind {
+    JobSearchResults => "job_search_results",
+    ApplicationWatch => "application_watch",
+    CalendarEvent => "calendar_event",
+});
+
+/// Where an output lives (outputs are references, never copies).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RunOutputRef {
+    /// The run's own structured report.
+    RunReport,
+    /// A job search in Analytics.
+    JobSearch { id: i64 },
+    /// An application in Applications.
+    Application { id: i64 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RunOutput {
+    pub id: i64,
+    pub kind: RunOutputKind,
+    pub title: String,
+    pub reference: RunOutputRef,
+    pub created_at: i64,
+}
+
+/// One run in a task's history list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskRunSummary {
     pub id: i64,
     pub task_id: i64,
     pub trigger: ExecutionTrigger,
-    pub scheduled_for: Option<i64>,
-    pub started_at: i64,
-    pub finished_at: Option<i64>,
     pub status: ExecutionStatus,
-    pub model: ModelRef,
-    /// The answer (prompt tasks) or a plain-text summary (job tasks).
-    pub result: Option<String>,
-    pub error: Option<String>,
-    /// Structured result of a job-application run.
-    pub report: Option<JobRunReport>,
+    /// The occurrence a scheduled run belongs to.
+    pub scheduled_for: Option<i64>,
+    /// When the run was created.
+    pub queued_at: i64,
+    pub started_at: Option<i64>,
+    pub finished_at: Option<i64>,
+    pub error_category: Option<RunErrorCategory>,
 }
 
-/// Tasks or their executions changed (created, edited, ran, finished).
+/// A page of a task's runs, newest first.
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskRunPage {
+    pub runs: Vec<TaskRunSummary>,
+    /// Older runs exist (ask again with the last id).
+    pub has_more: bool,
+}
+
+/// One run with everything it recorded. Its snapshot is the task as it was
+/// when the run was created; later edits never change it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskRun {
+    pub id: i64,
+    pub task_id: i64,
+    pub trigger: ExecutionTrigger,
+    pub status: ExecutionStatus,
+    pub scheduled_for: Option<i64>,
+    pub queued_at: i64,
+    pub started_at: Option<i64>,
+    pub finished_at: Option<i64>,
+    /// Start to finish, for finished runs.
+    pub duration_ms: Option<i64>,
+    /// Snapshot fields are `None` for runs recorded before snapshots were
+    /// kept (the prompt and model always were).
+    pub task_name: Option<String>,
+    pub kind: Option<TaskKind>,
+    pub prompt: String,
+    pub model: ModelRef,
+    pub schedule: Option<ScheduleSnapshot>,
+    pub use_profile: Option<bool>,
+    pub context: Option<RunContext>,
+    /// The answer (prompt tasks) or a plain-text summary (job tasks).
+    pub result: Option<String>,
+    /// Structured result of a Job Mail & Interview Sync run.
+    pub report: Option<JobRunReport>,
+    /// A safe, user-facing message.
+    pub error: Option<String>,
+    pub error_category: Option<RunErrorCategory>,
+    pub progress: Vec<RunProgressEvent>,
+    pub outputs: Vec<RunOutput>,
+}
+
+/// Tasks or their runs changed (created, edited, ran, finished).
 #[derive(Debug, Clone, Serialize, Deserialize, Type, tauri_specta::Event)]
 pub struct TasksChanged;
+
+/// A run was created or changed (status, progress, outputs).
+#[derive(Debug, Clone, Serialize, Deserialize, Type, tauri_specta::Event)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskRunChanged {
+    pub task_id: i64,
+    pub run_id: i64,
+}

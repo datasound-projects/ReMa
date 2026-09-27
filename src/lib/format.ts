@@ -26,6 +26,23 @@ export function formatDateTime(ms: number, now = new Date()): string {
   return `${(sameYear ? dayMonth : dayMonthYear).format(date)} ${clock}`;
 }
 
+/** "Today at 21:30", "Yesterday at 08:00", "25 Sep at 21:30" (when a run happened). */
+export function formatWhen(ms: number, now = new Date()): string {
+  const date = new Date(ms);
+  const days = Math.round((startOfDay(date) - startOfDay(now)) / 86_400_000);
+  const clock = time.format(date);
+  if (days === 0) return `Today at ${clock}`;
+  if (days === -1) return `Yesterday at ${clock}`;
+  if (days === 1) return `Tomorrow at ${clock}`;
+  const sameYear = date.getFullYear() === now.getFullYear();
+  return `${(sameYear ? dayMonth : dayMonthYear).format(date)} at ${clock}`;
+}
+
+/** The time of day in the user's clock format ("21:30" or "9:30 PM"). */
+export function formatTime(ms: number): string {
+  return time.format(new Date(ms));
+}
+
 /** "27 Sep", or "3 Jan 2027" in another year. */
 export function formatDate(ms: number, now = new Date()): string {
   const date = new Date(ms);

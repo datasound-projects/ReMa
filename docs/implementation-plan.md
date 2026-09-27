@@ -1,0 +1,211 @@
+# Implementation plan — Run History, Career Search, Network Connect and Business
+
+The plan and the living checklist for three specifications, implemented one
+after another. Each requirement row names its specification section, where
+it lives, its status and the evidence (or the blocker). Status values:
+**Not started**, **In progress**, **Implemented** (code in place, not yet
+verified), **Verified** (tests or an in-app run show it works), **Blocked**
+(needs something outside this repository; the blocker is named).
+
+The specification files are kept unchanged outside the repository:
+
+| Short name | Exact specification filename |
+|---|---|
+| RH | `7fbae61e-ReMa_Scheduled_Task_Run_History_Implementation_1.md` |
+| CS | `2968f2d9-ReMa_Always_On_Career_Search_Infrastructure.md` |
+| NC | `ae663aa0-ReMa_Network_Connect_and_Business_Implementation_Guide.md` (Network Connect §1–§63 and **Appendix B — ReMa Business** B0–B40) |
+
+## 1. Order
+
+| Order | Exact specification filename | Scope | Why this position | Dependencies | Completion gate |
+|---|---|---|---|---|---|
+| 1 | `7fbae61e-ReMa_Scheduled_Task_Run_History_Implementation_1.md` | Persistent per-run history for every scheduled task: queued/running/succeeded/failed/cancelled runs with configuration and context snapshots, progress events, outputs by reference, safe errors, crash reconciliation, paginated history, the "Scheduled / Task" detail view, live updates; Job Mail & Interview Sync on the same system. | Everything else writes into it: CS §39 requires search metadata in run history, NC §42 and B26 require scheduled research to record runs. It changes the scheduler's execution boundary, which the later phases reuse unchanged. | The existing scheduler (`services/scheduler.rs`), `task_executions` (migrations 0001, 0002, 0004), Job Mail & Interview Sync (`services/mail_monitor.rs`, `jobs/`), job retrieval (`retrieval/`). | RH §53 tests pass; RH §54 criteria 1–28 checked; fmt, clippy `-D warnings`, `cargo test`, lint, typecheck, Vitest, build clean; in-app run of RH §55 step 20 (scheduled run, Run now, several runs, failure, edit, restart, built-in automation) in light and dark. |
+| 2 | `2968f2d9-ReMa_Always_On_Career_Search_Infrastructure.md` | One provider-independent CareerSearch layer (router, requirement classes, scopes, source registry, provider-native search with domain filters and verification, Codex, Unsloth tools, no-key fallback chain, health and circuit breakers, normalization, freshness, salary status, evidence), used by Chat, Scheduled Tasks, Agents and the Jobs MCP; no "configure a search service" failure; Settings shows "Career Search — Automatic" with the external services as optional. | Network Connect and Business research (NC §5, §13–§17, §33–§37, B6, B8, B12) are built on this search layer; it needs Phase 1 to record search metadata per run (CS §39). | Phase 1 run context; `retrieval/`, `rema_mcp/` (engine, registry, safe fetcher, ATS adapters), `llm/` adapters (OpenAI Responses, Anthropic, Codex, Gemini, OpenAI-compatible), `services/chat.rs`, `services/websearch.rs`. | CS §61 tests pass; CS §62 criteria 1–30 checked; all checks clean; Phase 1 tests still pass; the reference request "Find me most recent AI jobs in Vienna Austria with salary starting from 85k a year." runs in Chat and as a Scheduled Task without a search key (live providers where reachable, local stand-ins otherwise, stated as such). |
+| 3 | `ae663aa0-ReMa_Network_Connect_and_Business_Implementation_Guide.md` | Network Connect: LinkedIn and XING connectors on the shared connector infrastructure, capability registry, provider data policy, research service and planner, entities, evidence, confidence, UI, chat tools, scheduled research. Appendix B Business: Business Profile and offers, Find Clients, Find Contract Work, Business Pipeline, Go-to-Market Studio, tools, scheduling. | Needs CareerSearch (Phase 2) for every public research path and run history (Phase 1) for scheduled research; its connectors reuse the connectors layer. | Phases 1 and 2; `connectors/` (OAuth, token store, registry), `rema_mcp/fetch.rs` (hardened in Phase 2), Profile context, chat tool loop and approvals. | NC §60 and B34 tests pass; NC §61 and B36 checklists checked; all checks clean; Phases 1–2 regression tests pass; B35 manual scenarios run where reachable; B37 completion report written; provider blockers recorded. |
+| Final | — | Integration verification across all three phases. | — | Phases 1–3. | Shared search, connectors, model/tool orchestration, scheduling, run history, persistence and navigation work together; one migration chain; no duplicate services or divergent models; full test suites and build; in-app end-to-end run; everything committed and pushed. |
+
+Shared components have one owning phase:
+
+| Component | Owner | Used by |
+|---|---|---|
+| Run record, snapshots, progress events, outputs, run context (`services/runs.rs`, migration 0010) | Phase 1 | Phase 2 fills the search part of the run context; Phase 3 scheduled research records runs |
+| CareerSearch router, requirement classes, scopes, evidence model, company domain resolution, people/company search primitives, health | Phase 2 | Phase 3 research services |
+| Hardened public fetcher (`rema_mcp/fetch.rs`: SSRF rules, redirects, limits, robots) | Phase 2 (extended, not duplicated) | Phase 3 website ingestion (B4, B30) |
+| Network and Business models, capability registry, provider data policy, new task kinds, new connectors | Phase 3 | — |
+
+## 2. Baseline (before any change)
+
+- Branch `claude/rema-foundation-setup-6gmim3`, HEAD `671e287`, pushed, working tree clean.
+- `cargo test --locked`: 468 passed, 0 failed, 3 ignored (explicit-only tests: bindings export, a measurement, a live Codex check).
+- `pnpm test`: 87 passed (19 files). `cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings`, `pnpm lint`, `pnpm typecheck`, `pnpm build`: clean at `671e287` (see [applications/validation.md](applications/validation.md)).
+- Pre-existing failures: none. CI for `671e287` was still running when this plan was written.
+
+## 3. Conflicts and how they are resolved
+
+| Sections | Conflict | Resolution (no change to intended behavior, security or scope) |
+|---|---|---|
+| CS §13, §40, §59 vs NC B6 | CS: a missing search service must never be a user-facing configuration error. B6: "do not ship a decorative 'Automatic' label over an absent backend." | Both hold: the configuration errors are removed and every route is real (provider-native search, the Jobs MCP adapters, documented no-key public APIs). When every route fails, the run reports the actual cause (unreachable, rate limited, provider refused) without asking for a key; the health test (CS §50) shows which routes work. |
+| CS §17–§18 ("no-key public search mechanism") vs NC B4, B30 ("never bypass … robots/access restrictions"), CS §2 (not a general browser), CS §44 | Free search-engine result pages are commonly closed to automated clients by robots rules or terms. | No-key routes are limited to documented public interfaces whose terms allow programmatic use (public ATS job-board APIs, public job-board APIs, Wikidata for company domains, company career pages within robots rules). Each route's basis is recorded in the source registry (as the Jobs MCP registry already does). Search-engine result pages are not scraped. |
+| CS §3 Tier 1 (LinkedIn Jobs, XING Jobs, Indeed, StepStone …) vs NC §44 and the Jobs MCP registry | The tier lists sites whose terms were not reviewed for automated reading. | They stay discovery links (the registry's existing decision); results found through provider-native search can cite them; ReMa does not fetch them. |
+| RH §26 ("every scheduler firing must produce exactly one run") vs the scheduler skipping an occurrence while the previous run is still busy | A skipped firing produced no record. | The firing is recorded as one run with status Cancelled and "Skipped: the previous run was still in progress." No scheduling change. |
+| RH §27 (retries) | The scheduler has no run-level retries. | Nothing to redesign; transient-request retries inside a run stay internal and appear as activity where they matter. |
+| NC §8 | LinkedIn's native-app PKCE flow must be enabled for the app by LinkedIn. | Implemented against the documented flow and tested with a local stand-in; live sign-in is a release prerequisite (below). |
+| NC §11 | XING offers "Login with XING" only as a website plugin bound to a domain, and no new XING API applications can be registered. | The XING connector reports its real capability state (not available for desktop sign-in); public discovery uses permitted sources only (NC §1 "build around capabilities"). |
+
+## 4. External blockers and release prerequisites
+
+| Item | Needed from | Affects |
+|---|---|---|
+| LinkedIn app with "Sign In with LinkedIn using OpenID Connect" and native PKCE enabled; client id for the build | Publisher / LinkedIn | NC §8 live sign-in |
+| LinkedIn approval for any member-network scope (e.g. `r_1st_connections`, partner-only) | LinkedIn partner programme | NC §9, §22 (first-degree data); without it the capability stays "Not available" |
+| XING desktop sign-in and API access (no new applications) | XING | NC §11–§12 |
+| Live verification of official documentation hosts that are blocked here (platform.openai.com, learn.microsoft.com, dev.xing.com) | Re-check before release | CS §64, NC §63, B40 (verified here through the official OpenAI SDK type definitions, platform.claude.com, Unsloth's published package and search summaries of the official pages) |
+| Live no-key routes (job boards, ATS APIs, Wikidata) are unreachable from this build environment | Re-run the health test on a normal network | CS §50, §60 |
+
+## 5. Phase 1 — Run History (RH)
+
+Design: the existing `task_executions` table stays the run table (no parallel
+system). Migration 0010 rebuilds it with the new statuses and snapshot
+columns and adds `task_run_events` (progress) and `task_run_outputs`
+(outputs by reference), both deleted with their run. `services/runs.rs`
+holds the lifecycle; the scheduler, Run now and Job Mail & Interview Sync all
+go through it.
+
+| Req | Requirement | Planned location | Status | Evidence / blocker |
+|---|---|---|---|---|
+| RH §1, §49 | Keep the overview table and actions | `src/pages/ScheduledTasksPage.tsx` | Verified | Overview unchanged; Vitest page tests; E2E |
+| RH §2 | Open a task by its row or name; `…` menu keeps the actions | `ScheduledTasksPage.tsx` | Verified | Row click and History open the runs; Vitest; E2E |
+| RH §3 | Detail view "Scheduled / <Task Name>" | `src/app/navigation.ts` (`tasks` view with `taskId`, `runId`), `src/components/tasks/TaskRunsView.tsx` | Verified | `View.tasks{taskId, runId}`; breadcrumb; Vitest; E2E |
+| RH §4 | Layout: selected run main area, run history panel on the right | `TaskRunsView.tsx`, `src/styles/taskRuns.css` | Verified | `TaskRunsView` two panes, independent scrolling; E2E screenshots |
+| RH §5, §31 | Run list newest first, compact, selection obvious | `src/components/tasks/RunList.tsx` | Verified | `RunList`; newest first, `aria-current`; Vitest; E2E |
+| RH §6 | Trigger recorded; Manual label | `task_executions.trigger`; `RunList.tsx` | Verified | Manual tag and header; Rust and Vitest; E2E |
+| RH §7 | Queued, Running, Succeeded, Failed, Cancelled | migration 0010; `ExecutionStatus` | Verified | Migration 0010; `ExecutionStatus`; tests for each state |
+| RH §8 | Header: status, trigger, started, finished/failed, duration or elapsed | `RunHeader` in `TaskRunsView.tsx` | Verified | `RunView` header (elapsed live); E2E |
+| RH §9, §13 | Every run keeps its own final output (Markdown) | `task_executions.result`, `report` | Verified | `every_firing_and_every_run_now_is_one_run_with_its_own_result`; E2E |
+| RH §10, §11, §20, §21, §37 | Snapshot of name, prompt, model, schedule, Profile, kind at execution time | migration 0010 columns; `services/runs.rs::create` | Verified | `runs_keep_the_task_as_it_was_through_edits_pause_and_resume`; E2E edit |
+| RH §12, §23 | No secrets in runs; error category, safe message, time | `RunContext` (names only); errors through `llm::http::scrub`; security test | Verified | `safe_messages_carry_no_credentials`; Job Mail run scan; failed-run test |
+| RH §14, §15, §39, §40 | 0..N outputs by reference, Outputs section, open an output | `task_run_outputs`; `RunInspector` | Verified | Outputs (run report, Analytics job search, application); tests; E2E |
+| RH §16, §17, §18, §30 | Real progress events (no reasoning text) | `task_run_events`; recorder used by scheduler, retrieval and `jobs::run` | Verified | Stages for prompt, job search and Job Mail tasks; tests; E2E |
+| RH §19 | Context section (Profile, connectors, web search) | `task_executions.context` | Verified | `RunContext`; E2E (connectors, Profile, web search) |
+| RH §22 | Failure view with guidance | `error_category` → guidance in `TaskRunsView.tsx` | Verified | `failureGuidance`; Vitest failure view; E2E interrupted run |
+| RH §24, §47 | Running run appears at once and updates live | `TaskRunChanged` event; `useTaskRuns` | Verified | `TaskRunChanged`; Vitest live update; E2E running run and scheduled firing |
+| RH §25, §42 | Run created (queued) before execution, at the scheduler boundary | `scheduler::spawn_run` / `execute` | Verified | `spawn_run` creates the queued run first; `a_run_is_visible_while_running…` |
+| RH §26 | One firing or Run now = exactly one run | `spawn_run`; skipped firing recorded | Verified | One run per firing / Run now; skipped firing recorded; tests |
+| RH §27 | Retry semantics | — | Verified | No run-level retries exist; a second search attempt is shown in the stage label |
+| RH §28 | Run now creates a manual run and opens it | `run_task_now` returns the run id; UI navigates | Verified | `run_task_now` returns the id; Vitest "opens the new run after Run now"; E2E |
+| RH §29, §51 | Job Mail & Interview Sync on the same system, with progress and outputs | `mail_monitor.rs`, `jobs/mod.rs` | Verified | `job_mail_sync_records_a_normal_run…`; E2E |
+| RH §32 | Paginated history, independent scroll, newest first | `list_task_runs(task_id, before, limit)`; incremental loading | Verified | 30 per page; Vitest "loads older runs only when asked" |
+| RH §33, §35, §36 | No retention cut; pause, resume and edits keep history | `services/tasks.rs`; tests | Verified | No retention cut; edit/pause/resume test |
+| RH §34 | Deleting a task deletes its runs, events and outputs | FK `ON DELETE CASCADE` | Verified | FK cascade; migration test |
+| RH §38 | Safe Markdown, tables, links, code | existing `Markdown` component | Verified | Existing safe `Markdown` and `JobReport` |
+| RH §41 | Backend interfaces (`list_task_runs`, `get_task_run`, create/running/progress/output/complete/fail) | `services/runs.rs`, `db/runs.rs`, `commands/tasks.rs` | Verified | `db/runs.rs`, `services/runs.rs`, commands |
+| RH §43, §44 | Stale runs reconciled on start ("Execution interrupted before completion."); history survives restart | `mark_interrupted_executions` at startup | Verified | `mark_interrupted`; restart test; E2E kill and restart |
+| RH §45, §46 | UTC milliseconds stored; local "Today at …"; scheduled vs started vs finished kept | `src/lib/format.ts` | Verified | UTC ms stored; `formatWhen`; "Scheduled for" when late |
+| RH §48 | Empty state with Run now | `TaskRunsView.tsx` | Verified | Empty state with Run now; Vitest; E2E |
+| RH §52 | Nothing outside the scope | — | Verified | Nothing outside the scope added |
+| RH §53 | Required tests | `db/runs.rs`, `services/runs.rs`, `services/scheduler.rs`, `db/mod.rs`, Vitest | Verified | See [run-history/validation.md](run-history/validation.md) |
+| RH §54 | Acceptance criteria 1–28 | [run-history/validation.md](run-history/validation.md) | Verified | All 28 verified: [run-history/implementation.md](run-history/implementation.md) §6 |
+
+## 6. Phase 2 — Always-On Career Search (CS)
+
+Planned layout: `src-tauri/src/career_search/` (router, requirement classes,
+scopes, routes, no-key providers, health, evidence), built on `retrieval/` and
+`rema_mcp/` rather than beside them.
+
+| Req | Requirement | Planned location | Status | Evidence / blocker |
+|---|---|---|---|---|
+| CS §1, §37 | A search path always exists, the same in Chat, Tasks, Agents, Jobs MCP | `career_search/mod.rs`; callers | Not started | |
+| CS §2 | Professional scope only, not a general browser | scopes, registry | Not started | |
+| CS §3, §19, §23 | Source hierarchy; Jobs MCP first; maintainable registry | `rema_mcp/sources.rs` (extended) | Not started | |
+| CS §4, §5, §6 | One interface, one router, automatic selection | `career_search/{mod,router}.rs` | Not started | |
+| CS §7–§9, §31 | OpenAI native search, domain filters, source validation | `llm/openai*`, `retrieval/native.rs` | Not started | |
+| CS §10 | Codex | `llm/codex*` | Not started | |
+| CS §11, §12, §32 | Anthropic native search, verification, sources | `llm/anthropic*`, `retrieval/native.rs` | Not started | |
+| CS §13, §40, §59 | No configuration error; remove the dependency | `retrieval/mod.rs`, `services/chat.rs`, `rema_mcp/engine.rs` | Not started | |
+| CS §14–§16 | Local models get a server-side search tool; Unsloth tools enabled automatically; no copied AGPL code | `llm/openai_compat*`, `career_search/routes.rs` | Not started | |
+| CS §17, §18 | No-key fallback chain, fault tolerant | `career_search/nokey/` | Not started | |
+| CS §20, §21 | Requirement classes; current-data guard | `career_search/requirement.rs` | Not started | |
+| CS §22 | Scopes | `career_search/scope.rs` | Not started | |
+| CS §24, §25 | Company domains; location-aware search | `career_search/company.rs` | Not started | |
+| CS §26 | Query planner | `career_search/planner.rs` | Not started | |
+| CS §27–§30 | Salary, freshness, normalization, evidence | `career_search/evidence.rs`, `rema_mcp/normalize` | Not started | |
+| CS §33–§36 | Dedupe, failure isolation, retries, circuit breakers | `career_search/health.rs` | Not started | |
+| CS §38, §39 | Scheduled tasks; search metadata in run history | scheduler; run context | Not started | |
+| CS §41, §42 | Settings "Career Search — Automatic"; external services optional | `src/components/settings/` | Not started | |
+| CS §43, §44 | No external browser window; no hidden GUI automation | — | Not started | |
+| CS §45–§48 | Prompt-injection protection; source fetching; JS-heavy pages; JobPosting data | `rema_mcp/fetch.rs`, adapters | Not started | |
+| CS §49–§51 | Observability; health test; startup capability detection | `career_search/health.rs`, Settings | Not started | |
+| CS §52–§55 | Routing examples (OpenAI, Claude, Unsloth, other local) | router tests | Not started | |
+| CS §56–§58 | Quality guard; no fake current results; progress UI | chat/tasks | Not started | |
+| CS §60 | Realistic reliability | health, fallback | Not started | |
+| CS §61 | Required tests | | Not started | |
+| CS §62 | Acceptance criteria 1–30 | `docs/career-search/validation.md` | Not started | |
+| CS §64 | Official documentation verification | `docs/career-search/implementation.md` | In progress | Anthropic web search (platform.claude.com), OpenAI `WebSearchTool` (openai 7.23.0 types), Unsloth 2026.9.11 package checked |
+
+## 7. Phase 3 — Network Connect (NC §1–§63) and Business (Appendix B)
+
+Planned layout: `src-tauri/src/network/` and `src-tauri/src/business/`,
+migrations after 0010, pages `NetworkConnectPage.tsx` and the Business pages.
+
+| Req | Requirement | Planned location | Status | Evidence / blocker |
+|---|---|---|---|---|
+| NC §1, §6, §51, §52 | Capability registry and honest capability states | `network/capabilities.rs`; UI | Not started | |
+| NC §2, §3, B1 | Navigation (Network Connect, Business) and purpose | `src/app/pages.ts` | Not started | |
+| NC §4, §19, §35, §36 | Professional graph, people schema, entity resolution, confidence | `network/entities.rs` | Not started | |
+| NC §5, §33, §34, §37 | One research layer on CareerSearch; source strategy; evidence; freshness | `network/research.rs` | Not started | |
+| NC §7, §8, §53 | Account connection UX; LinkedIn OpenID Connect with PKCE; shared connectors | `connectors/linkedin.rs` | Not started | Blocked for live sign-in (LinkedIn enablement) |
+| NC §9, §10, §22, §23 | LinkedIn network and people lookup only as permitted | capability registry | Not started | Member-network data needs LinkedIn approval |
+| NC §11, §12 | XING authentication and retention | `connectors/xing.rs`, policy | Not started | No desktop sign-in or new API apps |
+| NC §13, §14 | Public discovery separate; Jobs MCP stays the job layer | `network/research.rs` | Not started | |
+| NC §15–§18, §24–§27 | Company, hiring activity, job → people, hiring manager vs contact, recruiters, technology, Profile-aware research | `network/research.rs`, planner | Not started | |
+| NC §20, §48, §49 | Multi-hop planner; query examples | `network/planner.rs` | Not started | |
+| NC §28–§31 | UI, result modes, drill-down, direct links | `src/pages/NetworkConnectPage.tsx` | Not started | |
+| NC §32, §47 | Chat integration; tool contracts | `network/tools.rs`, `services/chat.rs` | Not started | |
+| NC §38, §39, §40 | Privacy boundary; provider data policy; temporary vs persistent | `network/policy.rs` | Not started | |
+| NC §41, §42 | Networking CRM; tracking companies (scheduled) | `network/`, scheduler | Not started | |
+| NC §43–§46 | No outreach, no authenticated automation, security, prompt injection | tools, fetcher | Not started | |
+| NC §50 | Result quality rules | research | Not started | |
+| NC §54–§59 | Backend architecture, interfaces, data flows | `network/` | Not started | |
+| NC §60, §61 | Tests; acceptance criteria | `docs/network-connect/validation.md` | Not started | |
+| B0–B2 | Additive scope; Business navigation; shared architecture, separate commercial state | `business/` | Not started | |
+| B3–B5 | Business Profile, offers, website → reviewed offer, context versioning | `business/profile.rs`, `business/offers.rs` | Not started | |
+| B6, B7 | Search infrastructure and scope; location and eligibility | CareerSearch | Not started | |
+| B8–B11 | Find Clients: workflow, ICP, reproducible fit, buyers | `business/clients.rs` | Not started | |
+| B12–B14 | Find Contract Work: classification, filters, rate logic, results | `business/contracts.rs` | Not started | |
+| B15, B16 | Business Pipeline; opportunity identity | `business/pipeline.rs` | Not started | |
+| B17–B23 | Go-to-Market Studio: segments, competitors, channels, target accounts, drafts, experiments, metrics | `business/gtm.rs` | Not started | |
+| B24, B25 | Domain model and storage; tool contracts and permissions | migrations, `business/tools.rs` | Not started | |
+| B26 | Chat, scheduling and run history | scheduler, Phase 1 runs | Not started | |
+| B27 | UI states and progressive results | Business pages | Not started | |
+| B28–B31 | Provider purpose; privacy and retention; fetching and injection; reliability | policy, fetcher | Not started | |
+| B32, B33 | Boundaries; sequence | — | Not started | |
+| B34, B35, B36 | Tests; manual scenarios; final checklist | `docs/business/validation.md` | Not started | |
+| B37 | Completion report | `docs/business/implementation.md` | Not started | |
+
+## 8. Phase reports
+
+Each phase adds its report here when its gate passes (what was implemented,
+files and migrations, acceptance verified, commands and results, limitations).
+
+### Phase 1 — Run History: gate passed
+
+- **Implemented**: one run lifecycle for every execution (scheduled
+  firings, Run now, Job Mail & Interview Sync): the run is created queued
+  with a snapshot of the task, then running, with stages, context and
+  outputs recorded as they happen, and ends succeeded, failed (safe message
+  and category) or cancelled; a busy firing is recorded as skipped; runs a
+  previous session left open are marked interrupted at start-up. The
+  "Scheduled / <Task>" view: run list (paged, live), selected run (result,
+  live progress with Stop, or error with guidance) and an inspector with
+  Progress, Context, Outputs and Task configuration.
+- **Files and migrations**: migration `0010_run_history.sql`;
+  `db/runs.rs`, `services/runs.rs`; the scheduler, Job Mail pipeline,
+  commands, models and events; `TaskRunsView.tsx`, `useTaskRuns.ts`,
+  `taskRuns.ts`, `Collapsible.tsx`; the E2E stand-in's mail, delay and
+  event-id changes. Record: [run-history/implementation.md](run-history/implementation.md).
+- **Acceptance**: criteria 1–28 verified (table in the record).
+- **Commands**: fmt and clippy clean; `cargo test` 480 passed (3 ignored,
+  as before); lint and typecheck clean; Vitest 98 passed; build succeeds.
+  In-app run: [run-history/validation.md](run-history/validation.md).
+- **Limitations**: providers were local stand-ins; the longest in-app
+  history was eight runs (paging is covered by tests).

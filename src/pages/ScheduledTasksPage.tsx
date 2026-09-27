@@ -1,10 +1,11 @@
 import { useState } from 'react';
 
+import { useNavigation } from '../app/navigation';
 import { ClockIcon, MailCalendarIcon, PlusIcon } from '../components/icons';
 import { PageContainer } from '../components/layout/PageContainer';
 import { TaskActions } from '../components/tasks/TaskActions';
-import { TaskDetail } from '../components/tasks/TaskDetail';
 import { TaskDialog } from '../components/tasks/TaskDialog';
+import { TaskRunsView } from '../components/tasks/TaskRunsView';
 import { TaskStatusLabel } from '../components/tasks/TaskStatus';
 import { EmptyState, LoadingState } from '../components/ui/EmptyState';
 import { Switch } from '../components/ui/Switch';
@@ -19,18 +20,27 @@ import { runTaskNow, setTaskEnabled, type ScheduledTask } from '../services/task
 
 type Editing = ScheduledTask | 'new' | 'job_mail_sync';
 
-export function ScheduledTasksPage() {
+interface ScheduledTasksPageProps {
+  /** The task whose run history is open. */
+  taskId?: number | null;
+  /** The run shown in it (the newest when absent). */
+  runId?: number | null;
+}
+
+export function ScheduledTasksPage({ taskId = null, runId = null }: ScheduledTasksPageProps) {
   const tasks = useTasks();
+  const { navigate } = useNavigation();
   const catalog = dataOr(useModelCatalog().state, null);
   const timezone = dataOr(useSystemTimezone().state, 'UTC');
-  const [openId, setOpenId] = useState<number | null>(null);
   const [editing, setEditing] = useState<Editing | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const all = dataOr(tasks.state, []);
   const jobMailSync = all.find((t) => t.builtin === 'job_mail_sync') ?? null;
   const list = all.filter((t) => t.builtin === null);
-  const open = all.find((t) => t.id === openId);
+  const open = all.find((t) => t.id === taskId);
+  const openTask = (id: number, run: number | null = null) =>
+    navigate({ page: 'tasks', taskId: id, runId: run });
 
   const dialog = editing && (
     <TaskDialog
@@ -47,10 +57,12 @@ export function ScheduledTasksPage() {
   if (open) {
     return (
       <>
-        <TaskDetail
+        <TaskRunsView
           task={open}
           catalog={catalog}
-          onBack={() => setOpenId(null)}
+          runId={runId}
+          onSelectRun={(id) => openTask(open.id, id)}
+          onBack={() => navigate({ page: 'tasks' })}
           onEdit={() => setEditing(open)}
         />
         {dialog}
@@ -83,7 +95,7 @@ export function ScheduledTasksPage() {
             task={jobMailSync}
             catalog={catalog}
             onSetUp={() => setEditing('job_mail_sync')}
-            onOpen={(id) => setOpenId(id)}
+            onOpen={(id, run) => openTask(id, run)}
             onEdit={(task) => setEditing(task)}
             onError={setError}
           />
@@ -132,9 +144,9 @@ export function ScheduledTasksPage() {
               className="task-table__row"
               role="row"
               tabIndex={0}
-              onClick={() => setOpenId(task.id)}
+              onClick={() => openTask(task.id)}
               onKeyDown={(e) => {
-                if (e.key === 'Enter') setOpenId(task.id);
+                if (e.key === 'Enter') openTask(task.id);
               }}
             >
               <span role="cell" className="task-table__name">
@@ -164,7 +176,12 @@ export function ScheduledTasksPage() {
                 onClick={(e) => e.stopPropagation()}
                 onKeyDown={(e) => e.stopPropagation()}
               >
-                <TaskActions task={task} onEdit={() => setEditing(task)} onError={setError} />
+                <TaskActions
+                  task={task}
+                  onEdit={() => setEditing(task)}
+                  onError={setError}
+                  onRan={(run) => openTask(task.id, run)}
+                />
               </span>
             </div>
           ))}
@@ -190,7 +207,8 @@ function JobMailSyncCard({
   task: ScheduledTask | null;
   catalog: ModelCatalog | null;
   onSetUp: () => void;
-  onOpen: (id: number) => void;
+  /** Opens the task's runs (at `run`, or the newest). */
+  onOpen: (id: number, run?: number | null) => void;
   onEdit: (task: ScheduledTask) => void;
   onError: (message: string) => void;
 }) {
@@ -231,14 +249,19 @@ function JobMailSyncCard({
               type="button"
               className="button button--secondary button--small"
               disabled={!canRunNow(task)}
-              onClick={() => void action.run(() => runTaskNow(task.id))}
+              onClick={() => void action.run(() => runTaskNow(task.id).then((run) => onOpen(task.id, run)))}
             >
               {task.running ? 'Running…' : 'Run now'}
             </button>
             <button type="button" className="button button--ghost button--small" onClick={() => onOpen(task.id)}>
               History
             </button>
-            <TaskActions task={task} onEdit={() => onEdit(task)} onError={onError} />
+            <TaskActions
+              task={task}
+              onEdit={() => onEdit(task)}
+              onError={onError}
+              onRan={(run) => onOpen(task.id, run)}
+            />
           </>
         ) : (
           <button type="button" className="button button--primary button--small" onClick={onSetUp}>

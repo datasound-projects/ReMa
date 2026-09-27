@@ -129,6 +129,7 @@ fn item(
     outcome: CalendarOutcome,
 ) -> CalendarItem {
     CalendarItem {
+        application_id: Some(app.id),
         company: app.company.clone(),
         role: app.role.clone(),
         outcome,

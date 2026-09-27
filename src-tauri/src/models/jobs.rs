@@ -128,6 +128,9 @@ pub struct ConflictingEvent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct CalendarItem {
+    /// The application the interview belongs to (absent in older reports).
+    #[serde(default)]
+    pub application_id: Option<i64>,
     pub company: String,
     pub role: Option<String>,
     pub outcome: CalendarOutcome,
