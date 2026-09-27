@@ -520,6 +520,11 @@ fn encode(model: &ModelRef) -> String {
     format!("{}/{}", model.provider_id, model.model_id)
 }
 
+/// The model chosen as default in Settings, if any.
+pub fn current_default_model(state: &AppState) -> AppResult<Option<ModelRef>> {
+    state.db.call(|c| default_model(c))
+}
+
 fn default_model(conn: &rusqlite::Connection) -> AppResult<Option<ModelRef>> {
     Ok(
         repo::get_setting(conn, DEFAULT_MODEL_KEY)?.and_then(|value| {

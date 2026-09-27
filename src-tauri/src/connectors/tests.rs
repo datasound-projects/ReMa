@@ -23,6 +23,7 @@ use crate::{
 const GOOGLE_CLIENT: &str = "google-client.apps.googleusercontent.com";
 const GOOGLE_SECRET: &str = "google-installed-app-secret";
 const MICROSOFT_CLIENT: &str = "00000000-1111-2222-3333-444444444444";
+const LINKEDIN_CLIENT: &str = "86linkedin-test-client";
 
 fn id_token(claims: serde_json::Value) -> String {
     format!("h.{}.s", URL_SAFE_NO_PAD.encode(claims.to_string()))
@@ -32,6 +33,8 @@ fn id_token(claims: serde_json::Value) -> String {
 struct Grants {
     google_scope: Mutex<String>,
     microsoft_scope: Mutex<String>,
+    /// LinkedIn reports granted scopes comma-separated.
+    linkedin_scope: Mutex<String>,
     refresh_ok: Mutex<bool>,
 }
 
@@ -58,6 +61,7 @@ async fn providers() -> Providers {
     let grants = Arc::new(Grants {
         google_scope: Mutex::new(google::scopes(&[ConnectorId::Gmail]).join(" ")),
         microsoft_scope: Mutex::new("Mail.Read User.Read openid profile email".into()),
+        linkedin_scope: Mutex::new("email,openid,profile".into()),
         refresh_ok: Mutex::new(true),
     });
     let g = grants.clone();
@@ -106,6 +110,27 @@ async fn providers() -> Providers {
                 400,
                 r#"{"error":"invalid_grant","error_description":"AADSTS70008: expired"}"#.into(),
             )),
+            // LinkedIn: no refresh token for this kind of app; identity
+            // through OpenID Connect.
+            "/linkedin/oauth/v2/accessToken" if exchange => Some((
+                200,
+                serde_json::json!({
+                    "access_token": "li-at-1", "expires_in": 5_183_999,
+                    "scope": *g.linkedin_scope.lock().unwrap(), "token_type": "Bearer",
+                    "id_token": id_token(serde_json::json!({
+                        "sub": "782bbtaQ", "email": "ana@example.com"
+                    })),
+                })
+                .to_string(),
+            )),
+            "/linkedin/v2/userinfo" => Some((
+                200,
+                serde_json::json!({
+                    "sub": "782bbtaQ", "name": "Ana Example", "given_name": "Ana",
+                    "family_name": "Example", "email": "ana@example.com", "email_verified": true
+                })
+                .to_string(),
+            )),
             _ => None,
         }
     })
@@ -120,7 +145,8 @@ fn state_for(providers: &Providers, apps: Apps) -> (AppState, Arc<RecordingEvent
         GoogleEndpoints::at(base),
         MicrosoftEndpoints::at(base, &format!("{base}/graph/v1.0")),
         apps,
-    );
+    )
+    .with_linkedin(linkedin::LinkedinEndpoints::at(base));
     (state, events)
 }
 
@@ -132,6 +158,10 @@ fn apps() -> Apps {
         }),
         microsoft: Some(OAuthApp {
             client_id: MICROSOFT_CLIENT.into(),
+            client_secret: None,
+        }),
+        linkedin: Some(OAuthApp {
+            client_id: LINKEDIN_CLIENT.into(),
             client_secret: None,
         }),
     }
@@ -573,6 +603,231 @@ async fn outlook_signs_in_as_a_public_client_on_localhost() {
     assert_eq!(outlook.state, ConnectorState::Connected);
     assert_eq!(outlook.account_email.as_deref(), Some("ana@outlook.com"));
     assert_eq!(outlook.publisher, "Microsoft");
+}
+
+#[tokio::test]
+async fn linkedin_signs_in_with_openid_connect_and_grants_identity_only() {
+    use crate::network::capabilities::{self, NetworkCapability, ProviderAccess};
+    let providers = providers().await;
+    let (state, _) = state_for(&providers, apps());
+    let browser = Browser::default();
+    connect(&state, ConnectorId::Linkedin, browser.open(Consent::Allow))
+        .await
+        .unwrap();
+
+    // The official authorization endpoint, identity scopes, PKCE, the
+    // loopback address: nothing asks for a password or cookies.
+    let url = browser.last_url();
+    assert!(url.starts_with(&format!(
+        "{}/linkedin/oauth/v2/authorization?",
+        providers.server.base_url
+    )));
+    let query = params(&url);
+    assert_eq!(query["client_id"], LINKEDIN_CLIENT);
+    assert_eq!(query["scope"], "openid profile email");
+    assert_eq!(query["code_challenge_method"], "S256");
+    assert!(query["redirect_uri"].starts_with("http://127.0.0.1:"));
+    assert!(query["state"].len() >= 32);
+    for asked in ["password", "cookie", "li_at", "username"] {
+        assert!(!url.to_lowercase().contains(asked), "{asked}");
+    }
+    // A native client: the verifier proves the sign-in, no secret ships.
+    let exchange = form(&providers.requests("/linkedin/oauth/v2/accessToken")[0].body);
+    assert!(!exchange.contains_key("client_secret"));
+    assert_eq!(
+        URL_SAFE_NO_PAD.encode(Sha256::digest(exchange["code_verifier"].as_bytes())),
+        query["code_challenge"]
+    );
+
+    // Connected as the member (name from the userinfo endpoint).
+    let linkedin = card(&state, ConnectorId::Linkedin).await;
+    assert_eq!(linkedin.state, ConnectorState::Connected);
+    assert_eq!(linkedin.account_name.as_deref(), Some("Ana Example"));
+    assert_eq!(linkedin.account_email.as_deref(), Some("ana@example.com"));
+    let granted: Vec<(Capability, bool)> = linkedin
+        .permissions
+        .iter()
+        .map(|p| (p.capability, p.granted))
+        .collect();
+    assert_eq!(
+        granted,
+        [
+            (Capability::NetworkIdentity, true),
+            (Capability::NetworkProfile, true),
+            (Capability::NetworkConnections, false),
+        ]
+    );
+    // Identity is not search or network access.
+    let caps = capabilities::all(&state).await.unwrap();
+    let li = caps
+        .iter()
+        .find(|c| c.provider == ProviderId::Linkedin)
+        .unwrap();
+    assert_eq!(li.access, ProviderAccess::Connected);
+    assert!(li.has(NetworkCapability::AuthenticateIdentity));
+    assert!(!li.has(NetworkCapability::ReadFirstDegreeConnections));
+    assert!(!li.has(NetworkCapability::SearchPeople));
+    assert!(li
+        .summary
+        .contains("does not currently have permission to read your connection list"));
+
+    // The token lives only in the credential store.
+    assert!(matches!(
+        stored(&state, ProviderId::Linkedin).await,
+        Some(Credential::OAuth { ref access_token, refresh_token: None, .. })
+            if access_token == "li-at-1"
+    ));
+    let database = database_text(&state);
+    let interface = format!(
+        "{} {}",
+        serde_json::to_string(&overview(&state).await.unwrap()).unwrap(),
+        serde_json::to_string(&caps).unwrap()
+    );
+    for secret in [
+        "li-at-1",
+        "auth-code-123",
+        exchange["code_verifier"].as_str(),
+    ] {
+        assert!(!database.contains(secret), "{secret} in SQLite");
+        assert!(
+            !interface.contains(secret),
+            "{secret} sent to the interface"
+        );
+    }
+}
+
+#[tokio::test]
+async fn linkedin_scopes_approved_for_the_app_are_used_only_when_granted() {
+    use crate::network::capabilities::{self, NetworkCapability};
+    let providers = providers().await;
+    *providers.grants.linkedin_scope.lock().unwrap() =
+        "email,openid,profile,r_1st_connections".into();
+    let (state, _) = state_for(&providers, apps());
+    connect(
+        &state,
+        ConnectorId::Linkedin,
+        Browser::default().open(Consent::Allow),
+    )
+    .await
+    .unwrap();
+    let caps = capabilities::all(&state).await.unwrap();
+    let li = caps
+        .iter()
+        .find(|c| c.provider == ProviderId::Linkedin)
+        .unwrap();
+    assert!(li.has(NetworkCapability::ReadFirstDegreeConnections));
+    assert!(!li.has(NetworkCapability::ReadSecondDegreeConnections));
+    assert!(card(&state, ConnectorId::Linkedin)
+        .await
+        .permissions
+        .iter()
+        .all(|p| p.granted));
+}
+
+#[tokio::test]
+async fn an_expired_linkedin_sign_in_asks_to_reconnect_and_never_opens_one() {
+    use crate::network::capabilities::{self, ProviderAccess};
+    let providers = providers().await;
+    let (state, _) = state_for(&providers, apps());
+    connect(
+        &state,
+        ConnectorId::Linkedin,
+        Browser::default().open(Consent::Allow),
+    )
+    .await
+    .unwrap();
+    expire(&state, ProviderId::Linkedin).await;
+    // Seen as expired before any request.
+    assert_eq!(
+        card(&state, ConnectorId::Linkedin).await.state,
+        ConnectorState::ReauthRequired
+    );
+    let error = tokens::get_valid_access_token(&state, ProviderId::Linkedin)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("Reconnect"), "{error}");
+    // Nothing to refresh with: no token request, the token is forgotten.
+    assert_eq!(
+        providers.requests("/linkedin/oauth/v2/accessToken").len(),
+        1
+    );
+    assert!(stored(&state, ProviderId::Linkedin).await.is_none());
+    let caps = capabilities::all(&state).await.unwrap();
+    let li = caps
+        .iter()
+        .find(|c| c.provider == ProviderId::Linkedin)
+        .unwrap();
+    assert_eq!(li.access, ProviderAccess::ReconnectNeeded);
+    assert!(li.available.is_empty());
+
+    // Disconnecting removes the account and the tokens.
+    disconnect(&state, ConnectorId::Linkedin).await.unwrap();
+    assert_eq!(
+        card(&state, ConnectorId::Linkedin).await.state,
+        ConnectorState::Disconnected
+    );
+    assert!(state
+        .db
+        .call(|c| repo::account(c, ProviderId::Linkedin))
+        .unwrap()
+        .is_none());
+    let caps = capabilities::all(&state).await.unwrap();
+    assert_eq!(
+        caps.iter()
+            .find(|c| c.provider == ProviderId::Linkedin)
+            .unwrap()
+            .access,
+        ProviderAccess::NotConnected
+    );
+}
+
+#[tokio::test]
+async fn linkedin_cancel_and_forged_state_connect_nothing() {
+    let providers = providers().await;
+    let (state, _) = state_for(&providers, apps());
+    let browser = Browser::default();
+    assert!(
+        connect(&state, ConnectorId::Linkedin, browser.open(Consent::Deny))
+            .await
+            .is_err()
+    );
+    assert!(connect(
+        &state,
+        ConnectorId::Linkedin,
+        browser.open(Consent::WrongState)
+    )
+    .await
+    .is_err());
+    assert!(providers
+        .requests("/linkedin/oauth/v2/accessToken")
+        .is_empty());
+    assert_eq!(
+        card(&state, ConnectorId::Linkedin).await.state,
+        ConnectorState::Disconnected
+    );
+    assert!(stored(&state, ProviderId::Linkedin).await.is_none());
+}
+
+#[tokio::test]
+async fn xing_is_shown_as_not_available_and_opens_no_sign_in() {
+    let providers = providers().await;
+    let (state, _) = state_for(&providers, apps());
+    let opened = Arc::new(Mutex::new(false));
+    let flag = opened.clone();
+    let error = connect(&state, ConnectorId::Xing, move |_| {
+        *flag.lock().unwrap() = true;
+        Ok(())
+    })
+    .await
+    .unwrap_err();
+    assert!(!*opened.lock().unwrap(), "no browser was opened");
+    assert!(error.to_string().contains("XING"), "{error}");
+    let xing = card(&state, ConnectorId::Xing).await;
+    assert_eq!(xing.state, ConnectorState::Unavailable);
+    assert!(xing
+        .message
+        .unwrap()
+        .contains("no sign-in for desktop apps"));
 }
 
 // ── Token manager ───────────────────────────────────────────────────

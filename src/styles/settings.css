@@ -270,6 +270,13 @@
 
 /* ── Connectors ─────────────────────────────────────────── */
 
+.connectors__group {
+  margin: var(--space-5) 0 var(--space-2);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-secondary);
+}
+
 .connector-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));

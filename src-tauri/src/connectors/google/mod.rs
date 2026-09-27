@@ -112,6 +112,9 @@ pub fn allows(capability: Capability, granted: &[String]) -> bool {
         Capability::MailRead => has(SCOPE_GMAIL_READONLY),
         Capability::CalendarRead | Capability::CalendarWrite => has(SCOPE_CALENDAR_EVENTS),
         Capability::FreeBusy => has(SCOPE_CALENDAR_FREEBUSY),
+        Capability::NetworkIdentity
+        | Capability::NetworkProfile
+        | Capability::NetworkConnections => false,
     }
 }
 

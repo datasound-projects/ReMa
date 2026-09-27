@@ -61,6 +61,8 @@ pub struct AppState {
     pub rema_mcp: crate::rema_mcp::RemaMcp,
     /// ReMa Search: source health, local server capabilities, caches.
     pub career: Arc<crate::career_search::CareerSearch>,
+    /// Network Connect's session memory (never written to disk).
+    pub network: Arc<crate::network::NetworkSession>,
 }
 
 #[cfg(test)]
@@ -120,6 +122,7 @@ pub mod testing {
                 false,
             ),
             career: Default::default(),
+            network: Default::default(),
         };
         (state, events)
     }

@@ -290,7 +290,13 @@ fn companies(text: &str, query: Option<&JobQuery>) -> Vec<String> {
     );
     let mut out: Vec<String> = query.and_then(|q| q.company.clone()).into_iter().collect();
     for caps in pattern.captures_iter(text) {
-        let name = caps["name"].trim().trim_end_matches(['.', ',']).to_string();
+        // Up to the end of its sentence ("Nordlicht AI. Who" → "Nordlicht AI").
+        let name = &caps["name"];
+        let cut = name
+            .find(". ")
+            .or_else(|| name.find(['?', '!', ';', ':']))
+            .unwrap_or(name.len());
+        let name = name[..cut].trim().trim_end_matches(['.', ',']).to_string();
         let lower = name.to_lowercase();
         let place = normalize::place(&name);
         let generic = [

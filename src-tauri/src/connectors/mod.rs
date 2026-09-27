@@ -1,11 +1,13 @@
-//! Connectors: Gmail, Google Calendar, Outlook Mail and Outlook Calendar.
+//! Connectors: Gmail, Google Calendar, Outlook Mail, Outlook Calendar, and
+//! the professional networks LinkedIn and XING (Network Connect).
 //!
 //! ```text
-//! registry (this file) — the four connectors, their state, connect/disconnect
+//! registry (this file) — the connectors, their state, connect/disconnect
 //! oauth                — PKCE, state, loopback redirect, token requests
 //! tokens               — the token manager (credential store, refresh, revoke)
 //! api                  — authenticated provider API requests
 //! google / microsoft   — provider auth config, mail and calendar clients
+//! linkedin / xing      — professional-network sign-in and capabilities
 //! mail / calendar      — provider-independent interfaces and models
 //! sync                 — incremental synchronization and the background worker
 //! legacy               — moving the old Google Workspace settings over
@@ -20,11 +22,13 @@ pub mod api;
 pub mod calendar;
 pub mod google;
 pub mod legacy;
+pub mod linkedin;
 pub mod mail;
 pub mod microsoft;
 pub mod oauth;
 pub mod sync;
 pub mod tokens;
+pub mod xing;
 
 use std::{
     collections::HashMap,
@@ -41,6 +45,7 @@ use tokio_util::sync::CancellationToken;
 
 use self::{
     google::GoogleEndpoints,
+    linkedin::LinkedinEndpoints,
     microsoft::MicrosoftEndpoints,
     oauth::{AuthorizationRequest, OAuthApp, Pkce, TokenResponse},
 };
@@ -72,6 +77,7 @@ struct SignIn {
 pub struct Apps {
     pub google: Option<OAuthApp>,
     pub microsoft: Option<OAuthApp>,
+    pub linkedin: Option<OAuthApp>,
 }
 
 impl Apps {
@@ -79,6 +85,7 @@ impl Apps {
         Self {
             google: google::app(),
             microsoft: microsoft::app(),
+            linkedin: linkedin::app(),
         }
     }
 }
@@ -89,11 +96,12 @@ impl Apps {
 pub struct ConnectorsContext {
     pub google: Arc<GoogleEndpoints>,
     pub microsoft: Arc<MicrosoftEndpoints>,
+    pub linkedin: Arc<LinkedinEndpoints>,
     apps: Arc<Apps>,
     pub http: reqwest::Client,
     sign_ins: Arc<Mutex<HashMap<ProviderId, SignIn>>>,
     seq: Arc<AtomicU64>,
-    refresh_locks: Arc<[tokio::sync::Mutex<()>; 2]>,
+    refresh_locks: Arc<[tokio::sync::Mutex<()>; 4]>,
     /// Running syncs (at most one per connector).
     pub(crate) syncs: Arc<Mutex<HashMap<ConnectorId, CancellationToken>>>,
     pub(crate) shutdown: CancellationToken,
@@ -104,20 +112,30 @@ impl ConnectorsContext {
         Self {
             google: Arc::new(google),
             microsoft: Arc::new(microsoft),
+            linkedin: Arc::new(LinkedinEndpoints::from_env()),
             apps: Arc::new(apps),
             http: crate::llm::http::client(),
             sign_ins: Arc::default(),
             seq: Arc::default(),
-            refresh_locks: Arc::new([tokio::sync::Mutex::new(()), tokio::sync::Mutex::new(())]),
+            refresh_locks: Arc::new(std::array::from_fn(|_| tokio::sync::Mutex::new(()))),
             syncs: Arc::default(),
             shutdown: CancellationToken::new(),
         }
+    }
+
+    /// LinkedIn at other endpoints (tests).
+    pub fn with_linkedin(mut self, endpoints: LinkedinEndpoints) -> Self {
+        self.linkedin = Arc::new(endpoints);
+        self
     }
 
     pub fn app(&self, provider: ProviderId) -> Option<OAuthApp> {
         match provider {
             ProviderId::Google => self.apps.google.clone(),
             ProviderId::Microsoft => self.apps.microsoft.clone(),
+            ProviderId::Linkedin => self.apps.linkedin.clone(),
+            // No desktop sign-in exists (see `xing`).
+            ProviderId::Xing => None,
         }
     }
 
@@ -125,14 +143,13 @@ impl ConnectorsContext {
         match provider {
             ProviderId::Google => &self.google.token,
             ProviderId::Microsoft => &self.microsoft.token,
+            ProviderId::Linkedin => &self.linkedin.token,
+            ProviderId::Xing => "",
         }
     }
 
     pub(crate) fn refresh_lock(&self, provider: ProviderId) -> &tokio::sync::Mutex<()> {
-        &self.refresh_locks[match provider {
-            ProviderId::Google => 0,
-            ProviderId::Microsoft => 1,
-        }]
+        &self.refresh_locks[provider.index()]
     }
 
     fn signing_in(&self, provider: ProviderId) -> Option<Vec<ConnectorId>> {
@@ -193,10 +210,25 @@ impl ConnectorsContext {
 }
 
 pub fn unavailable_error(provider: ProviderId) -> AppError {
-    AppError::configuration(format!(
-        "{} sign-in is not available in this build of ReMa.",
-        provider.name()
-    ))
+    AppError::configuration(unavailable_reason(provider))
+}
+
+/// Why a provider cannot be connected.
+pub fn unavailable_reason(provider: ProviderId) -> String {
+    match provider {
+        ProviderId::Xing => xing::UNAVAILABLE.to_string(),
+        _ => format!(
+            "{} sign-in is not available in this build of ReMa.",
+            provider.name()
+        ),
+    }
+}
+
+/// Whether a provider issues refresh tokens to ReMa. LinkedIn's
+/// self-service access tokens last 60 days and cannot be refreshed; the
+/// member signs in again after that.
+pub fn issues_refresh_tokens(provider: ProviderId) -> bool {
+    matches!(provider, ProviderId::Google | ProviderId::Microsoft)
 }
 
 /// The scopes a provider sign-in asks for.
@@ -204,6 +236,8 @@ pub fn provider_scopes(provider: ProviderId, connectors: &[ConnectorId]) -> Vec<
     match provider {
         ProviderId::Google => google::scopes(connectors),
         ProviderId::Microsoft => microsoft::scopes(connectors),
+        ProviderId::Linkedin => linkedin::scopes(),
+        ProviderId::Xing => Vec::new(),
     }
 }
 
@@ -211,15 +245,19 @@ pub fn allows(provider: ProviderId, capability: Capability, granted: &[String]) 
     match provider {
         ProviderId::Google => google::allows(capability, granted),
         ProviderId::Microsoft => microsoft::allows(capability, granted),
+        ProviderId::Linkedin => linkedin::allows(capability, granted),
+        ProviderId::Xing => xing::allows(capability, granted),
     }
 }
 
 /// Capabilities a connector cannot work without (free/busy is optional:
-/// availability then comes from the event list).
+/// availability then comes from the event list; a professional network's
+/// connection list is optional: most apps are never approved for it).
 fn essential(id: ConnectorId) -> &'static [Capability] {
     match id.kind() {
         ConnectorKind::Mail => &[Capability::MailRead],
         ConnectorKind::Calendar => &[Capability::CalendarRead, Capability::CalendarWrite],
+        ConnectorKind::Network => &[Capability::NetworkIdentity],
     }
 }
 
@@ -253,17 +291,37 @@ async fn profile(state: &AppState, provider: ProviderId, tokens: &TokenResponse)
         .and_then(oauth::id_token_claims)
         .unwrap_or(Value::Null);
     let mut profile = match provider {
-        ProviderId::Google => Profile {
-            account_id: claim(&claims, "sub"),
-            email: claim(&claims, "email"),
-            name: claim(&claims, "name"),
-        },
         ProviderId::Microsoft => Profile {
             account_id: claim(&claims, "oid").or_else(|| claim(&claims, "sub")),
             email: claim(&claims, "email").or_else(|| claim(&claims, "preferred_username")),
             name: claim(&claims, "name"),
         },
+        _ => Profile {
+            account_id: claim(&claims, "sub"),
+            email: claim(&claims, "email"),
+            name: claim(&claims, "name"),
+        },
     };
+    if provider == ProviderId::Linkedin && (profile.account_id.is_none() || profile.name.is_none())
+    {
+        // OpenID Connect userinfo with the new token.
+        let info = state
+            .connectors
+            .http
+            .get(&state.connectors.linkedin.userinfo)
+            .bearer_auth(&tokens.access_token)
+            .timeout(Duration::from_secs(15))
+            .send()
+            .await;
+        if let Ok(response) = info {
+            if let Ok(info) = response.json::<Value>().await {
+                let (sub, email, name) = linkedin::userinfo_profile(&info);
+                profile.account_id = profile.account_id.or(sub);
+                profile.email = profile.email.or(email);
+                profile.name = profile.name.or(name);
+            }
+        }
+    }
     if provider == ProviderId::Microsoft && profile.email.is_none() {
         // Graph /me with the new token (User.Read).
         let me = state
@@ -315,17 +373,17 @@ pub async fn connect(
     let pkce = Pkce::new()?;
     let csrf = oauth::random_token(24)?;
     let (loopback, redirect_uri) = match provider {
-        // Google: the loopback IP literal.
-        ProviderId::Google => {
-            let loopback = Loopback::ipv4().await?;
-            let uri = format!("http://127.0.0.1:{}", loopback.port());
-            (loopback, uri)
-        }
         // Microsoft: `http://localhost` (registered without a port; any port
         // matches), listened for on IPv4 and IPv6 loopback.
         ProviderId::Microsoft => {
             let loopback = Loopback::dual_stack().await?;
             let uri = format!("http://localhost:{}", loopback.port());
+            (loopback, uri)
+        }
+        // Google and LinkedIn (native clients): the loopback IP literal.
+        _ => {
+            let loopback = Loopback::ipv4().await?;
+            let uri = format!("http://127.0.0.1:{}", loopback.port());
             (loopback, uri)
         }
     };
@@ -343,6 +401,8 @@ pub async fn connect(
             &state.connectors.microsoft.authorize,
             &[("prompt", "select_account"), ("response_mode", "query")],
         ),
+        ProviderId::Linkedin => (&state.connectors.linkedin.auth, &[]),
+        ProviderId::Xing => return Err(unavailable_error(provider)),
     };
     let url = oauth::authorization_url(&AuthorizationRequest {
         endpoint,
@@ -393,10 +453,16 @@ async fn finish_sign_in(
     requested: &[String],
     tokens: TokenResponse,
 ) -> AppResult<()> {
+    // Space-separated (Google, Microsoft) or comma-separated (LinkedIn).
     let granted: Vec<String> = tokens
         .scope
         .as_deref()
-        .map(|s| s.split_whitespace().map(str::to_string).collect())
+        .map(|s| {
+            s.split(|c: char| c.is_whitespace() || c == ',')
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
         .unwrap_or_else(|| requested.to_vec());
     let profile = profile(state, provider, &tokens).await;
     let previous = state.db.call(|c| repo::account(c, provider))?;
@@ -473,6 +539,10 @@ pub async fn disconnect(state: &AppState, id: ConnectorId) -> AppResult<()> {
     if remaining.is_empty() {
         tokens::revoke_connection(state, provider).await?;
         state.db.call(|c| repo::delete_account(c, provider))?;
+        if provider == ProviderId::Linkedin {
+            // Nothing LinkedIn returned outlives the connection.
+            state.network.forget_provider_data();
+        }
     }
     state.events.connectors_changed();
     Ok(())
@@ -525,26 +595,17 @@ pub async fn ready(state: &AppState, kind: ConnectorKind) -> Vec<ConnectorId> {
 /// Every connector with its state, for Settings.
 pub async fn overview(state: &AppState) -> AppResult<ConnectorsOverview> {
     let (records, accounts) = state.db.call(|c| {
-        Ok((
-            repo::connectors(c)?,
-            [
-                repo::account(c, ProviderId::Google)?,
-                repo::account(c, ProviderId::Microsoft)?,
-            ],
-        ))
+        let mut accounts = Vec::new();
+        for provider in ProviderId::ALL {
+            accounts.push(repo::account(c, provider)?);
+        }
+        Ok((repo::connectors(c)?, accounts))
     })?;
     let mut connectors = Vec::new();
     for record in records {
         let provider = record.id.provider();
-        let account = accounts[match provider {
-            ProviderId::Google => 0,
-            ProviderId::Microsoft => 1,
-        }]
-        .clone();
-        let has_token = matches!(
-            state.vault.get(&tokens::vault_account(provider)).await?,
-            Some(Credential::OAuth { .. })
-        );
+        let account = accounts[provider.index()].clone();
+        let has_token = tokens::usable(state, provider).await?;
         connectors.push(status_of(
             &record,
             account.as_ref(),
@@ -602,10 +663,7 @@ pub fn status_of(
         } else {
             (
                 ConnectorState::Unavailable,
-                Some(format!(
-                    "{} sign-in is not available in this build of ReMa.",
-                    provider.name()
-                )),
+                Some(unavailable_reason(provider)),
                 None,
             )
         }

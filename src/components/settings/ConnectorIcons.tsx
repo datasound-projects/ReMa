@@ -82,6 +82,32 @@ function OutlookCalendarLogo({ size = 32 }: LogoProps) {
   );
 }
 
+/** LinkedIn's "in" mark. */
+function LinkedinLogo({ size = 32 }: LogoProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 32 32" aria-hidden="true">
+      <rect x="2" y="2" width="28" height="28" rx="5" fill="#0a66c2" />
+      <rect x="8" y="13" width="3.6" height="11" fill="#fff" />
+      <circle cx="9.8" cy="9.2" r="2.1" fill="#fff" />
+      <path
+        fill="#fff"
+        d="M14.6 13h3.4v1.6c.5-.9 1.8-1.9 3.7-1.9 3.6 0 4.3 2.3 4.3 5.4V24h-3.6v-5.2c0-1.3 0-2.9-1.8-2.9s-2.1 1.4-2.1 2.8V24h-3.6z"
+      />
+    </svg>
+  );
+}
+
+/** XING's mark (simplified). */
+function XingLogo({ size = 32 }: LogoProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 32 32" aria-hidden="true">
+      <rect x="2" y="2" width="28" height="28" rx="5" fill="#006567" />
+      <path fill="#b0d400" d="M9.2 10.5h3.6l2.2 3.9-3 5.2H8.4l3-5.2z" />
+      <path fill="#fff" d="M19.4 6.8h3.7l-5.6 9.9 3.6 6.5h-3.7l-3.6-6.5z" />
+    </svg>
+  );
+}
+
 /** The official product icon of a connector. */
 export function ConnectorLogo({ id, size }: { id: ConnectorId; size?: number }) {
   switch (id) {
@@ -93,5 +119,9 @@ export function ConnectorLogo({ id, size }: { id: ConnectorId; size?: number }) 
       return <OutlookLogo size={size} />;
     case 'outlook_calendar':
       return <OutlookCalendarLogo size={size} />;
+    case 'linkedin':
+      return <LinkedinLogo size={size} />;
+    case 'xing':
+      return <XingLogo size={size} />;
   }
 }

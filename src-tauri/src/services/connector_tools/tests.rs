@@ -92,6 +92,7 @@ async fn setup(connect_gmail: bool) -> Option<Setup> {
                 client_secret: None,
             }),
             microsoft: None,
+            linkedin: None,
         },
     );
     if connect_gmail {

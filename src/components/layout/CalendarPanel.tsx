@@ -6,6 +6,7 @@ import { dataOr, useAsyncData } from '../../hooks/useAsyncData';
 import { useBackendEvent } from '../../hooks/useBackendEvent';
 import { formatTimeRange } from '../../lib/format';
 import { getCalendar, type CalendarEntry, type CalendarView } from '../../services/applicationService';
+import type { ProviderId } from '../../services/connectorService';
 import { backendEvents } from '../../services/events';
 import { openExternalUrl } from '../../services/systemService';
 import { CalendarIcon, ChevronLeftIcon, ChevronRightIcon, ExternalIcon } from '../icons';
@@ -14,7 +15,8 @@ import { IconButton } from '../ui/IconButton';
 /** Days shown at once. */
 const SPAN = 7;
 
-const PROVIDER_NAMES = { google: 'Google', microsoft: 'Outlook' } as const;
+/** Calendars come only from Google and Microsoft accounts. */
+const PROVIDER_NAMES: Partial<Record<ProviderId, string>> = { google: 'Google', microsoft: 'Outlook' };
 
 function startOfDay(ms: number): number {
   const date = new Date(ms);

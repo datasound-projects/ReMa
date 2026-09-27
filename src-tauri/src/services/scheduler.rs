@@ -471,6 +471,21 @@ impl retrieval::Progress for SearchStages {
     }
 }
 
+/// Network Connect's status lines as the run's "research" stage.
+struct ResearchStage(SearchStages);
+
+impl retrieval::Progress for ResearchStage {
+    fn status(&self, text: &str) {
+        self.0
+            .recorder
+            .running("research", text.trim_end_matches('…'));
+    }
+
+    fn web(&self) -> Option<Arc<dyn WebObserver>> {
+        Some(self.0.searches.clone())
+    }
+}
+
 async fn run_task(
     state: &AppState,
     task: &TaskRow,
@@ -485,6 +500,166 @@ async fn run_task(
     let max_output_tokens =
         providers::max_output_tokens(state, &task.model).map_err(model_access)?;
     match task.kind {
+        TaskKind::Prompt if crate::network::planner::detect(&task.prompt).is_some() => {
+            // Company, people and hiring research (e.g. tracking a company):
+            // Network Connect researches first, as in chat (NC §42).
+            use crate::network::{
+                model::ResultStatus,
+                policy::{Operation, Purpose},
+                render as network_render, service,
+            };
+            let mut stages = Vec::new();
+            if task.use_profile {
+                stages.push(("profile", "Load your Profile"));
+            }
+            stages.extend([
+                ("research", "Research companies, jobs and people"),
+                ("answer", "Write the summary"),
+            ]);
+            recorder.plan(&stages);
+            let (system, profile) = profile_prompt(
+                state,
+                format!(
+                    "{} This request is a scheduled task running automatically.",
+                    crate::services::chat::network_prompt(started_at)
+                ),
+                task.use_profile,
+                &task.prompt,
+            )
+            .map_err(|e| Failure::from_error(&e, RunErrorCategory::Task))?;
+            record_profile(recorder.as_ref(), profile);
+            recorder.update_context(|c| c.web_search = true);
+            let progress = SearchStages {
+                recorder: recorder.clone(),
+                searches: Arc::new(WebStage {
+                    recorder: recorder.clone(),
+                    searches: AtomicU32::new(0),
+                }),
+                checking: AtomicU32::new(0),
+                read: AtomicU32::new(0),
+            };
+            recorder.running("research", "Researching companies, jobs and people");
+            let result = service::research(
+                state,
+                &service::Request {
+                    query: task.prompt.clone(),
+                    profile_allowed: task.use_profile,
+                    ..service::Request::default()
+                },
+                Some((&endpoint, task.model.model_id.as_str())),
+                &ResearchStage(progress),
+                &cancel,
+            )
+            .await;
+            match result.status {
+                ResultStatus::Cancelled => return Ok(Output::cancelled()),
+                ResultStatus::Failed => {
+                    recorder.stage(
+                        "research",
+                        StageStatus::Failed,
+                        "No source could be searched",
+                    );
+                    let reasons: Vec<String> = result
+                        .stages
+                        .iter()
+                        .flat_map(|s| s.failed.clone())
+                        .collect();
+                    return Err(Failure::new(
+                        RunErrorCategory::Search,
+                        format!("{} {}", career_search::UNAVAILABLE, reasons.join(" ")),
+                    ));
+                }
+                _ => {}
+            }
+            recorder.done(
+                "research",
+                &format!(
+                    "Found {} · {} · {}",
+                    plural(result.companies.len(), "company", "companies"),
+                    plural(result.jobs.len(), "open role", "open roles"),
+                    plural(result.people.len(), "relevant person", "relevant people")
+                ),
+            );
+            recorder.update_context(|c| {
+                c.search_scopes = result
+                    .criteria
+                    .stages
+                    .iter()
+                    .map(|s| s.label().to_string())
+                    .collect();
+                for stage in &result.stages {
+                    for source in &stage.sources {
+                        if !c.sources_consulted.contains(source) {
+                            c.sources_consulted.push(source.clone());
+                        }
+                    }
+                }
+            });
+            // Run history keeps the stored view: no LinkedIn member data.
+            let stored =
+                service::view_for(&result, Purpose::ProfessionalResearch, Operation::Store);
+            let mut text = network_render::markdown(&stored);
+            if result.status == ResultStatus::NoVerifiedMatches {
+                recorder.skipped("answer", "Nothing verified to summarize");
+                return Ok(Output {
+                    finish: Finish::Complete,
+                    text,
+                    report: None,
+                });
+            }
+            recorder.running("answer", "Writing the summary from the results");
+            let for_model = service::view_for(
+                &result,
+                Purpose::ProfessionalResearch,
+                Operation::ModelProcess,
+            );
+            let request = crate::services::chat::network_request(
+                system,
+                vec![Turn {
+                    role: MessageRole::User,
+                    content: task.prompt.clone(),
+                }],
+                &for_model,
+                max_output_tokens,
+            );
+            let mut answer = String::new();
+            let mut on_delta = |delta: &str| answer.push_str(delta);
+            let outcome = state
+                .llm
+                .stream_chat(
+                    &endpoint,
+                    &task.model.model_id,
+                    &request,
+                    cancel,
+                    &mut on_delta,
+                )
+                .await;
+            providers::note_outcome(state, &task.model.provider_id, &outcome);
+            match outcome {
+                Ok(Finish::Cancelled) => return Ok(Output::cancelled()),
+                Ok(_) => {
+                    recorder.done("answer", "Summary written from the results");
+                    text.push_str("\n\n");
+                    text.push_str(answer.trim());
+                }
+                Err(error) => {
+                    recorder.stage(
+                        "answer",
+                        StageStatus::Failed,
+                        "The summary could not be written",
+                    );
+                    text.push_str(&format!(
+                        "\n\n_ReMa could not add a summary: {}_",
+                        runs::safe_message(&error.to_string())
+                    ));
+                }
+            }
+            Ok(Output {
+                finish: Finish::Complete,
+                text,
+                report: None,
+            })
+        }
         TaskKind::Prompt if retrieval::detect(&task.prompt).is_some() => {
             // A job search: search and validate first, as in chat.
             let query = retrieval::detect(&task.prompt).unwrap_or_default();
@@ -1009,6 +1184,58 @@ mod tests {
     }
 
     const HOUR: i64 = 3_600_000;
+
+    #[tokio::test]
+    async fn tracking_a_company_runs_network_connect_and_keeps_its_run() {
+        let site = crate::network::tests::sources().await;
+        let llm = Arc::new(FakeLanguageModel::replying(&[
+            "Two contacts to start with.",
+        ]));
+        let (mut state, _) = testing::state(llm.clone());
+        state.rema_mcp = crate::rema_mcp::RemaMcp::with(
+            crate::rema_mcp::adapters::Apis::local(&site.base_url),
+            true,
+        );
+        providers::connect(&state, ProviderKind::Anthropic, "k")
+            .await
+            .unwrap();
+        let mut input = every_4_hours(None);
+        input.name = "Track Nordlicht AI".into();
+        input.prompt = "Track Nordlicht AI: find its current open roles and the most relevant \
+                        hiring-side contacts at Nordlicht AI."
+            .into();
+        let task = tasks::create(&state, input).await.unwrap();
+        let row = state.db.call(|c| repo::get(c, task.id)).unwrap();
+        let execution = run_once(
+            &state,
+            &row,
+            ExecutionTrigger::Manual,
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            execution.status,
+            ExecutionStatus::Succeeded,
+            "{execution:?}"
+        );
+        let result = execution.result.clone().unwrap();
+        assert!(result.starts_with("**Network Connect**"), "{result}");
+        assert!(result.contains("Jonas Berger"), "{result}");
+        assert!(result.trim_end().ends_with("Two contacts to start with."));
+        assert!(!result.contains("@nordlicht.example"));
+        let run = runs::get(&state, execution.id).unwrap();
+        let stages: Vec<&str> = run.progress.iter().map(|e| e.stage.as_str()).collect();
+        assert!(
+            stages.contains(&"research") && stages.contains(&"answer"),
+            "{stages:?}"
+        );
+        assert!(run
+            .context
+            .as_ref()
+            .is_some_and(|c| c.search_scopes.iter().any(|s| s == "People")));
+    }
 
     #[tokio::test]
     async fn claims_due_runs_once_and_advances_the_schedule() {
@@ -1589,6 +1816,7 @@ mod tests {
                     client_secret: Some("client-secret-value".into()),
                 }),
                 microsoft: None,
+                linkedin: None,
             },
         );
         state

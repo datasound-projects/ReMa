@@ -457,23 +457,34 @@ pub async fn search_jobs(
     progress: &dyn Progress,
     cancel: &CancellationToken,
 ) -> Outcome {
+    search_jobs_with(state, Some((endpoint, model_id)), query, progress, cancel).await
+}
+
+/// A job search; without a model, ReMa's own job sources alone (Network
+/// Connect when no model is set up).
+pub async fn search_jobs_with(
+    state: &AppState,
+    model: Option<(&Endpoint, &str)>,
+    query: &JobQuery,
+    progress: &dyn Progress,
+    cancel: &CancellationToken,
+) -> Outcome {
     let started = Instant::now();
     let plan = plan::for_job_query(query);
     progress.status("Searching jobs…");
     let company_domains = company_domains(state, &plan, cancel).await;
     let hints = plan::hints(&plan, &company_domains);
-    let native_route = native::supported(endpoint);
     let own = own_jobs(state, &plan, query, cancel);
     let web = async {
-        if native_route {
-            Some(
+        match model {
+            Some((endpoint, model_id)) if native::supported(endpoint) => Some((
+                native::engine_name(endpoint).to_string(),
                 web_jobs(
                     state, endpoint, model_id, query, &plan, &hints, progress, cancel,
                 )
                 .await,
-            )
-        } else {
-            None
+            )),
+            _ => None,
         }
     };
     let (own, web) = tokio::join!(own, web);
@@ -532,8 +543,7 @@ pub async fn search_jobs(
             reasons.push(reason);
         }
     }
-    if let Some(web) = web {
-        let name = native::engine_name(endpoint).to_string();
+    if let Some((name, web)) = web {
         report.queried.push(name.clone());
         match web {
             Ok(web) => {

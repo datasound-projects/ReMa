@@ -109,6 +109,9 @@ pub async fn mail_client(
             ),
             account_id: account_id.clone(),
         }),
+        ProviderId::Linkedin | ProviderId::Xing => {
+            return Err(AppError::internal("not a mail connector"))
+        }
     };
     Ok((client, account_id))
 }
@@ -144,6 +147,9 @@ pub async fn calendar_client(
             ),
             email,
         }),
+        ProviderId::Linkedin | ProviderId::Xing => {
+            return Err(AppError::internal("not a calendar connector"))
+        }
     })
 }
 

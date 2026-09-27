@@ -208,6 +208,9 @@ impl Failure {
         let category = match error {
             AppError::Validation(_) | AppError::NotFound(_) => RunErrorCategory::Task,
             AppError::Configuration(_) | AppError::Authentication(_) => access,
+            // A provider permission or ReMa's data policy: the task asks
+            // for something that is not available to it.
+            AppError::Permission(_) => RunErrorCategory::Task,
             AppError::Provider(_) => RunErrorCategory::Provider,
             AppError::Billing(_) => RunErrorCategory::Billing,
             AppError::Network(_) => RunErrorCategory::Network,

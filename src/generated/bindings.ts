@@ -53,6 +53,14 @@ export const commands = {
 	disconnectConnector: (id: ConnectorId) => __TAURI_INVOKE<ConnectorsOverview>("disconnect_connector", { id }),
 	/**  "Run ReMa in background" (system tray) and "Start ReMa at login". */
 	setBackgroundSettings: (runInBackground: boolean, startAtLogin: boolean) => __TAURI_INVOKE<ConnectorsOverview>("set_background_settings", { runInBackground, startAtLogin }),
+	/**  What LinkedIn and XING let ReMa do right now. */
+	networkCapabilities: () => __TAURI_INVOKE<ProviderCapabilities[]>("network_capabilities"),
+	/**  Runs a research request from the Network Connect page. */
+	networkResearch: (input: NetworkResearchInput) => __TAURI_INVOKE<NetworkResult>("network_research", { input }),
+	/**  Stops a running request. */
+	networkCancel: (runId: string) => __TAURI_INVOKE<boolean>("network_cancel", { runId }),
+	/**  The page's last result this session (nothing is kept on disk). */
+	networkLastResult: () => __TAURI_INVOKE<LastNetworkResult>("network_last_result"),
 	getApplications: () => __TAURI_INVOKE<ApplicationsOverview>("get_applications"),
 	/**
 	 *  The in-app calendar: events of the connected calendars between `start`
@@ -270,6 +278,7 @@ export const events = {
 	connectorsChanged: makeEvent<ConnectorsChanged>("connectors-changed"),
 	conversationsChanged: makeEvent<ConversationsChanged>("conversations-changed"),
 	mcpChanged: makeEvent<McpChanged>("mcp-changed"),
+	networkProgress: makeEvent<NetworkProgress>("network-progress"),
 	notificationsChanged: makeEvent<NotificationsChanged>("notifications-changed"),
 	portfolioChanged: makeEvent<PortfolioChanged>("portfolio-changed"),
 	profileChanged: makeEvent<ProfileChanged>("profile-changed"),
@@ -607,7 +616,20 @@ export type CalendarView = {
 };
 
 /**  A permission a connector needs, mapped to provider scopes in Rust. */
-export type Capability = "mail_read" | "calendar_read" | "calendar_write" | "free_busy";
+export type Capability = "mail_read" | "calendar_read" | "calendar_write" | "free_busy" | 
+/**  Sign-in identity (name, account id, email). */
+"network_identity" | 
+/**  The member's own profile. */
+"network_profile" | 
+/**  The member's first-degree connection list (partner-approved only). */
+"network_connections";
+
+export type CapabilityItem = {
+	capability: NetworkCapability,
+	label: string,
+	/**  Why it is (not) available, in plain words. */
+	reason: string,
+};
 
 /**  Settings → Career Search. */
 export type CareerSearchStatus = {
@@ -661,11 +683,54 @@ export type ClassCount = {
 	threshold: number | null,
 };
 
+/**
+ *  A company (NC §4, §15). Unknown values stay `None`: shown as "Unknown",
+ *  never guessed.
+ */
+export type Company = {
+	id: string,
+	name: string,
+	aliases: string[],
+	website: string | null,
+	domain: string | null,
+	industry: string | null,
+	/**  "about 1,200 employees". */
+	size: string | null,
+	/**  Employee count when a source states one. */
+	employees: number | null,
+	locations: string[],
+	linkedinUrl: string | null,
+	xingUrl: string | null,
+	otherUrls: string[],
+	/**  Why it matched the request, one reason per criterion. */
+	matchedBecause: string[],
+	/**  Criteria ReMa could not verify for this company ("size unknown"). */
+	unverified: string[],
+	/**  Relevant openings observed in this search (a count, not a trend). */
+	relevantOpenings: number,
+	evidence: Evidence[],
+	lastVerifiedAt: number,
+};
+
+export type Confidence = "low" | "medium" | "high";
+
 /**  An existing Calendar event overlapping an interview. */
 export type ConflictingEvent = {
 	title: string,
 	startAt: number,
 	endAt: number,
+};
+
+/**  A first-degree connection that matched a company (session only). */
+export type Connection = {
+	name: string,
+	headline: string | null,
+	companyId: string | null,
+	companyName: string | null,
+	profileUrl: string | null,
+	relationship: Relationship,
+	/**  How the company match was made ("their LinkedIn headline names …"). */
+	matchReason: string,
 };
 
 /**
@@ -698,10 +763,24 @@ export type ConnectionStatus = "disconnected" | "connected" |
 /**  The runtime is missing or failed; `status_message` says why. */
 "unavailable";
 
-/**  One connector card in Settings → Connectors. */
-export type ConnectorId = "gmail" | "google_calendar" | "outlook_mail" | "outlook_calendar";
+/**  What the relationship stage could do. */
+export type ConnectionsOutcome = 
+/**  The request did not ask about relationships. */
+{ state: "not_requested" } | 
+/**
+ *  No provider shares a connection list with ReMa (the reason says
+ *  exactly what is missing; never "no connections").
+ */
+{ state: "unavailable"; reason: string } | 
+/**  The connection list was checked. */
+{ state: "checked"; provider: ProviderId; checked: number; matched: number } | { state: "failed"; reason: string };
 
-export type ConnectorKind = "mail" | "calendar";
+/**  One connector card in Settings → Connectors. */
+export type ConnectorId = "gmail" | "google_calendar" | "outlook_mail" | "outlook_calendar" | "linkedin" | "xing";
+
+export type ConnectorKind = "mail" | "calendar" | 
+/**  A professional network (LinkedIn, XING). */
+"network";
 
 /**  What a connector card shows. */
 export type ConnectorState = 
@@ -815,6 +894,28 @@ export type CredentialInput = {
 
 export type CredentialKind = "degree" | "professional_certificate" | "course_certificate" | "training" | "license" | "badge" | "other";
 
+/**
+ *  The criteria ReMa read from the request, shown so the user can see
+ *  what was searched.
+ */
+export type Criteria = {
+	locations: string[],
+	industries: string[],
+	/**  "50–500 employees". */
+	companySize: string | null,
+	technologies: string[],
+	roles: string[],
+	seniority: string | null,
+	minOpenings: number | null,
+	postedWithinDays: number | null,
+	people: string[],
+	targetCompany: string | null,
+	relationships: boolean,
+	usesProfile: boolean,
+	limit: number,
+	stages: Stage[],
+};
+
 /**  A field the user defines, e.g. "Research profile" → URL. */
 export type CustomField = {
 	label: string,
@@ -842,6 +943,17 @@ export type CustomProviderInput = {
 
 export type DashboardTab = "jobs" | "skill_gap" | "requirements" | "learning";
 
+/**  What kind of data it is. */
+export type DataClass = 
+/**  The user's own account identity. */
+"identity" | 
+/**  The user's own profile. */
+"self_profile" | 
+/**  A member of the user's first-degree network. */
+"first_degree_connection" | 
+/**  A person in a professional role (name, title, public profile). */
+"professional_profile" | "company" | "job";
+
 /**  Which stored jobs are analyzed. */
 export type DataScope = {
 	kind: ScopeKind,
@@ -850,6 +962,17 @@ export type DataScope = {
 	/**  For `Jobs`. */
 	jobIds: number[],
 };
+
+/**  Where data comes from. */
+export type DataSource = "linkedin_api" | "xing_api" | 
+/**  A public page found or read on the web. */
+"public_web" | 
+/**  The company's own site. */
+"company_website" | 
+/**  A job posting from ReMa's job layer (Jobs MCP). */
+"jobs_mcp" | "wikidata" | 
+/**  A page a model's hosted web search reported. */
+"model_web_search" | "user_entered";
 
 export type DatasetSummary = {
 	/**  Human description of scope, filters and limit. */
@@ -905,12 +1028,34 @@ export type EndCondition = { kind: "never" } |
 { kind: "after_runs"; count: number };
 
 /**  Stable, machine-readable error kind sent to the frontend. */
-export type ErrorCode = "validation" | "not_found" | "io" | "database" | "configuration" | "authentication" | "provider" | "billing" | "network" | "internal";
+export type ErrorCode = "validation" | "not_found" | "io" | "database" | "configuration" | "authentication" | "provider" | "billing" | "network" | "permission" | "internal";
 
 /**  Wire format of every backend error. */
 export type ErrorPayload = {
 	code: ErrorCode,
 	message: string,
+};
+
+/**  One source for one claim. */
+export type Evidence = {
+	source: DataSource,
+	/**  "Company website", "Greenhouse", "Wikidata", "OpenAI web search". */
+	sourceName: string,
+	url: string | null,
+	title: string | null,
+	supports: Supports,
+	/**
+	 *  A short excerpt (data from the source, never instructions; contact
+	 *  details removed).
+	 */
+	excerpt: string | null,
+	retrievedAt: number,
+	publishedAt: string | null,
+	/**
+	 *  ReMa read the source itself (or the search engine reported the
+	 *  page); false when only a model's summary names it.
+	 */
+	checked: boolean,
 };
 
 /**
@@ -1085,6 +1230,28 @@ export type JobGap = {
 };
 
 /**
+ *  A job, as ReMa's job layer found it (the Jobs MCP record when it has
+ *  one; Network Connect keeps no job database of its own).
+ */
+export type JobRef = {
+	/**  The Jobs MCP id ("rj_…") or "url:<canonical address>". */
+	id: string,
+	title: string,
+	companyId: string | null,
+	companyName: string | null,
+	location: string | null,
+	workMode: string | null,
+	/**  UTC midnight of the posting date. */
+	postedAt: number | null,
+	url: string,
+	/**  "Greenhouse", "Arbeitnow", "OpenAI web search". */
+	source: string,
+	/**  "Posting read", "Page read", "Found by search (not opened)". */
+	status: string,
+	notes: string[],
+};
+
+/**
  *  Structured result of one job-application monitoring run. Built from
  *  stored state by Rust, never from free-form model text.
  */
@@ -1126,6 +1293,11 @@ export type Language = {
 	name: string,
 	/**  E.g. "Native", "C1", "Fluent". */
 	level: string,
+};
+
+/**  The page's last result this session, if any. */
+export type LastNetworkResult = {
+	result: NetworkResult | null,
 };
 
 /**  Which gaps are worth researching learning resources for. */
@@ -1373,6 +1545,47 @@ export type ModelRef = {
 	modelId: string,
 };
 
+export type NetworkCapability = "authenticate_identity" | "read_self_profile" | "search_companies" | "search_jobs" | "search_people" | "read_first_degree_connections" | "read_second_degree_connections" | "read_profile_details" | "persistent_storage_allowed";
+
+/**  A status line of a running Network Connect request (for the page). */
+export type NetworkProgress = {
+	runId: string,
+	text: string,
+};
+
+/**  A request from the Network Connect page. */
+export type NetworkResearchInput = {
+	/**  Chosen by the page, to cancel the request. */
+	runId: string,
+	query: string,
+	/**  A job the request is about. */
+	jobUrl: string | null,
+	/**  A company the request is about. */
+	company: string | null,
+};
+
+/**  One research answer. */
+export type NetworkResult = {
+	query: string,
+	criteria: Criteria,
+	status: ResultStatus,
+	companies: Company[],
+	jobs: JobRef[],
+	people: Person[],
+	/**  Session only: never stored, never sent to a model. */
+	connections: Connection[],
+	connectionsOutcome: ConnectionsOutcome,
+	rows: Row[],
+	stages: StageReport[],
+	/**
+	 *  What the user should know, such as how many companies could not be
+	 *  verified against a criterion.
+	 */
+	notes: string[],
+	retrievedAt: number,
+	policyVersion: string,
+};
+
 export type NotificationItem = {
 	id: number,
 	kind: string,
@@ -1392,6 +1605,47 @@ export type PermissionView = {
 	capability: Capability,
 	label: string,
 	granted: boolean,
+};
+
+/**  How long data may be kept (NC §12). */
+export type Persistence = 
+/**  Not kept at all. */
+"ephemeral" | 
+/**  In memory while ReMa runs, cleared on disconnect and exit. */
+"session" | 
+/**  Cached briefly. */
+"short_ttl" | 
+/**  May be kept as ReMa records (chat, run history, saved items). */
+"persistent_permitted";
+
+/**  A person in a professional role (NC §19). */
+export type Person = {
+	id: string,
+	name: string,
+	title: string | null,
+	companyId: string | null,
+	companyName: string | null,
+	location: string | null,
+	linkedinUrl: string | null,
+	xingUrl: string | null,
+	otherUrl: string | null,
+	relevance: RelevanceType,
+	relevanceReason: string,
+	/**  The job this person is relevant to. */
+	jobId: string | null,
+	confidence: Confidence,
+	evidence: Evidence[],
+	relationship: Relationship | null,
+	/**  Where the person record comes from (drives the data policy). */
+	source: DataSource,
+	class: DataClass,
+	persistence: Persistence,
+	fetchedAt: number,
+	/**
+	 *  A caveat about freshness or identity ("title as listed on the team
+	 *  page"; "two people with this name").
+	 */
+	caveat: string | null,
 };
 
 export type PipelineStatus = {
@@ -1593,8 +1847,28 @@ export type ProposedSlot = {
 	conflicts: ConflictingEvent[],
 };
 
+/**  Whether ReMa can connect to a provider at all. */
+export type ProviderAccess = 
+/**  No approved integration exists for ReMa. */
+"not_available" | "not_connected" | "connected" | 
+/**  Signed in before; the access expired or was revoked. */
+"reconnect_needed";
+
+export type ProviderCapabilities = {
+	provider: ProviderId,
+	name: string,
+	access: ProviderAccess,
+	accountName: string | null,
+	available: CapabilityItem[],
+	unavailable: CapabilityItem[],
+	/**  One sentence for the provider card and for answers. */
+	summary: string,
+	/**  The scopes behind it (for "Advanced details"). */
+	grantedScopes: string[],
+};
+
 /**  The account provider behind a connector. */
-export type ProviderId = "google" | "microsoft";
+export type ProviderId = "google" | "microsoft" | "linkedin" | "xing";
 
 /**  The API family a provider speaks. Each kind has one adapter in `llm/`. */
 export type ProviderKind = "openai" | "anthropic" | "gemini" | 
@@ -1686,6 +1960,42 @@ export type RejectedFile = {
 	reason: string,
 };
 
+/**
+ *  A permitted relationship to the user (NC §4): only from a provider
+ *  that shares it, never inferred.
+ */
+export type Relationship = {
+	provider: ProviderId,
+	/**  1: a first-degree connection. Nothing else exists. */
+	degree: number,
+	/**  "LinkedIn first-degree connection". */
+	label: string,
+	fetchedAt: number,
+	persistence: Persistence,
+};
+
+/**
+ *  Why a person is relevant (NC §18: "Hiring Manager" only with explicit
+ *  evidence).
+ */
+export type RelevanceType = 
+/**  The posting says this person is the hiring manager. */
+"hiring_manager" | 
+/**  The posting names this person as its recruiter or contact. */
+"named_recruiter" | 
+/**  The posting says the role reports to this person. */
+"stated_manager" | 
+/**  Leads the department the job or request belongs to. */
+"department_leader" | 
+/**  Leads a team in that function. */
+"team_lead" | 
+/**  Recruits for the company (not tied to this job by a source). */
+"recruiter" | 
+/**  Company leadership. */
+"executive" | 
+/**  Relevant for another stated reason. */
+"relevant_contact";
+
 export type RemaMcpStatus = {
 	enabled: boolean,
 	readiness: Readiness,
@@ -1760,6 +2070,14 @@ export type ResearchStatus = "running" | "done" | "failed";
 
 export type ResourceType = "certification" | "course" | "university" | "documentation" | "book" | "lab" | "tutorial" | "project" | "program";
 
+export type ResultStatus = "complete" | 
+/**  Some sources or stages failed; what was found is shown. */
+"partial" | 
+/**  Searches ran; nothing verifiable matched. */
+"no_verified_matches" | 
+/**  No source could be searched. */
+"failed" | "cancelled";
+
 /**  What one search did (§49): no credentials, no page text. */
 export type RouteReport = {
 	at: number,
@@ -1782,6 +2100,13 @@ export type RouteState = {
 	name: string,
 	detail: string,
 	available: boolean,
+};
+
+/**  One row of the unified table (NC §21, §29). */
+export type Row = {
+	companyId: string | null,
+	jobId: string | null,
+	personId: string | null,
 };
 
 /**  What took part in a run: names and flags only, never credentials. */
@@ -2062,6 +2387,19 @@ export type SourceSummary = {
 	lastError: string | null,
 };
 
+export type Stage = "companies" | "jobs" | "people" | "connections";
+
+/**  What one stage did (shown under the results). */
+export type StageReport = {
+	stage: Stage,
+	/**  "12 companies from job postings and Wikidata". */
+	summary: string,
+	/**  Sources that answered. */
+	sources: string[],
+	/**  Sources that failed, with the reason. */
+	failed: string[],
+};
+
 /**  State of one stage of a run. */
 export type StageStatus = "pending" | "running" | "completed" | "failed" | "skipped";
 
@@ -2072,6 +2410,11 @@ export type StateShare = {
 	mentions: number,
 	percent: number | null,
 };
+
+/**  What a piece of evidence supports (NC §34 `supports`). */
+export type Supports = "company_identity" | "company_website" | "company_location" | "company_industry" | "company_size" | "company_hiring" | "job_is_open" | "current_title" | "person_relevance" | 
+/**  The posting names this person (as contact, recruiter or manager). */
+"named_on_posting" | "profile_link" | "relationship";
 
 /**  Create or edit a task. Dates and times are local to `timezone`. */
 export type TaskInput = {

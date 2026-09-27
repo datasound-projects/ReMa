@@ -13,6 +13,7 @@ import { useSidebar } from '../hooks/useSidebar';
 import { AgentsPage } from '../pages/AgentsPage';
 import { ApplicationsPage } from '../pages/ApplicationsPage';
 import { ChatPage } from '../pages/ChatPage';
+import { NetworkConnectPage } from '../pages/NetworkConnectPage';
 import { PortfolioStudioPage } from '../pages/PortfolioStudioPage';
 import { ProfilePage } from '../pages/ProfilePage';
 import { ScheduledTasksPage } from '../pages/ScheduledTasksPage';
@@ -109,6 +110,7 @@ export function App() {
         {view.page === 'profile' && <ProfilePage section={view.section ?? 'documents'} />}
         {view.page === 'portfolio' && <PortfolioStudioPage portfolioId={view.portfolioId ?? null} />}
         {view.page === 'applications' && <ApplicationsPage applicationId={view.applicationId ?? null} />}
+        {view.page === 'network' && <NetworkConnectPage />}
         {view.page === 'settings' && <SettingsPage focus={view.focus} />}
       </AppShell>
       {/* Above the app, which loads underneath; plays once per launch. */}

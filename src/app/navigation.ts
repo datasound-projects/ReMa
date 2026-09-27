@@ -14,6 +14,7 @@ export type View =
   | { page: 'portfolio'; portfolioId?: number | null }
   /** `applicationId`: the application whose details are open. */
   | { page: 'applications'; applicationId?: number | null }
+  | { page: 'network' }
   /** `focus` scrolls to a section (e.g. MCP from the chat's + menu). */
   | { page: 'settings'; focus?: 'mcp' | 'connectors' };
 

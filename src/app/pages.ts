@@ -4,6 +4,7 @@ import {
   ChatIcon,
   ClockIcon,
   LayoutIcon,
+  NetworkIcon,
   ProfileIcon,
   SettingsIcon,
 } from '../components/icons';
@@ -18,6 +19,7 @@ export const MAIN_NAV: readonly SidebarItem<PageId>[] = [
   { id: 'profile', label: 'Profile', icon: ProfileIcon },
   { id: 'portfolio', label: 'Portfolio Studio', icon: LayoutIcon },
   { id: 'applications', label: 'Applications', icon: BriefcaseIcon },
+  { id: 'network', label: 'Network Connect', icon: NetworkIcon },
 ];
 
 /** Pinned to the bottom of the sidebar. */

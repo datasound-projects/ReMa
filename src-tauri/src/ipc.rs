@@ -29,6 +29,7 @@ use crate::{
         provider::ProvidersChanged,
         task::{TaskRunChanged, TasksChanged},
     },
+    network::model::NetworkProgress,
 };
 
 /// Path of the generated bindings, relative to this crate.
@@ -65,6 +66,11 @@ pub fn builder() -> Builder<tauri::Wry> {
             commands::connectors::cancel_connector_sign_in,
             commands::connectors::disconnect_connector,
             commands::connectors::set_background_settings,
+            // Network Connect
+            commands::network::network_capabilities,
+            commands::network::network_research,
+            commands::network::network_cancel,
+            commands::network::network_last_result,
             // Applications tracker & notifications
             commands::applications::get_applications,
             commands::applications::get_calendar,
@@ -176,6 +182,7 @@ pub fn builder() -> Builder<tauri::Wry> {
             ConnectorsChanged,
             ConversationsChanged,
             McpChanged,
+            NetworkProgress,
             NotificationsChanged,
             PortfolioChanged,
             ProfileChanged,

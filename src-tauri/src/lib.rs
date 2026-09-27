@@ -35,6 +35,7 @@ pub mod jobs;
 pub mod llm;
 pub mod mcp;
 pub mod models;
+pub mod network;
 pub mod oauth_loopback;
 pub mod protocol;
 pub mod rema_mcp;
@@ -284,5 +285,6 @@ fn init_state(app: &App) -> Result<AppState, Box<dyn std::error::Error>> {
         approvals: Default::default(),
         rema_mcp: rema_mcp::RemaMcp::new(),
         career: Default::default(),
+        network: Default::default(),
     })
 }

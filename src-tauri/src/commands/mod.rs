@@ -12,6 +12,7 @@ pub mod browser;
 pub mod chat;
 pub mod connectors;
 pub mod mcp;
+pub mod network;
 pub mod portfolio;
 pub mod profile;
 pub mod providers;

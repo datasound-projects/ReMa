@@ -51,9 +51,14 @@ function card(patch: Partial<ConnectorStatus> & Pick<ConnectorStatus, 'id'>): Co
     ...base,
     provider: google ? 'google' : 'microsoft',
     kind: mail ? 'mail' : 'calendar',
-    name: { gmail: 'Gmail', google_calendar: 'Google Calendar', outlook_mail: 'Outlook Mail', outlook_calendar: 'Outlook Calendar' }[
-      patch.id
-    ],
+    name: {
+      gmail: 'Gmail',
+      google_calendar: 'Google Calendar',
+      outlook_mail: 'Outlook Mail',
+      outlook_calendar: 'Outlook Calendar',
+      linkedin: 'LinkedIn',
+      xing: 'XING',
+    }[patch.id],
     publisher: google ? 'Google' : 'Microsoft',
     description: mail
       ? `Read job-related ${google ? '' : 'Outlook '}emails and track application updates.`.replace('  ', ' ')

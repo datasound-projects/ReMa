@@ -110,6 +110,9 @@ pub fn allows(capability: Capability, granted: &[String]) -> bool {
         Capability::CalendarRead | Capability::CalendarWrite | Capability::FreeBusy => {
             has(SCOPE_CALENDARS_READWRITE)
         }
+        Capability::NetworkIdentity
+        | Capability::NetworkProfile
+        | Capability::NetworkConnections => false,
     }
 }
 

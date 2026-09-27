@@ -32,6 +32,11 @@ pub const APP_COMMANDS: &[&str] = &[
     "cancel_connector_sign_in",
     "disconnect_connector",
     "set_background_settings",
+    // Network Connect
+    "network_capabilities",
+    "network_research",
+    "network_cancel",
+    "network_last_result",
     // Applications tracker & notifications
     "get_applications",
     "get_calendar",

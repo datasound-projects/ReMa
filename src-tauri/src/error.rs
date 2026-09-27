@@ -48,6 +48,11 @@ pub enum AppError {
     #[error("Network error: {0}")]
     Network(String),
 
+    /// A provider's terms or ReMa's data policy do not allow this use of
+    /// the data (or the provider has not granted the capability).
+    #[error("{0}")]
+    Permission(String),
+
     /// An unexpected failure inside the application.
     #[error("{0}")]
     Internal(String),
@@ -66,6 +71,7 @@ pub enum ErrorCode {
     Provider,
     Billing,
     Network,
+    Permission,
     Internal,
 }
 
@@ -105,6 +111,10 @@ impl AppError {
         Self::Network(message.into())
     }
 
+    pub fn permission(message: impl Into<String>) -> Self {
+        Self::Permission(message.into())
+    }
+
     pub fn internal(message: impl Into<String>) -> Self {
         Self::Internal(message.into())
     }
@@ -120,6 +130,7 @@ impl AppError {
             Self::Provider(_) => ErrorCode::Provider,
             Self::Billing(_) => ErrorCode::Billing,
             Self::Network(_) => ErrorCode::Network,
+            Self::Permission(_) => ErrorCode::Permission,
             Self::Internal(_) => ErrorCode::Internal,
         }
     }
@@ -239,6 +250,14 @@ mod tests {
     fn converts_database_errors() {
         let error: AppError = rusqlite::Error::InvalidQuery.into();
         assert_eq!(error.code(), ErrorCode::Database);
+    }
+
+    #[test]
+    fn serializes_permission() {
+        assert_eq!(
+            to_json(AppError::permission("not allowed by the data policy")),
+            json!({ "code": "permission", "message": "not allowed by the data policy" })
+        );
     }
 
     #[test]

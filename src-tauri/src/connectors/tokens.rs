@@ -27,7 +27,8 @@ pub fn vault_account(provider: ProviderId) -> String {
 
 /// Stores tokens from a sign-in or refresh. A refresh response without a
 /// refresh token keeps the previous one; Microsoft rotates refresh tokens,
-/// so a new one always replaces the old.
+/// so a new one always replaces the old. LinkedIn issues no refresh tokens:
+/// its access token is kept until it expires.
 pub async fn store(
     state: &AppState,
     provider: ProviderId,
@@ -35,7 +36,7 @@ pub async fn store(
     previous_refresh: Option<String>,
 ) -> AppResult<()> {
     let refresh_token = tokens.refresh_token.clone().or(previous_refresh);
-    if refresh_token.is_none() {
+    if refresh_token.is_none() && super::issues_refresh_tokens(provider) {
         return Err(AppError::authentication(format!(
             "{} did not grant long-lived access. Try connecting again.",
             provider.name()
@@ -74,6 +75,11 @@ pub async fn get_valid_access_token(state: &AppState, provider: ProviderId) -> A
             refresh_token: Some(refresh_token),
             ..
         }) => refresh_with(state, provider, refresh_token).await,
+        // Expired and not refreshable (LinkedIn): sign in again.
+        Some(Credential::OAuth { .. }) => {
+            mark_reauth_required(state, provider, "the access token expired").await?;
+            Err(reconnect_error(provider))
+        }
         _ => Err(reconnect_error(provider)),
     }
 }
@@ -153,6 +159,9 @@ pub async fn mark_reauth_required(
     reason: &str,
 ) -> AppResult<()> {
     state.vault.delete(&vault_account(provider)).await?;
+    if provider == ProviderId::Linkedin {
+        state.network.forget_provider_data();
+    }
     let reason: String = reason.chars().take(200).collect();
     state.db.call(|c| {
         repo::set_account_status(
@@ -200,8 +209,9 @@ pub async fn revoke_connection(state: &AppState, provider: ProviderId) -> AppRes
             let token = refresh_token.unwrap_or(access_token);
             let _ = revoke_google(&state.connectors, &token).await;
         }
-        // Microsoft has no token revocation endpoint for public clients; the
-        // user can remove ReMa at account.microsoft.com (shown in the UI).
+        // Microsoft and LinkedIn have no token revocation for public
+        // clients; the user can remove ReMa in their account settings
+        // (shown in the UI).
     }
     state.vault.delete(&vault_account(provider)).await
 }
@@ -226,13 +236,23 @@ async fn revoke_google(ctx: &ConnectorsContext, token: &str) -> AppResult<()> {
     }
 }
 
+/// Whether stored tokens can still be used: refreshable, or an access
+/// token that has not expired (LinkedIn issues no refresh token).
+pub async fn usable(state: &AppState, provider: ProviderId) -> AppResult<bool> {
+    Ok(match state.vault.get(&vault_account(provider)).await? {
+        Some(Credential::OAuth {
+            refresh_token: Some(_),
+            ..
+        }) => true,
+        Some(Credential::OAuth { expires_at, .. }) => expires_at.is_none_or(|at| at > now_ms()),
+        _ => false,
+    })
+}
+
 /// Whether the user must sign in again before this provider can be used.
 pub async fn requires_reauthentication(state: &AppState, provider: ProviderId) -> AppResult<bool> {
     let account = state.db.call(|c| repo::account(c, provider))?;
-    let has_token = matches!(
-        state.vault.get(&vault_account(provider)).await?,
-        Some(Credential::OAuth { .. })
-    );
+    let has_token = usable(state, provider).await?;
     Ok(match account {
         Some(account) => account.status == AccountStatus::ReauthRequired || !has_token,
         None => false,

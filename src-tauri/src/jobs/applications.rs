@@ -26,8 +26,9 @@ use crate::{
 /// The timeline source for mail from a provider.
 pub fn mail_source(provider: ProviderId) -> UpdateSource {
     match provider {
-        ProviderId::Google => UpdateSource::Gmail,
         ProviderId::Microsoft => UpdateSource::Outlook,
+        // Only Google and Microsoft provide mail.
+        _ => UpdateSource::Gmail,
     }
 }
 

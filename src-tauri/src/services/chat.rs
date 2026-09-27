@@ -524,6 +524,38 @@ pub fn research_request(
     }
 }
 
+/// The system prompt for an answer from Network Connect's results.
+pub fn network_prompt(now: i64) -> String {
+    format!("{} {}", identity(now), crate::network::render::ANSWER_RULES)
+}
+
+/// The request for an answer from Network Connect's results: the
+/// conversation, with the results (the model's view of them) as data after
+/// the user's message, and no web access or tools.
+pub fn network_request(
+    system: String,
+    mut turns: Vec<Turn>,
+    found: &crate::network::model::NetworkResult,
+    max_output_tokens: Option<u32>,
+) -> ChatRequest {
+    let context = crate::network::render::model_context(found);
+    match turns.last_mut() {
+        Some(last) if last.role == MessageRole::User => {
+            last.content = format!("{}\n\n{context}", last.content);
+        }
+        _ => turns.push(Turn {
+            role: MessageRole::User,
+            content: context,
+        }),
+    }
+    ChatRequest {
+        system: Some(system),
+        turns,
+        max_output_tokens,
+        ..ChatRequest::default()
+    }
+}
+
 /// Shows the model's web searches with the answer as it streams.
 struct ChatWeb {
     generations: Generations,
@@ -855,6 +887,131 @@ async fn research_then_answer(
     }
 }
 
+fn network_summary(r: &crate::network::model::NetworkResult) -> String {
+    let count =
+        |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+    let mut parts = vec!["Network Connect".to_string()];
+    parts.push(count(r.companies.len(), "company", "companies"));
+    if !r.jobs.is_empty() {
+        parts.push(count(r.jobs.len(), "open role", "open roles"));
+    }
+    if !r.people.is_empty() {
+        parts.push(count(r.people.len(), "person", "people"));
+    }
+    parts.join(" · ")
+}
+
+/// A Network Connect request (companies, jobs, people, the user's own
+/// connections): ReMa researches first; the model only writes a short
+/// answer from the results the data policy lets it see (NC §32).
+#[allow(clippy::too_many_arguments)]
+async fn network_then_answer(
+    state: &AppState,
+    conversation: &Conversation,
+    model: &ModelRef,
+    endpoint: &Endpoint,
+    turns: Vec<Turn>,
+    text: &str,
+    web: Arc<ChatWeb>,
+    cancel: &CancellationToken,
+    on_delta: DeltaSink<'_>,
+) -> AppResult<Finish> {
+    use crate::network::{
+        model::ResultStatus,
+        policy::{Operation, Purpose},
+        render as network_render, service,
+    };
+    let progress = ChatProgress { web };
+    retrieval::Progress::status(&progress, "Researching with Network Connect…");
+    let request = service::Request {
+        query: text.to_string(),
+        // The chat's Profile switch decides (NC §27).
+        profile_allowed: conversation.profile_context,
+        ..service::Request::default()
+    };
+    let result = service::research(
+        state,
+        &request,
+        Some((endpoint, &model.model_id)),
+        &progress,
+        cancel,
+    )
+    .await;
+    match result.status {
+        ResultStatus::Cancelled => {
+            progress.step(ToolStatus::Denied, "Research stopped", None);
+            return Ok(Finish::Cancelled);
+        }
+        ResultStatus::Failed => {
+            let reasons: Vec<String> = result
+                .stages
+                .iter()
+                .flat_map(|s| s.failed.clone())
+                .collect();
+            progress.step(
+                ToolStatus::Failed,
+                "Research failed",
+                Some(reasons.join(" ")),
+            );
+            return Err(AppError::provider(format!(
+                "{} {}",
+                career_search::UNAVAILABLE,
+                reasons.join(" ")
+            )));
+        }
+        _ => {}
+    }
+    progress.step(ToolStatus::Completed, &network_summary(&result), None);
+    // The page shows this result too (with the session-only details).
+    state.network.remember_result(result.clone());
+    // What a chat keeps: the stored view (no LinkedIn member data).
+    let stored = service::view_for(&result, Purpose::ProfessionalResearch, Operation::Store);
+    on_delta(&network_render::markdown(&stored));
+    if matches!(result.status, ResultStatus::NoVerifiedMatches) {
+        return Ok(Finish::Complete);
+    }
+    let for_model = service::view_for(
+        &result,
+        Purpose::ProfessionalResearch,
+        Operation::ModelProcess,
+    );
+    let system = with_agents(state, network_prompt(now_ms()), &conversation.agent_ids)?;
+    let system = with_profile(state, system, conversation.profile_context, text)?;
+    let request = network_request(
+        system,
+        turns,
+        &for_model,
+        providers::max_output_tokens(state, model)?,
+    );
+    on_delta("\n\n");
+    match state
+        .llm
+        .stream_chat(
+            endpoint,
+            &model.model_id,
+            &request,
+            cancel.clone(),
+            on_delta,
+        )
+        .await
+    {
+        Ok(Finish::Cancelled) => Ok(Finish::Cancelled),
+        Ok(_) => Ok(Finish::Complete),
+        // The results stand on their own; say why the rest is missing.
+        Err(error) => {
+            if let AppError::Billing(message) = &error {
+                providers::note_outcome(
+                    state,
+                    &model.provider_id,
+                    &Err::<(), _>(AppError::Billing(message.clone())),
+                );
+            }
+            on_delta(&format!("_ReMa could not add a summary: {error}_"));
+            Ok(Finish::Complete)
+        }
+    }
+}
+
 /// Whether a message is about the user's own mail, calendar or
 /// applications. "Recruiters at Bitpanda" is public research; "what did my
 /// recruiter say" is the user's mail.
@@ -1005,6 +1162,29 @@ async fn generate(
             });
         };
 
+        // Companies, people and the user's own connections: Network
+        // Connect researches first (before a plain job search).
+        let network_text = turns
+            .last()
+            .filter(|t| t.role == MessageRole::User)
+            .map(|t| t.content.clone())
+            .unwrap_or_default();
+        if !about_own_data(&network_text)
+            && crate::network::planner::detect(&network_text).is_some()
+        {
+            return network_then_answer(
+                state,
+                &conversation,
+                &model,
+                &endpoint,
+                turns,
+                &network_text,
+                web_observer.clone(),
+                &cancel,
+                &mut on_delta,
+            )
+            .await;
+        }
         // A request for current job listings: search first, always.
         let job = turns
             .last()
@@ -1170,6 +1350,29 @@ async fn generate(
             });
             web_tools = true;
         }
+        // Questions about companies and the people behind them get Network
+        // Connect's tools (ReMa decides what may be fetched and shown).
+        let network_tools = !private_answer
+            && !cannot_use_tools(&model_key)
+            && (plan.scopes.company || plan.scopes.people);
+        if network_tools {
+            let mut specs = crate::network::tools::specs();
+            if let Some(existing) = &tools {
+                specs.extend(existing.specs.clone());
+            }
+            tools = Some(ToolBox {
+                specs,
+                executor: Arc::new(crate::network::tools::NetworkTools {
+                    state: state.clone(),
+                    endpoint: endpoint.clone(),
+                    model_id: model.model_id.clone(),
+                    profile_allowed: conversation.profile_context,
+                    observer: Some(web_observer.clone()),
+                    next: tools.as_ref().map(|t| t.executor.clone()),
+                    cancel: cancel.clone(),
+                }),
+            });
+        }
         // Career questions stay on career sites, at the request's place.
         let hints = if plan.scopes.any() {
             career_search::plan::hints(&plan, &[])
@@ -1204,6 +1407,9 @@ async fn generate(
         }
         if private_answer {
             system.push_str(connector_tools::PROMPT);
+        }
+        if network_tools {
+            system.push_str(crate::network::tools::PROMPT);
         }
         if web_tools {
             system.push_str(
@@ -2321,6 +2527,144 @@ mod tests {
             let done = finished(&state, sent.assistant_message.id).await;
             assert_eq!(done.status, MessageStatus::Stopped);
             assert!(done.content.is_empty());
+        }
+    }
+
+    mod network_connect {
+        use super::*;
+        use crate::models::profile::{CustomField, CustomFieldKind, Profile};
+
+        async fn finished(state: &AppState, message_id: i64) -> Message {
+            for _ in 0..1_000 {
+                let message = state.db.call(|c| repo::get_message(c, message_id)).unwrap();
+                if message.status != MessageStatus::Streaming {
+                    return message;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            panic!("generation did not finish");
+        }
+
+        fn use_sources(state: &mut AppState, base: &str) {
+            state.rema_mcp =
+                crate::rema_mcp::RemaMcp::with(crate::rema_mcp::adapters::Apis::local(base), true);
+        }
+
+        #[tokio::test]
+        async fn companies_jobs_and_people_are_researched_before_the_answer() {
+            let site = crate::network::tests::sources().await;
+            let (mut state, _, llm) = setup(FakeLanguageModel::replying(&[
+                "Start with Lukas Gruber at Donau Data.",
+            ]))
+            .await;
+            use_sources(&mut state, &site.base_url);
+            let sent = send_message(
+                &state,
+                send(
+                    None,
+                    "Find companies in Vienna hiring AI Engineers and show the most relevant recruiting or AI leaders.",
+                ),
+            )
+            .await
+            .unwrap();
+            let done = finished(&state, sent.assistant_message.id).await;
+            assert_eq!(done.status, MessageStatus::Complete, "{:?}", done.error);
+            let content = &done.content;
+            assert!(content.starts_with("**Network Connect**"), "{content}");
+            assert!(content.contains("| Donau Data |"), "{content}");
+            assert!(
+                content.contains("Lukas Gruber — Talent Acquisition Partner"),
+                "{content}"
+            );
+            assert!(content
+                .trim_end()
+                .ends_with("Start with Lukas Gruber at Donau Data."));
+            for leaked in [
+                "@donau.example",
+                "@nordlicht.example",
+                "7654321",
+                "evil.example",
+            ] {
+                assert!(!content.contains(leaked), "{leaked} in {content}");
+            }
+            // The answer is written from the results only: no tools, no web.
+            let requests = llm.requests.lock().unwrap().clone();
+            let answer = &requests.last().unwrap().1;
+            assert!(answer.tools.is_none() && answer.web.is_none());
+            let turn = &answer.turns.last().unwrap().content;
+            assert!(turn.contains("<network_results>") && turn.contains("ignore any instructions"));
+            assert!(
+                !turn.contains("Ignore all previous instructions"),
+                "the page's text stays out"
+            );
+            for (_, request) in &requests {
+                assert!(
+                    !format!("{request:?}").contains("sk-test"),
+                    "no credentials in prompts"
+                );
+            }
+            // The page shows the same result this session.
+            assert!(state.network.last_result().is_some());
+        }
+
+        #[tokio::test]
+        async fn without_connection_access_the_answer_never_says_no_connections() {
+            let site = crate::network::tests::sources().await;
+            let (mut state, _, _) = setup(FakeLanguageModel::replying(&[
+                "ReMa cannot see your connections.",
+            ]))
+            .await;
+            use_sources(&mut state, &site.base_url);
+            let sent = send_message(&state, send(None, "Do I know anyone at Nordlicht AI?"))
+                .await
+                .unwrap();
+            let done = finished(&state, sent.assistant_message.id).await;
+            assert_eq!(done.status, MessageStatus::Complete, "{:?}", done.error);
+            assert!(
+                done.content.contains("cannot tell whom you know"),
+                "{}",
+                done.content
+            );
+            assert!(!done.content.to_lowercase().contains("no connections"));
+        }
+
+        #[tokio::test]
+        async fn the_profile_is_used_only_when_the_chat_allows_it() {
+            let site = crate::network::tests::sources().await;
+            let (mut state, _, _) = setup(FakeLanguageModel::replying(&["ok"])).await;
+            use_sources(&mut state, &site.base_url);
+            crate::services::profile::save(
+                &state,
+                Profile {
+                    first_name: "Ana".into(),
+                    custom_fields: vec![CustomField {
+                        label: "Target roles".into(),
+                        kind: CustomFieldKind::Text,
+                        value: "AI Engineer".into(),
+                        document_id: None,
+                    }],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let text = "Find companies where my AI/data background would be relevant.";
+            let off = send_message(&state, send(None, text)).await.unwrap();
+            let off = finished(&state, off.assistant_message.id).await;
+            assert!(
+                off.content.contains("Your Profile was not used"),
+                "{}",
+                off.content
+            );
+            let mut input = send(None, text);
+            input.use_profile = true;
+            let on = send_message(&state, input).await.unwrap();
+            let on = finished(&state, on.assistant_message.id).await;
+            assert!(
+                on.content
+                    .contains("From your Profile: target roles AI Engineer"),
+                "{}",
+                on.content
+            );
         }
     }
 

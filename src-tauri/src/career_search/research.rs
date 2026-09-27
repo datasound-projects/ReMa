@@ -597,7 +597,7 @@ pub fn merge(mut findings: Vec<Finding>) -> Vec<Finding> {
     findings
 }
 
-fn local_time(ms: i64) -> String {
+pub fn local_time(ms: i64) -> String {
     Timestamp::from_millisecond(ms)
         .map(|t| {
             t.to_zoned(jiff::tz::TimeZone::system())
@@ -608,7 +608,7 @@ fn local_time(ms: i64) -> String {
 }
 
 /// One line of text for a table cell or a list (no Markdown from pages).
-fn plain(text: &str, max: usize) -> String {
+pub fn plain(text: &str, max: usize) -> String {
     let text: String = extract::clip(text, max)
         .chars()
         .map(|c| match c {
@@ -621,7 +621,7 @@ fn plain(text: &str, max: usize) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn safe_url(url: &str) -> String {
+pub fn safe_url(url: &str) -> String {
     url.chars()
         .filter(|c| !c.is_whitespace() && !matches!(c, '<' | '>' | '"'))
         .map(|c| match c {

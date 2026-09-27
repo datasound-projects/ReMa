@@ -46,15 +46,16 @@ pub struct CalendarPolicy {
 
 pub fn calendar_source(provider: ProviderId) -> UpdateSource {
     match provider {
-        ProviderId::Google => UpdateSource::GoogleCalendar,
         ProviderId::Microsoft => UpdateSource::OutlookCalendar,
+        // Only Google and Microsoft provide calendars.
+        _ => UpdateSource::GoogleCalendar,
     }
 }
 
 pub fn calendar_name(provider: ProviderId) -> &'static str {
     match provider {
-        ProviderId::Google => "Google Calendar",
         ProviderId::Microsoft => "Outlook Calendar",
+        _ => "Google Calendar",
     }
 }
 

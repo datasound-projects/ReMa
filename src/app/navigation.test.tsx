@@ -9,7 +9,7 @@ import { FOOTER_NAV, MAIN_NAV } from './pages';
 import { SettingsPage } from '../pages/SettingsPage';
 
 describe('navigation', () => {
-  it('lists Portfolio Studio under Profile and Applications under Portfolio Studio', () => {
+  it('lists the pages in the product order, Network Connect after Applications', () => {
     expect(MAIN_NAV.map((i) => i.label)).toEqual([
       'Chat',
       'Agents',
@@ -17,8 +17,17 @@ describe('navigation', () => {
       'Profile',
       'Portfolio Studio',
       'Applications',
+      'Network Connect',
     ]);
-    expect(MAIN_NAV.map((i) => i.id)).toEqual(['chat', 'agents', 'tasks', 'profile', 'portfolio', 'applications']);
+    expect(MAIN_NAV.map((i) => i.id)).toEqual([
+      'chat',
+      'agents',
+      'tasks',
+      'profile',
+      'portfolio',
+      'applications',
+      'network',
+    ]);
     expect(FOOTER_NAV.map((i) => i.label)).toEqual(['Settings']);
   });
 

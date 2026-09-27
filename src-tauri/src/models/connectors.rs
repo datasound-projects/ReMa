@@ -12,20 +12,41 @@ use super::text_enum;
 pub enum ProviderId {
     Google,
     Microsoft,
+    Linkedin,
+    Xing,
 }
 
 text_enum!(ProviderId {
     Google => "google",
     Microsoft => "microsoft",
+    Linkedin => "linkedin",
+    Xing => "xing",
 });
 
 impl ProviderId {
-    pub const ALL: [ProviderId; 2] = [ProviderId::Google, ProviderId::Microsoft];
+    pub const ALL: [ProviderId; 4] = [
+        ProviderId::Google,
+        ProviderId::Microsoft,
+        ProviderId::Linkedin,
+        ProviderId::Xing,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
             Self::Google => "Google",
             Self::Microsoft => "Microsoft",
+            Self::Linkedin => "LinkedIn",
+            Self::Xing => "XING",
+        }
+    }
+
+    /// Its index in per-provider arrays.
+    pub fn index(self) -> usize {
+        match self {
+            Self::Google => 0,
+            Self::Microsoft => 1,
+            Self::Linkedin => 2,
+            Self::Xing => 3,
         }
     }
 }
@@ -38,6 +59,8 @@ pub enum ConnectorId {
     GoogleCalendar,
     OutlookMail,
     OutlookCalendar,
+    Linkedin,
+    Xing,
 }
 
 text_enum!(ConnectorId {
@@ -45,20 +68,26 @@ text_enum!(ConnectorId {
     GoogleCalendar => "google_calendar",
     OutlookMail => "outlook_mail",
     OutlookCalendar => "outlook_calendar",
+    Linkedin => "linkedin",
+    Xing => "xing",
 });
 
 impl ConnectorId {
-    pub const ALL: [ConnectorId; 4] = [
+    pub const ALL: [ConnectorId; 6] = [
         ConnectorId::Gmail,
         ConnectorId::GoogleCalendar,
         ConnectorId::OutlookMail,
         ConnectorId::OutlookCalendar,
+        ConnectorId::Linkedin,
+        ConnectorId::Xing,
     ];
 
     pub fn provider(self) -> ProviderId {
         match self {
             Self::Gmail | Self::GoogleCalendar => ProviderId::Google,
             Self::OutlookMail | Self::OutlookCalendar => ProviderId::Microsoft,
+            Self::Linkedin => ProviderId::Linkedin,
+            Self::Xing => ProviderId::Xing,
         }
     }
 
@@ -66,6 +95,7 @@ impl ConnectorId {
         match self {
             Self::Gmail | Self::OutlookMail => ConnectorKind::Mail,
             Self::GoogleCalendar | Self::OutlookCalendar => ConnectorKind::Calendar,
+            Self::Linkedin | Self::Xing => ConnectorKind::Network,
         }
     }
 
@@ -75,6 +105,8 @@ impl ConnectorId {
             Self::GoogleCalendar => "Google Calendar",
             Self::OutlookMail => "Outlook Mail",
             Self::OutlookCalendar => "Outlook Calendar",
+            Self::Linkedin => "LinkedIn",
+            Self::Xing => "XING",
         }
     }
 
@@ -85,6 +117,13 @@ impl ConnectorId {
                 "Check availability and manage confirmed interviews."
             }
             Self::OutlookMail => "Read job-related Outlook emails and track application updates.",
+            Self::Linkedin => {
+                "Connect your professional identity and the network capabilities LinkedIn grants \
+                 ReMa."
+            }
+            Self::Xing => {
+                "Connect your XING identity and the professional capabilities XING grants ReMa."
+            }
         }
     }
 
@@ -97,16 +136,23 @@ impl ConnectorId {
                 Capability::CalendarWrite,
                 Capability::FreeBusy,
             ],
+            ConnectorKind::Network => &[
+                Capability::NetworkIdentity,
+                Capability::NetworkProfile,
+                Capability::NetworkConnections,
+            ],
         }
     }
 
-    /// The mail or calendar connector of a provider.
+    /// The mail or calendar connector of a provider (Google or Microsoft).
     pub fn of(provider: ProviderId, kind: ConnectorKind) -> Self {
         match (provider, kind) {
-            (ProviderId::Google, ConnectorKind::Mail) => Self::Gmail,
             (ProviderId::Google, ConnectorKind::Calendar) => Self::GoogleCalendar,
-            (ProviderId::Microsoft, ConnectorKind::Mail) => Self::OutlookMail,
+            (ProviderId::Google, _) => Self::Gmail,
             (ProviderId::Microsoft, ConnectorKind::Calendar) => Self::OutlookCalendar,
+            (ProviderId::Microsoft, _) => Self::OutlookMail,
+            (ProviderId::Linkedin, _) => Self::Linkedin,
+            (ProviderId::Xing, _) => Self::Xing,
         }
     }
 }
@@ -116,6 +162,8 @@ impl ConnectorId {
 pub enum ConnectorKind {
     Mail,
     Calendar,
+    /// A professional network (LinkedIn, XING).
+    Network,
 }
 
 /// A permission a connector needs, mapped to provider scopes in Rust.
@@ -126,6 +174,12 @@ pub enum Capability {
     CalendarRead,
     CalendarWrite,
     FreeBusy,
+    /// Sign-in identity (name, account id, email).
+    NetworkIdentity,
+    /// The member's own profile.
+    NetworkProfile,
+    /// The member's first-degree connection list (partner-approved only).
+    NetworkConnections,
 }
 
 impl Capability {
@@ -135,6 +189,9 @@ impl Capability {
             Self::CalendarRead => "Calendar — Read events",
             Self::CalendarWrite => "Calendar — Create and update events",
             Self::FreeBusy => "Calendar — Availability",
+            Self::NetworkIdentity => "Identity",
+            Self::NetworkProfile => "Your profile",
+            Self::NetworkConnections => "Connection list (first-degree)",
         }
     }
 }

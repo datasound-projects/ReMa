@@ -484,14 +484,9 @@ pub fn research_brief(plan: &SearchPlan, sites: &[String]) -> String {
     lines.join("\n")
 }
 
-/// Findings the model listed, checked against what the search engine
-/// reported, plus the pages it reported.
-pub fn findings(
-    text: &str,
-    events: &[WebEvent],
-    company_domains: &[String],
-    lists_sources: bool,
-) -> Vec<Finding> {
+/// The pages the search engine itself reported (results, pages it opened,
+/// citations): canonical address → title.
+pub fn reported_pages(events: &[WebEvent]) -> HashMap<String, String> {
     let mut reported: HashMap<String, String> = HashMap::new();
     for event in events {
         match event {
@@ -523,6 +518,18 @@ pub fn findings(
             _ => {}
         }
     }
+    reported
+}
+
+/// Findings the model listed, checked against what the search engine
+/// reported, plus the pages it reported.
+pub fn findings(
+    text: &str,
+    events: &[WebEvent],
+    company_domains: &[String],
+    lists_sources: bool,
+) -> Vec<Finding> {
+    let reported = reported_pages(events);
     let listed: Vec<Value> = crate::jobs::extract::json_object(text)
         .ok()
         .and_then(|json| serde_json::from_str::<Value>(json).ok())
@@ -557,6 +564,98 @@ pub fn findings(
         }
     }
     out
+}
+
+/// What a structured search step returned: the model's reply (JSON it was
+/// asked for) and what the search engine itself reported. Nothing in the
+/// reply counts until it is matched against `reported`.
+#[derive(Debug, Clone)]
+pub struct Structured {
+    pub engine: String,
+    pub text: String,
+    /// Canonical address → title of every page the engine reported.
+    pub reported: HashMap<String, String>,
+    pub searches: usize,
+    /// The engine reports its results; Codex reports only the pages its
+    /// model opened, so what it lists stays unchecked.
+    pub lists_sources: bool,
+}
+
+impl Structured {
+    /// Whether the engine reported this page.
+    pub fn reported(&self, url: &str) -> bool {
+        normalize::canonical_url(url).is_some_and(|key| self.reported.contains_key(&key))
+    }
+}
+
+/// Runs the provider's own web search with a caller's instructions and
+/// brief (Network Connect's company and people searches): required, on
+/// the given sites and place, retried once when no search ran.
+#[allow(clippy::too_many_arguments)]
+pub async fn structured(
+    state: &AppState,
+    endpoint: &Endpoint,
+    model_id: &str,
+    system: &(dyn Fn(bool) -> String + Sync),
+    brief: &str,
+    hints: &Hints,
+    progress: &dyn Progress,
+    cancel: &CancellationToken,
+) -> Result<Structured, String> {
+    let engine = engine_name(endpoint);
+    for attempt in 0..2 {
+        let collector = Arc::new(Collector {
+            forward: progress.web(),
+            events: Mutex::default(),
+        });
+        let request = ChatRequest {
+            system: Some(system(attempt > 0)),
+            turns: vec![Turn {
+                role: MessageRole::User,
+                content: brief.to_string(),
+            }],
+            max_output_tokens: Some(8_000),
+            web: Some(WebSearch {
+                observer: Some(collector.clone()),
+                required: true,
+                allowed_domains: hints.allowed_domains.clone(),
+                location: hints.location.clone(),
+            }),
+            ..ChatRequest::default()
+        };
+        let text = match call(state, endpoint, model_id, &request, cancel).await {
+            Ok(text) => text,
+            Err(Stop::Cancelled) => return Err("the search was stopped".into()),
+            Err(Stop::Failed(reason)) => return Err(format!("{engine}: {reason}")),
+        };
+        let events = collector.events.lock().unwrap().clone();
+        if let Some(reason) = unavailable(&events) {
+            return Err(format!("{engine}: {reason}"));
+        }
+        let (searches, error) = performed(&events, false);
+        if searches == 0 {
+            if let Some(error) = error {
+                let error = error.trim_end_matches('.');
+                return Err(format!("{engine}: the search failed ({error})"));
+            }
+            if attempt == 0 {
+                progress.status("Searching again…");
+                continue;
+            }
+            return Err(format!(
+                "{engine}: the model answered without searching the web, so none of its answer \
+                 could be verified"
+            ));
+        }
+        return Ok(Structured {
+            engine: engine.to_string(),
+            text,
+            reported: reported_pages(&events),
+            searches,
+            lists_sources: endpoint.connection != ConnectionMethod::ChatgptAccount,
+        });
+    }
+    Err(format!("{engine}: no search ran"))
 }
 
 /// Runs the provider's own web search for a research request.

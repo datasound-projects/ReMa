@@ -21,6 +21,7 @@ use crate::models::{
     provider::ProvidersChanged,
     task::{TaskRunChanged, TasksChanged},
 };
+use crate::network::model::NetworkProgress;
 
 pub trait EventSink: Send + Sync {
     fn chat(&self, event: ChatEvent);
@@ -40,6 +41,8 @@ pub trait EventSink: Send + Sync {
     fn portfolio_changed(&self);
     fn agents_changed(&self);
     fn mcp_changed(&self);
+    /// A Network Connect request made progress (a status line).
+    fn network_progress(&self, run_id: &str, text: &str);
 }
 
 pub struct TauriEvents(pub AppHandle);
@@ -112,6 +115,14 @@ impl EventSink for TauriEvents {
     fn mcp_changed(&self) {
         let _ = McpChanged.emit(&self.0);
     }
+
+    fn network_progress(&self, run_id: &str, text: &str) {
+        let _ = NetworkProgress {
+            run_id: run_id.to_string(),
+            text: text.to_string(),
+        }
+        .emit(&self.0);
+    }
 }
 
 /// Collects events for assertions in tests.
@@ -134,6 +145,8 @@ pub struct RecordingEvents {
     pub portfolio: Mutex<usize>,
     pub agents: Mutex<usize>,
     pub mcp: Mutex<usize>,
+    /// Network Connect status lines as (run id, text).
+    pub network: Mutex<Vec<(String, String)>>,
 }
 
 impl EventSink for RecordingEvents {
@@ -198,5 +211,12 @@ impl EventSink for RecordingEvents {
 
     fn mcp_changed(&self) {
         *self.mcp.lock().unwrap() += 1;
+    }
+
+    fn network_progress(&self, run_id: &str, text: &str) {
+        self.network
+            .lock()
+            .unwrap()
+            .push((run_id.to_string(), text.to_string()));
     }
 }

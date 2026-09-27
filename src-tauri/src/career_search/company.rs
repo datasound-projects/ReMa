@@ -185,6 +185,8 @@ pub struct Company {
     pub boards: Vec<Board>,
     /// Its Wikipedia article: (language, title).
     pub wikipedia: Option<(String, String)>,
+    /// Its LinkedIn company page, as Wikidata records it (P4264).
+    pub linkedin_url: Option<String>,
 }
 
 /// "careers.example.co.uk" → "example.co.uk"; "www.bitpanda.com" → "bitpanda.com".
@@ -343,6 +345,14 @@ pub async fn wikidata(ctx: &Ctx<'_>, name: &str) -> Result<Option<Company>, Tool
         });
         company.website = Some(site);
     }
+    company.linkedin_url = current(entity, "P4264")
+        .into_iter()
+        .find_map(|c| text(c, "/mainsnak/datavalue/value"))
+        .filter(|id| {
+            id.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        })
+        .map(|id| format!("https://www.linkedin.com/company/{id}"));
     if let Some(amount) = current(entity, "P1128")
         .into_iter()
         .find_map(|c| text(c, "/mainsnak/datavalue/value/amount"))
@@ -547,7 +557,9 @@ fn is_careers_link(url: &str, label: &str) -> bool {
 /// gives the description, the team links and the careers links.
 const PAGE_TTL: Duration = Duration::from_secs(300);
 
-async fn page(ctx: &Ctx<'_>, url: &str) -> Result<(String, Arc<String>), FetchError> {
+/// A public page read once like a browser would (robots.txt honored),
+/// reused for a few minutes.
+pub async fn page(ctx: &Ctx<'_>, url: &str) -> Result<(String, Arc<String>), FetchError> {
     if !ctx.refresh {
         if let Some(read) = ctx.feeds.recent_page(url, PAGE_TTL) {
             return Ok(read);

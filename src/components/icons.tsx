@@ -622,3 +622,15 @@ export function AlertIcon(props: IconProps) {
     </Icon>
   );
 }
+
+/** People and the connections between them (Network Connect). */
+export function NetworkIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <circle cx="10" cy="4.8" r="2" />
+      <circle cx="4.6" cy="14.6" r="2" />
+      <circle cx="15.4" cy="14.6" r="2" />
+      <path d="M9 6.6 5.6 12.8M11 6.6l3.4 6.2M6.6 14.6h6.8" />
+    </Icon>
+  );
+}

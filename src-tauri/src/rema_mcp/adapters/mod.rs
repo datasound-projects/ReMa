@@ -54,6 +54,8 @@ pub struct Apis {
     /// Hacker News search (Algolia).
     pub hn: String,
     pub wikidata: String,
+    /// The Wikidata Query Service (SPARQL endpoint).
+    pub wikidata_query: String,
     /// `None`: `https://{lang}.wikipedia.org`.
     pub wikipedia: Option<String>,
 }
@@ -74,6 +76,7 @@ impl Apis {
             remotive: "https://remotive.com".into(),
             hn: "https://hn.algolia.com".into(),
             wikidata: "https://www.wikidata.org".into(),
+            wikidata_query: "https://query.wikidata.org/sparql".into(),
             wikipedia: None,
         }
     }
@@ -95,6 +98,7 @@ impl Apis {
             remotive: format!("{base}/remotive"),
             hn: format!("{base}/hn"),
             wikidata: format!("{base}/wikidata"),
+            wikidata_query: format!("{base}/wikidata-query/sparql"),
             wikipedia: Some(format!("{base}/wikipedia")),
         }
     }

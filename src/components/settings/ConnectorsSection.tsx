@@ -25,6 +25,7 @@ import { ConnectorLogo } from './ConnectorIcons';
 
 const MICROSOFT_APPS_URL = 'https://account.microsoft.com/privacy/app-access';
 const GOOGLE_APPS_URL = 'https://myaccount.google.com/connections';
+const LINKEDIN_APPS_URL = 'https://www.linkedin.com/psettings/permitted-services';
 
 /** Whether "Job Mail & Interview Sync" is set up and turned on. */
 function useMailTracking(): boolean | null {
@@ -53,8 +54,9 @@ export function ConnectorsSection({ focus = false }: { focus?: boolean }) {
             Connectors
           </h2>
           <p className="section__description">
-            Connect your mailbox and calendar so ReMa can track job applications and interviews. You sign in with Google
-            or Microsoft in your browser; ReMa never sees your password, and its access stays in your system keychain.
+            Connect your mailbox and calendar so ReMa can track job applications and interviews, and your professional
+            network for Network Connect. You sign in with the provider in your browser; ReMa never sees your password,
+            and its access stays in your system keychain.
           </p>
         </div>
       </div>
@@ -66,9 +68,19 @@ export function ConnectorsSection({ focus = false }: { focus?: boolean }) {
       {overview && (
         <>
           <div className="connector-grid">
-            {overview.connectors.map((connector) => (
-              <ConnectorCard key={connector.id} connector={connector} onOpen={() => setOpenId(connector.id)} />
-            ))}
+            {overview.connectors
+              .filter((c) => c.kind !== 'network')
+              .map((connector) => (
+                <ConnectorCard key={connector.id} connector={connector} onOpen={() => setOpenId(connector.id)} />
+              ))}
+          </div>
+          <h3 className="connectors__group">Professional networks</h3>
+          <div className="connector-grid">
+            {overview.connectors
+              .filter((c) => c.kind === 'network')
+              .map((connector) => (
+                <ConnectorCard key={connector.id} connector={connector} onOpen={() => setOpenId(connector.id)} />
+              ))}
           </div>
           <MailTrackingNote />
           <BackgroundOptions overview={overview} />
@@ -244,6 +256,7 @@ function ConnectorDetail({
   const siblings = overview.connectors.filter((o) => o.provider === c.provider && o.id !== c.id && added(o));
   const lastOfAccount = siblings.length === 0;
   const microsoft = c.provider === 'microsoft';
+  const linkedin = c.provider === 'linkedin';
 
   if (confirming) {
     return (
@@ -272,13 +285,17 @@ function ConnectorDetail({
         }
       >
         <p className="dialog__text">
-          ReMa stops syncing {c.name}. Your tracked applications and their history stay in ReMa.
+          {c.kind === 'network'
+            ? `Network Connect stops using ${c.name}. Company, job and public people research keep working.`
+            : `ReMa stops syncing ${c.name}. Your tracked applications and their history stay in ReMa.`}
         </p>
         {lastOfAccount ? (
           <p className="dialog__text">
             {microsoft
               ? 'ReMa also deletes its Microsoft sign-in from this computer. To remove ReMa from your Microsoft account entirely, open your account’s app permissions.'
-              : 'ReMa also revokes its access at Google and deletes the sign-in from this computer.'}
+              : linkedin
+                ? 'ReMa also deletes its LinkedIn sign-in from this computer and forgets anything LinkedIn returned this session. To remove ReMa from your LinkedIn account entirely, open LinkedIn’s permitted services.'
+                : 'ReMa also revokes its access at Google and deletes the sign-in from this computer.'}
           </p>
         ) : (
           <p className="dialog__text">
@@ -328,9 +345,19 @@ function ConnectorDetail({
               ))}
             </ul>
           </dd>
-          <dt>Last sync</dt>
-          <dd>{c.lastSyncAt !== null ? formatDateTime(c.lastSyncAt) : 'Not yet'}</dd>
+          {c.kind !== 'network' && (
+            <>
+              <dt>Last sync</dt>
+              <dd>{c.lastSyncAt !== null ? formatDateTime(c.lastSyncAt) : 'Not yet'}</dd>
+            </>
+          )}
         </dl>
+        {c.kind === 'network' && (
+          <p className="form__hint">
+            Signing in gives ReMa your identity only. Anything more (such as your first-degree connection list) exists
+            only if LinkedIn approved it for ReMa; Network Connect shows exactly what is available.
+          </p>
+        )}
 
         {c.kind === 'mail' && <MailTrackingLine />}
 
@@ -375,13 +402,21 @@ function ConnectorDetail({
           </div>
         )}
         <p className="form__hint">
-          {microsoft ? 'Manage apps with access to your Microsoft account at ' : 'Review apps with access to your Google Account at '}
+          {microsoft
+            ? 'Manage apps with access to your Microsoft account at '
+            : linkedin
+              ? 'Manage apps with access to your LinkedIn account at '
+              : 'Review apps with access to your Google Account at '}
           <button
             type="button"
             className="link-button"
-            onClick={() => void openExternalUrl(microsoft ? MICROSOFT_APPS_URL : GOOGLE_APPS_URL).catch(() => {})}
+            onClick={() =>
+              void openExternalUrl(microsoft ? MICROSOFT_APPS_URL : linkedin ? LINKEDIN_APPS_URL : GOOGLE_APPS_URL).catch(
+                () => {},
+              )
+            }
           >
-            {microsoft ? 'account.microsoft.com' : 'myaccount.google.com'}
+            {microsoft ? 'account.microsoft.com' : linkedin ? 'linkedin.com' : 'myaccount.google.com'}
           </button>
           .
         </p>
