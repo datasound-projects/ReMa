@@ -32,7 +32,7 @@ pub mod render;
 pub mod service;
 pub mod store;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 pub mod text;
 pub mod tools;
 

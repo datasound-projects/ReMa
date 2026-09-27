@@ -42,7 +42,7 @@ fn param(target: &str, name: &str) -> String {
 
 /// A product site, Wikidata, the query service, two company sites and a
 /// job board with contract listings, on one local server.
-async fn sources() -> MockServer {
+pub(crate) async fn sources() -> MockServer {
     let now = now_ms() / 1000;
     let base_cell: Arc<std::sync::OnceLock<String>> = Arc::default();
     let base_for = base_cell.clone();
@@ -196,7 +196,7 @@ fn state_for(site: &MockServer) -> AppState {
     state
 }
 
-fn offer_content() -> OfferContent {
+pub(crate) fn offer_content() -> OfferContent {
     let mut c = OfferContent::empty("Support Workspace", OfferKind::DigitalProduct);
     c.summary = Claim::user("Answers support questions from a knowledge base.");
     c.problem = Claim::user("Support teams answer repetitive tickets by hand.");
@@ -206,7 +206,7 @@ fn offer_content() -> OfferContent {
     c
 }
 
-fn reviewed(state: &AppState, content: OfferContent, key: &str) -> Offer {
+pub(crate) fn reviewed(state: &AppState, content: OfferContent, key: &str) -> Offer {
     let offer = offers::create(state, content, Some(key)).unwrap();
     offers::review(state, &offer.id, offer.revision).unwrap()
 }

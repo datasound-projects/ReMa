@@ -209,21 +209,73 @@ pub fn reviewed(
     ))
 }
 
+/// Where a lowercased text names an offer, as whole words ("support
+/// workspace" in "… for my support workspace v2", not in "support
+/// workspaces"): the end of the first mention. Names under three
+/// characters never count.
+fn mention_end(lower: &str, name: &str) -> Option<usize> {
+    let needle = name.trim().to_lowercase();
+    if needle.chars().count() < 3 {
+        return None;
+    }
+    let boundary = |c: Option<char>| c.is_none_or(|c| !c.is_alphanumeric());
+    lower.match_indices(&needle).find_map(|(i, _)| {
+        let end = i + needle.len();
+        (boundary(lower[..i].chars().next_back()) && boundary(lower[end..].chars().next()))
+            .then_some(end)
+    })
+}
+
+/// Whether a text names an offer (whole words, ignoring case).
+pub fn mentions(text: &str, name: &str) -> bool {
+    mention_end(&text.to_lowercase(), name).is_some()
+}
+
+/// The offer a lowercased text names: the longest name wins ("Support
+/// Workspace Pro" over "Support Workspace"), then a usable offer over an
+/// archived or unreviewed one with the same name, then the first listed.
+fn named<'a>(offers: &'a [Offer], lower: &str) -> Option<&'a Offer> {
+    let key = |o: &Offer| {
+        (
+            o.name.trim().len(),
+            !o.archived && o.current_version.is_some(),
+        )
+    };
+    offers
+        .iter()
+        .filter(|o| mention_end(lower, &o.name).is_some())
+        .fold(None, |best: Option<&Offer>, o| match best {
+            Some(b) if key(b) >= key(o) => Some(b),
+            _ => Some(o),
+        })
+}
+
 /// Which offer "my product" means (B5): the one the text names, the only
-/// reviewed one, or a question.
+/// reviewed one, or a question. A named offer that is archived or not
+/// reviewed is never swapped for another one.
 pub fn pick<'a>(offers: &'a [Offer], text: &str) -> Result<&'a Offer, String> {
+    match named(offers, &text.to_lowercase()) {
+        Some(o) if o.archived => {
+            return Err(format!(
+                "The offer \"{}\" is archived. Unarchive it in Business → Business Profile to \
+                 use it.",
+                o.name
+            ))
+        }
+        Some(o) if o.current_version.is_none() => {
+            return Err(format!(
+                "The offer \"{}\" has not been reviewed yet. Review it in Business → Business \
+                 Profile first.",
+                o.name
+            ))
+        }
+        Some(o) => return Ok(o),
+        None => {}
+    }
     let usable: Vec<&Offer> = offers
         .iter()
         .filter(|o| !o.archived && o.current_version.is_some())
         .collect();
-    let lower = text.to_lowercase();
-    let named: Vec<&&Offer> = usable
-        .iter()
-        .filter(|o| o.name.len() >= 3 && lower.contains(&o.name.to_lowercase()))
-        .collect();
-    if named.len() == 1 {
-        return Ok(*named[0]);
-    }
     match usable.len() {
         0 => Err(
             "You have no reviewed offer yet. Describe your product or service in Business → \
@@ -247,11 +299,7 @@ pub fn pick<'a>(offers: &'a [Offer], text: &str) -> Result<&'a Offer, String> {
 /// silently using another one; "v2" after the name pins that version.
 pub fn for_task(offers: &[Offer], prompt: &str) -> Result<(String, Option<u32>), String> {
     let lower = prompt.to_lowercase();
-    let named = offers
-        .iter()
-        .filter(|o| o.name.len() >= 3 && lower.contains(&o.name.to_lowercase()))
-        .max_by_key(|o| o.name.len());
-    let offer = match named {
+    let offer = match named(offers, &lower) {
         Some(o) if o.archived => {
             return Err(format!(
                 "The offer \"{}\" is archived, so this task does not run. Unarchive it or \
@@ -269,9 +317,8 @@ pub fn for_task(offers: &[Offer], prompt: &str) -> Result<(String, Option<u32>),
         Some(o) => o,
         None => pick(offers, prompt)?,
     };
-    let after = lower
-        .find(&offer.name.to_lowercase())
-        .map(|i| &lower[i + offer.name.len()..])
+    let after = mention_end(&lower, &offer.name)
+        .map(|end| &lower[end..])
         .unwrap_or("");
     let version = after
         .trim_start()
@@ -687,5 +734,78 @@ mod tests {
         );
         assert_eq!(pick(&offers[..1], "my product").unwrap().id, "a");
         assert!(pick(&offers[2..], "my product").is_err());
+    }
+
+    #[test]
+    fn a_named_offer_is_the_one_used() {
+        let make = |id: &str, name: &str, reviewed: bool, archived: bool| Offer {
+            id: id.into(),
+            name: name.into(),
+            kind: OfferKind::Service,
+            current_version: reviewed.then_some(2),
+            draft: None,
+            reviewed: None,
+            reviewed_at: None,
+            archived,
+            created_at: 0,
+            updated_at: 0,
+            revision: 0,
+        };
+        let offers = vec![
+            make("a", "Support Workspace", true, false),
+            make("b", "Support Workspace Pro", true, false),
+            make("c", "Legacy Helpdesk", true, true),
+            make("d", "Draft only", false, false),
+        ];
+        // Whole words, any case; the longest name wins.
+        assert!(mentions(
+            "Find buyers for my support workspace.",
+            "Support Workspace"
+        ));
+        assert!(!mentions(
+            "Find buyers for Support Workspaces",
+            "Support Workspace"
+        ));
+        assert!(!mentions("Find buyers", "AI"));
+        assert_eq!(
+            pick(&offers, "Clients for Support Workspace Pro")
+                .unwrap()
+                .id,
+            "b"
+        );
+        assert_eq!(
+            pick(&offers, "Clients for support workspace").unwrap().id,
+            "a"
+        );
+        // A named offer that cannot be used is never swapped for another.
+        let archived = pick(&offers, "Clients for Legacy Helpdesk").unwrap_err();
+        assert!(
+            archived.contains("\"Legacy Helpdesk\" is archived"),
+            "{archived}"
+        );
+        let draft = pick(&offers, "Clients for Draft only").unwrap_err();
+        assert!(draft.contains("not been reviewed"), "{draft}");
+        assert!(
+            for_task(&offers, "Clients for Legacy Helpdesk every Monday")
+                .unwrap_err()
+                .contains("this task does not run")
+        );
+        // "v2" after the name pins that reviewed version; later ones do not exist.
+        assert_eq!(
+            for_task(&offers, "Find clients for SUPPORT WORKSPACE v2 weekly").unwrap(),
+            ("a".to_string(), Some(2))
+        );
+        assert!(for_task(&offers, "Find clients for Support Workspace v3")
+            .unwrap_err()
+            .contains("no reviewed version 3"));
+        // The same name archived and in use: the usable one.
+        let renamed = vec![
+            make("old", "Support Workspace", true, true),
+            make("new", "Support Workspace", true, false),
+        ];
+        assert_eq!(
+            pick(&renamed, "Clients for Support Workspace").unwrap().id,
+            "new"
+        );
     }
 }

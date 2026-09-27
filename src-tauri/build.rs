@@ -28,6 +28,8 @@ fn main() {
         "REMA_GOOGLE_CLIENT_SECRET",
         "REMA_MICROSOFT_CLIENT_ID",
         "REMA_MICROSOFT_TENANT",
+        "REMA_LINKEDIN_CLIENT_ID",
+        "REMA_LINKEDIN_APPROVED_SCOPES",
     ] {
         println!("cargo:rerun-if-env-changed={var}");
     }

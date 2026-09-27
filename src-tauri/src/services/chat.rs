@@ -1324,7 +1324,7 @@ async fn generate(
             .unwrap_or_default();
         // The user's own offers, contract work and pipeline: Business,
         // before Network Connect and job search (B26).
-        let business = crate::business::tools::detect(&network_text)
+        let business = crate::business::service::intent(state, &network_text)
             .filter(|_| !connector_tools::wants_private_data(&network_text));
         if let Some(
             intent @ (crate::business::tools::Intent::Clients
@@ -2808,6 +2808,44 @@ mod tests {
             }
             // The page shows the same result this session.
             assert!(state.network.last_result().is_some());
+        }
+
+        #[tokio::test]
+        async fn a_request_naming_the_users_offer_is_business_research() {
+            let site = crate::business::tests::sources().await;
+            let (mut state, _, llm) =
+                setup(FakeLanguageModel::replying(&["Start with Huber."])).await;
+            use_sources(&mut state, &site.base_url);
+            crate::business::tests::reviewed(
+                &state,
+                crate::business::tests::offer_content(),
+                "offer",
+            );
+            let sent = send_message(
+                &state,
+                send(
+                    None,
+                    "Find Austrian manufacturing companies for my Support Workspace.",
+                ),
+            )
+            .await
+            .unwrap();
+            let done = finished(&state, sent.assistant_message.id).await;
+            assert_eq!(done.status, MessageStatus::Complete, "{:?}", done.error);
+            let content = &done.content;
+            assert!(
+                content.starts_with("**Find Clients** — Offer: Support Workspace v1"),
+                "{content}"
+            );
+            assert!(content.contains("Maschinenbau Huber"), "{content}");
+            assert!(content.trim_end().ends_with("Start with Huber."));
+            assert!(!content.contains("evil.example"));
+            // Not company and people research for a job search.
+            assert!(state.network.last_result().is_none());
+            let requests = llm.requests.lock().unwrap().clone();
+            let turn = &requests.last().unwrap().1.turns.last().unwrap().content;
+            assert!(turn.contains("<business_results>"), "{turn}");
+            assert!(!turn.contains("Ignore all previous instructions"));
         }
 
         #[tokio::test]

@@ -493,6 +493,7 @@ impl retrieval::Progress for ResearchStage {
 async fn business_task(
     state: &AppState,
     task: &TaskRow,
+    clients: bool,
     started_at: i64,
     recorder: &Arc<RunRecorder>,
     endpoint: &crate::llm::Endpoint,
@@ -502,7 +503,6 @@ async fn business_task(
     use crate::business::{
         model::{ClientCriteria, ClientSearchInput, ContractSearchInput, RunStatus},
         new_id, offers, render as business_render, service, store,
-        tools::{detect, Intent},
     };
     recorder.plan(&[
         ("research", "Research with ReMa Business"),
@@ -520,85 +520,82 @@ async fn business_task(
     });
     let model = Some((endpoint, task.model.model_id.as_str()));
     let task_failure = |message: String| Failure::new(RunErrorCategory::Task, message);
-    let (table, context, status, sources) = match detect(&task.prompt) {
-        Some(Intent::Clients) => {
-            let all = state
-                .db
-                .call(|c| store::offers(c))
-                .map_err(|e| Failure::from_error(&e, RunErrorCategory::Task))?;
-            let (offer_id, version) = offers::for_task(&all, &task.prompt).map_err(task_failure)?;
-            recorder.running("research", "Finding clients");
-            let results = service::find_clients(
-                state,
-                ClientSearchInput {
-                    run_id: new_id("run"),
-                    offer_id,
-                    offer_version: version,
-                    query: task.prompt.clone(),
-                    criteria: ClientCriteria::default(),
-                    find_people: false,
-                },
-                model,
-                &progress,
-                &cancel,
-            )
-            .await
+    let (table, context, status, sources) = if clients {
+        let all = state
+            .db
+            .call(|c| store::offers(c))
             .map_err(|e| Failure::from_error(&e, RunErrorCategory::Task))?;
-            recorder.done(
-                "research",
-                &format!(
-                    "Offer: {} v{} · {} · {} to verify",
-                    results.offer.name,
-                    results.offer.version,
-                    plural(
-                        results.confirmed.len(),
-                        "matching company",
-                        "matching companies"
-                    ),
-                    results.needs_verification.len()
+        let (offer_id, version) = offers::for_task(&all, &task.prompt).map_err(task_failure)?;
+        recorder.running("research", "Finding clients");
+        let results = service::find_clients(
+            state,
+            ClientSearchInput {
+                run_id: new_id("run"),
+                offer_id,
+                offer_version: version,
+                query: task.prompt.clone(),
+                criteria: ClientCriteria::default(),
+                find_people: false,
+            },
+            model,
+            &progress,
+            &cancel,
+        )
+        .await
+        .map_err(|e| Failure::from_error(&e, RunErrorCategory::Task))?;
+        recorder.done(
+            "research",
+            &format!(
+                "Offer: {} v{} · {} · {} to verify",
+                results.offer.name,
+                results.offer.version,
+                plural(
+                    results.confirmed.len(),
+                    "matching company",
+                    "matching companies"
                 ),
-            );
-            (
-                business_render::clients_markdown(&results),
-                business_render::clients_context(&results),
-                results.status,
-                results.sources.clone(),
-            )
-        }
-        _ => {
-            recorder.running("research", "Finding contract work");
-            let results = service::find_contracts(
-                state,
-                ContractSearchInput {
-                    run_id: new_id("run"),
-                    query: task.prompt.clone(),
-                    criteria: None,
-                },
-                model,
-                &progress,
-                &cancel,
-            )
-            .await
-            .map_err(|e| Failure::from_error(&e, RunErrorCategory::Task))?;
-            recorder.done(
-                "research",
-                &format!(
-                    "{} · {} to verify",
-                    plural(
-                        results.confirmed.len(),
-                        "confirmed listing",
-                        "confirmed listings"
-                    ),
-                    results.needs_verification.len()
+                results.needs_verification.len()
+            ),
+        );
+        (
+            business_render::clients_markdown(&results),
+            business_render::clients_context(&results),
+            results.status,
+            results.sources.clone(),
+        )
+    } else {
+        recorder.running("research", "Finding contract work");
+        let results = service::find_contracts(
+            state,
+            ContractSearchInput {
+                run_id: new_id("run"),
+                query: task.prompt.clone(),
+                criteria: None,
+            },
+            model,
+            &progress,
+            &cancel,
+        )
+        .await
+        .map_err(|e| Failure::from_error(&e, RunErrorCategory::Task))?;
+        recorder.done(
+            "research",
+            &format!(
+                "{} · {} to verify",
+                plural(
+                    results.confirmed.len(),
+                    "confirmed listing",
+                    "confirmed listings"
                 ),
-            );
-            (
-                business_render::contracts_markdown(&results),
-                business_render::contracts_context(&results),
-                results.status,
-                results.sources.clone(),
-            )
-        }
+                results.needs_verification.len()
+            ),
+        );
+        (
+            business_render::contracts_markdown(&results),
+            business_render::contracts_context(&results),
+            results.status,
+            results.sources.clone(),
+        )
     };
     recorder.update_context(|c| {
         for source in &sources {
@@ -697,10 +694,14 @@ async fn run_task(
         .map_err(model_access)?;
     let max_output_tokens =
         providers::max_output_tokens(state, &task.model).map_err(model_access)?;
+    let business = match task.kind {
+        TaskKind::Prompt => crate::business::service::intent(state, &task.prompt),
+        _ => None,
+    };
     match task.kind {
         TaskKind::Prompt
             if matches!(
-                crate::business::tools::detect(&task.prompt),
+                business,
                 Some(
                     crate::business::tools::Intent::Clients
                         | crate::business::tools::Intent::Contracts
@@ -712,6 +713,7 @@ async fn run_task(
             business_task(
                 state,
                 task,
+                business == Some(crate::business::tools::Intent::Clients),
                 started_at,
                 recorder,
                 &endpoint,
@@ -1455,6 +1457,58 @@ mod tests {
             .context
             .as_ref()
             .is_some_and(|c| c.search_scopes.iter().any(|s| s == "People")));
+    }
+
+    #[tokio::test]
+    async fn a_scheduled_client_search_runs_business_research_and_keeps_its_run() {
+        let site = crate::business::tests::sources().await;
+        let llm = Arc::new(FakeLanguageModel::replying(&["Start with Huber."]));
+        let (mut state, _) = testing::state(llm.clone());
+        state.rema_mcp = crate::rema_mcp::RemaMcp::with(
+            crate::rema_mcp::adapters::Apis::local(&site.base_url),
+            true,
+        );
+        providers::connect(&state, ProviderKind::Anthropic, "k")
+            .await
+            .unwrap();
+        crate::business::tests::reviewed(&state, crate::business::tests::offer_content(), "offer");
+        let mut input = every_4_hours(None);
+        input.name = "Austrian prospects".into();
+        input.prompt = "Find Austrian manufacturing companies for my Support Workspace".into();
+        let task = tasks::create(&state, input).await.unwrap();
+        let row = state.db.call(|c| repo::get(c, task.id)).unwrap();
+        let execution = run_once(
+            &state,
+            &row,
+            ExecutionTrigger::Manual,
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            execution.status,
+            ExecutionStatus::Succeeded,
+            "{execution:?}"
+        );
+        let result = execution.result.clone().unwrap();
+        assert!(
+            result.starts_with("**Find Clients** — Offer: Support Workspace v1"),
+            "{result}"
+        );
+        assert!(result.contains("Maschinenbau Huber"), "{result}");
+        assert!(result.trim_end().ends_with("Start with Huber."), "{result}");
+        // The page's instruction never reaches the run or the model.
+        assert!(!result.contains("evil.example"));
+        let run = runs::get(&state, execution.id).unwrap();
+        let stages: Vec<&str> = run.progress.iter().map(|e| e.stage.as_str()).collect();
+        assert!(
+            stages.contains(&"research") && stages.contains(&"answer"),
+            "{stages:?}"
+        );
+        // Research is not a contact: nothing entered the Pipeline.
+        let pipeline = crate::business::pipeline::pipeline(&state).unwrap();
+        assert!(pipeline.opportunities.is_empty());
     }
 
     #[tokio::test]

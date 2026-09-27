@@ -225,6 +225,16 @@ pub fn offers(c: &Connection) -> AppResult<Vec<Offer>> {
     rows.into_iter().map(|r| offer_from(c, r)).collect()
 }
 
+/// Every offer's name (archived ones too), for recognizing requests that
+/// name the user's own offer.
+pub fn offer_names(c: &Connection) -> AppResult<Vec<String>> {
+    let mut stmt = c.prepare("SELECT name FROM business_offers")?;
+    let names = stmt
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(names)
+}
+
 /// Saves the draft under review (the reviewed versions do not change).
 pub fn save_offer_draft(
     c: &Connection,

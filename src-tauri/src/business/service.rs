@@ -19,6 +19,7 @@ use super::{
     },
     offers,
     store::{self, RunRecord},
+    tools::{self, Intent},
 };
 use crate::{
     error::{AppError, AppResult},
@@ -41,6 +42,20 @@ impl Progress for PageProgress {
     fn status(&self, text: &str) {
         self.events.business_progress(&self.run_id, text);
     }
+}
+
+/// What a Chat message or scheduled task asks of Business, recognizing
+/// the user's own offers by name (B26). Offers that cannot be read leave
+/// only the generic phrases ("my product", "my service", …).
+pub fn intent(state: &AppState, text: &str) -> Option<Intent> {
+    let names = state
+        .db
+        .call(|c| store::offer_names(c))
+        .unwrap_or_else(|error| {
+            eprintln!("business: could not read offer names: {error}");
+            Vec::new()
+        });
+    tools::detect_for(text, &names)
 }
 
 /// The default model, when one is set up (research works without it).

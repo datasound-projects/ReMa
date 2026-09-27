@@ -64,8 +64,16 @@ fn re(cell: &'static OnceLock<Regex>, pattern: &str) -> &'static Regex {
 /// job search: a request about the user's own offer or contract work is
 /// commercial, not employment).
 pub fn detect(text: &str) -> Option<Intent> {
+    detect_for(text, &[])
+}
+
+/// [`detect`], also recognizing the user's own offers by their names
+/// ("… companies for my Support Workspace"; archived and unreviewed ones
+/// too, so the research can say why it cannot use them).
+pub fn detect_for(text: &str, offer_names: &[String]) -> Option<Intent> {
     static ASK: OnceLock<Regex> = OnceLock::new();
     static OFFER: OnceLock<Regex> = OnceLock::new();
+    static HIRING: OnceLock<Regex> = OnceLock::new();
     static BUYERS: OnceLock<Regex> = OnceLock::new();
     static CONTRACTS: OnceLock<Regex> = OnceLock::new();
     static WORKSPACE: OnceLock<Regex> = OnceLock::new();
@@ -74,11 +82,20 @@ pub fn detect(text: &str) -> Option<Intent> {
         r"(?i)\b(find|search|look for|identify|list|show|get|who (?:could|might|would) buy|which compan)",
     )
     .is_match(text);
+    // An offer's name alone ("… for my Support Workspace") counts unless
+    // the request is about hiring: an offer called "Fintech" must not turn
+    // "Find fintech companies hiring Product Managers" into client research.
     let offer = re(
         &OFFER,
         r"(?i)\b(my|our|this)\s+(?:reviewed\s+)?(?:\w+\s+){0,2}?(offer|product|service|saas|tool|consulting|agency)(?:'s)?\b|\bcould (?:plausibly )?use (?:my|our|this)\b",
     )
-    .is_match(text);
+    .is_match(text)
+        || (offer_names.iter().any(|n| offers::mentions(text, n))
+            && !re(
+                &HIRING,
+                r"(?i)\b(hiring|jobs?|vacanc(?:y|ies)|openings?|recruit(?:s|ing|ers?)?)\b",
+            )
+            .is_match(text));
     let buyers = re(
         &BUYERS,
         r"(?i)\b(clients?|customers?|buyers?|prospects?|compan(?:y|ies)|organi[sz]ations?|firms?|businesses|leads?)\b",
@@ -934,6 +951,32 @@ mod tests {
             ("Explain what a contract is.", None),
         ] {
             assert_eq!(detect(text), want, "{text}");
+        }
+    }
+
+    #[test]
+    fn an_offer_named_by_the_user_counts_as_their_offer() {
+        let names = [
+            "Support Workspace".to_string(),
+            "AI".to_string(),
+            "Fintech".to_string(),
+        ];
+        let text = "Find Austrian manufacturing companies for my Support Workspace";
+        assert_eq!(detect(text), None);
+        assert_eq!(detect_for(text, &names), Some(Intent::Clients));
+        assert_eq!(
+            detect_for("Which companies could buy support workspace?", &names),
+            Some(Intent::Clients)
+        );
+        for text in [
+            // Not a search, not about buyers, or not the offer's name.
+            "Explain Support Workspace pricing",
+            "Find AI Engineer jobs in Vienna",
+            "Find fintech companies in Vienna hiring Product Managers",
+            "Find fintech companies with open jobs in Graz",
+            "Find companies using Support Workspaces",
+        ] {
+            assert_eq!(detect_for(text, &names), None, "{text}");
         }
     }
 
