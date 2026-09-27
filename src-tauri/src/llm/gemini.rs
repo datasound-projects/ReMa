@@ -109,7 +109,27 @@ pub fn parse_models(entries: &[Value]) -> Vec<FetchedModel> {
     models
 }
 
-pub fn request_body(request: &ChatRequest) -> Value {
+/// Whether the model can use Google Search in a request that also declares
+/// functions. Gemini 3 and later can, with server-side tool invocations
+/// turned on (`toolConfig.includeServerSideToolInvocations`); earlier
+/// models reject the combination. Aliases without a version
+/// (`gemini-flash-latest`) name current models.
+pub fn combines_search_with_functions(model_id: &str) -> bool {
+    let id = model_id.to_ascii_lowercase();
+    let Some(rest) = id.strip_prefix("gemini-") else {
+        return false;
+    };
+    match rest
+        .split(['-', '.'])
+        .next()
+        .and_then(|major| major.parse::<u32>().ok())
+    {
+        Some(major) => major >= 3,
+        None => true,
+    }
+}
+
+pub fn request_body(model_id: &str, request: &ChatRequest) -> Value {
     let mut contents: Vec<Value> = request
         .normalized_turns()
         .into_iter()
@@ -121,24 +141,35 @@ pub fn request_body(request: &ChatRequest) -> Value {
             json!({ "role": role, "parts": [{ "text": turn.content }] })
         })
         .collect();
-    // Tool use so far: the model's text and function calls (with their
-    // thought signatures), then the function responses.
+    // Tool use so far: the model's turn exactly as Gemini sent it (its
+    // text, function calls, server-side search calls and results, and the
+    // thought signatures they carry), then the function responses.
     for round in &request.rounds {
-        let mut parts = Vec::new();
-        if !round.text.trim().is_empty() {
-            parts.push(json!({ "text": round.text }));
-        }
-        for call in &round.calls {
-            let args = match &call.arguments {
-                Value::Object(_) => call.arguments.clone(),
-                _ => json!({}),
-            };
-            let mut part = json!({ "functionCall": { "name": call.name, "args": args } });
-            if let Some(signature) = &call.provider_data {
-                part["thoughtSignature"] = signature.clone();
+        let parts = match &round.content {
+            Some(Value::Array(parts)) if !parts.is_empty() => parts.clone(),
+            _ => {
+                let mut parts = Vec::new();
+                if !round.text.trim().is_empty() {
+                    parts.push(json!({ "text": round.text }));
+                }
+                for call in &round.calls {
+                    let args = match &call.arguments {
+                        Value::Object(_) => call.arguments.clone(),
+                        _ => json!({}),
+                    };
+                    let mut function = json!({ "name": call.name, "args": args });
+                    if !crate::llm::is_synthetic_call_id(&call.id) {
+                        function["id"] = json!(call.id);
+                    }
+                    let mut part = json!({ "functionCall": function });
+                    if let Some(signature) = &call.provider_data {
+                        part["thoughtSignature"] = signature.clone();
+                    }
+                    parts.push(part);
+                }
+                parts
             }
-            parts.push(part);
-        }
+        };
         contents.push(json!({ "role": "model", "parts": parts }));
         let responses: Vec<Value> = round
             .calls
@@ -146,10 +177,18 @@ pub fn request_body(request: &ChatRequest) -> Value {
             .zip(&round.outputs)
             .map(|(call, output)| {
                 let key = if output.is_error { "error" } else { "output" };
-                json!({ "functionResponse": { "name": call.name, "response": { key: output.content } } })
+                let mut response =
+                    json!({ "name": call.name, "response": { key: output.content } });
+                // The call's own id maps the response to it.
+                if !crate::llm::is_synthetic_call_id(&call.id) {
+                    response["id"] = json!(call.id);
+                }
+                json!({ "functionResponse": response })
             })
             .collect();
-        contents.push(json!({ "role": "user", "parts": responses }));
+        if !responses.is_empty() {
+            contents.push(json!({ "role": "user", "parts": responses }));
+        }
     }
     let mut body = json!({ "contents": contents });
     if let Some(system) = &request.system {
@@ -167,15 +206,30 @@ pub fn request_body(request: &ChatRequest) -> Value {
             })
         })
         .collect();
+    let functions = !declarations.is_empty();
+    let search = request.web.is_some() && (!functions || combines_search_with_functions(model_id));
     let mut tools = Vec::new();
-    if !declarations.is_empty() {
+    if functions {
         tools.push(json!({ "functionDeclarations": declarations }));
     }
-    if request.web.is_some() {
+    if search {
         tools.push(json!({ "google_search": {} }));
     }
     if !tools.is_empty() {
         body["tools"] = json!(tools);
+    }
+    let mut config = serde_json::Map::new();
+    // Built-in search next to functions: Gemini returns its own search
+    // calls and results, which go back verbatim in later rounds.
+    if functions && search {
+        config.insert("includeServerSideToolInvocations".into(), json!(true));
+    }
+    // The last round of a long tool loop answers without calling functions.
+    if functions && request.tools_off {
+        config.insert("functionCallingConfig".into(), json!({ "mode": "NONE" }));
+    }
+    if !config.is_empty() {
+        body["toolConfig"] = Value::Object(config);
     }
     body
 }
@@ -231,11 +285,11 @@ pub fn chat_request(
         endpoint,
         http.post(url)
             .query(&[("alt", "sse")])
-            .json(&request_body(request)),
+            .json(&request_body(model_id, request)),
     )
 }
 
-pub fn parse_event(event: &SseEvent, _state: &mut StreamState) -> AppResult<StreamPiece> {
+pub fn parse_event(event: &SseEvent, state: &mut StreamState) -> AppResult<StreamPiece> {
     let data: Value = serde_json::from_str(event.data.trim())
         .map_err(|_| AppError::provider("Gemini sent an unreadable stream event"))?;
     if data.get("error").is_some() {
@@ -253,6 +307,8 @@ pub fn parse_event(event: &SseEvent, _state: &mut StreamState) -> AppResult<Stre
     let parts = candidate
         .and_then(|c| c.pointer("/content/parts"))
         .and_then(Value::as_array);
+    // The turn as Gemini sent it, to send back verbatim in a tool loop.
+    state.blocks.extend(parts.into_iter().flatten().cloned());
     let text: String = parts
         .into_iter()
         .flatten()
@@ -332,7 +388,7 @@ mod tests {
             ..ChatRequest::default()
         };
         assert_eq!(
-            request_body(&request),
+            request_body("gemini-2.5-flash", &request),
             json!({
                 "contents": [
                     { "role": "user", "parts": [{ "text": "Hi" }] },
@@ -351,7 +407,7 @@ mod tests {
             ..ChatRequest::default()
         };
         assert_eq!(
-            request_body(&request)["tools"],
+            request_body("gemini-2.5-flash", &request)["tools"],
             json!([{ "google_search": {} }])
         );
 
@@ -418,6 +474,89 @@ mod tests {
     }
 
     #[test]
+    fn only_gemini_3_and_later_combine_search_with_functions() {
+        for id in [
+            "gemini-3-pro",
+            "gemini-3.5-flash",
+            "gemini-3-pro-preview",
+            "gemini-flash-latest",
+        ] {
+            assert!(combines_search_with_functions(id), "{id}");
+        }
+        for id in [
+            "gemini-2.5-flash",
+            "gemini-2.0-flash-001",
+            "gemma-3-27b-it",
+            "learnlm-2.0",
+        ] {
+            assert!(!combines_search_with_functions(id), "{id}");
+        }
+        let request = ChatRequest {
+            tools: Some(crate::llm::ToolBox {
+                specs: vec![crate::llm::ToolSpec {
+                    name: "lookup".into(),
+                    description: String::new(),
+                    input_schema: json!({ "type": "object" }),
+                }],
+                executor: std::sync::Arc::new(crate::llm::fake::NoTools),
+            }),
+            web: Some(crate::llm::WebSearch::default()),
+            ..ChatRequest::default()
+        };
+        let body = request_body("gemini-3-pro", &request);
+        assert_eq!(
+            body["toolConfig"],
+            json!({ "includeServerSideToolInvocations": true })
+        );
+        let old = request_body("gemini-2.5-flash", &request);
+        assert_eq!(old["tools"].as_array().unwrap().len(), 1);
+        assert!(old.get("toolConfig").is_none());
+        // Search alone needs no flag.
+        let search_only = request_body(
+            "gemini-3-pro",
+            &ChatRequest {
+                web: Some(crate::llm::WebSearch::default()),
+                ..ChatRequest::default()
+            },
+        );
+        assert!(search_only.get("toolConfig").is_none());
+        // The last round of a long tool loop answers without functions.
+        let last = request_body(
+            "gemini-3-pro",
+            &ChatRequest {
+                tools_off: true,
+                ..request
+            },
+        );
+        assert_eq!(
+            last["toolConfig"]["functionCallingConfig"],
+            json!({ "mode": "NONE" })
+        );
+    }
+
+    #[test]
+    fn keeps_the_turn_as_sent_for_the_next_round() {
+        let mut state = StreamState::default();
+        parse_event(
+            &event(r#"{"candidates":[{"content":{"parts":[{"text":"Hel"}]}}]}"#),
+            &mut state,
+        )
+        .unwrap();
+        parse_event(
+            &event(r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"f","args":{}},"thoughtSignature":"s"}]},"finishReason":"STOP"}]}"#),
+            &mut state,
+        )
+        .unwrap();
+        assert_eq!(
+            state.blocks,
+            vec![
+                json!({ "text": "Hel" }),
+                json!({ "functionCall": { "name": "f", "args": {} }, "thoughtSignature": "s" })
+            ]
+        );
+    }
+
+    #[test]
     fn keeps_function_calls_and_their_signatures() {
         use crate::llm::{ToolCall, ToolOutput, ToolRound};
         let piece = parse(&event(
@@ -450,7 +589,7 @@ mod tests {
             }],
             ..ChatRequest::default()
         };
-        let body = request_body(&request);
+        let body = request_body("gemini-2.5-flash", &request);
         assert_eq!(body["contents"][1]["parts"][0]["thoughtSignature"], "sig==");
         assert_eq!(
             body["contents"][2]["parts"][0]["functionResponse"]["response"]["output"],

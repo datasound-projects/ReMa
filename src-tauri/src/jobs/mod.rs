@@ -170,6 +170,11 @@ async fn ask(
         .await?
     {
         Finish::Cancelled => Err(cancelled()),
+        // A reply cut off at the output limit is incomplete JSON: said as
+        // such (the emails wait for the next run), never half-parsed.
+        Finish::MaxTokens => Err(AppError::provider(
+            "The model's reply was cut off at its output limit.",
+        )),
         _ => Ok(text),
     }
 }
@@ -304,9 +309,28 @@ async fn sync_mailbox(
             source.connector.name()
         ));
     }
+    // How far back the mailbox is read after this run: never further than
+    // what was actually read. A read cut at its limit leaves the older mail
+    // for the next run's backfill (the plan reads it once coverage says so).
+    let mut covered_from = source.covered_from;
+    let mut unread = batch.unread_before;
     if let Some((from, to)) = source.backfill {
         let older = source.provider.list_range(from, to).await?;
-        batch.messages.extend(older);
+        unread = unread.max(older.unread_before);
+        batch.messages.extend(older.messages);
+    }
+    if let Some(unread) = unread {
+        covered_from = covered_from.max(unread);
+        report.issues.push(format!(
+            "{}: more job mail than one run reads; older mail is read in the next runs.",
+            source.connector.name()
+        ));
+    }
+    if batch.more {
+        report.issues.push(format!(
+            "{}: more new mail than one run reads; the next run continues where this one stopped.",
+            source.connector.name()
+        ));
     }
     report.emails_checked += batch.messages.len() as u32;
     let ids: Vec<String> = batch
@@ -351,7 +375,7 @@ async fn sync_mailbox(
             provider,
             &source.account_id,
             COVERAGE_RESOURCE,
-            &source.covered_from.to_string(),
+            &covered_from.to_string(),
             now,
         )?;
         tx.commit()?;

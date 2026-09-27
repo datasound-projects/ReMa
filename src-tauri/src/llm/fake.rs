@@ -42,6 +42,8 @@ pub struct FakeLanguageModel {
     pub scripted: Mutex<VecDeque<Vec<String>>>,
     /// Errors the next requests fail with, in order, before anything else.
     pub failures: Mutex<VecDeque<AppError>>,
+    /// How a successful stream ends (the output limit, a refusal, …).
+    pub finish: Finish,
 }
 
 impl FakeLanguageModel {
@@ -62,7 +64,14 @@ impl FakeLanguageModel {
             web_events: Vec::new(),
             scripted: Mutex::default(),
             failures: Mutex::default(),
+            finish: Finish::Complete,
         }
+    }
+
+    /// Ends every successful stream this way.
+    pub fn finishing(mut self, finish: Finish) -> Self {
+        self.finish = finish;
+        self
     }
 
     /// Fails the next requests with these errors, in order.
@@ -178,7 +187,7 @@ impl LanguageModel for FakeLanguageModel {
             match &self.fail_with {
                 Some(message) if self.fail_billing => Err(AppError::Billing(message.clone())),
                 Some(message) => Err(AppError::provider(message.clone())),
-                None => Ok(Finish::Complete),
+                None => Ok(self.finish),
             }
         })
     }

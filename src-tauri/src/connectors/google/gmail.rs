@@ -15,7 +15,9 @@ use serde_json::Value;
 use crate::{
     connectors::{
         api::ApiClient,
-        mail::{body_text, decode_entities, MailMessage, MailProvider, MailQuery, SyncBatch},
+        mail::{
+            body_text, decode_entities, MailMessage, MailProvider, MailQuery, RangeBatch, SyncBatch,
+        },
     },
     error::{AppError, AppResult},
     llm::BoxFuture,
@@ -129,10 +131,12 @@ impl Gmail {
             .ok_or_else(|| AppError::provider("Gmail did not return a history id."))
     }
 
-    async fn list(&self, query: &str, limit: usize) -> AppResult<Vec<(String, String)>> {
+    /// The newest `limit` matches (Gmail lists newest first), and whether
+    /// more matched than that.
+    async fn list(&self, query: &str, limit: usize) -> AppResult<(Vec<(String, String)>, bool)> {
         let mut refs = Vec::new();
         let mut page: Option<String> = None;
-        while refs.len() < limit {
+        loop {
             let mut params = vec![
                 ("q", query.to_string()),
                 ("maxResults", (limit - refs.len()).min(100).to_string()),
@@ -142,13 +146,40 @@ impl Gmail {
             }
             let body = self.api.get("users/me/messages", &params).await?;
             refs.extend(message_refs(&body));
-            match body.get("nextPageToken").and_then(Value::as_str) {
-                Some(token) if !token.is_empty() => page = Some(token.to_string()),
-                _ => break,
+            let next = body
+                .get("nextPageToken")
+                .and_then(Value::as_str)
+                .filter(|t| !t.is_empty());
+            if refs.len() >= limit {
+                let more = refs.len() > limit || next.is_some();
+                refs.truncate(limit);
+                return Ok((refs, more));
+            }
+            match next {
+                Some(token) => page = Some(token.to_string()),
+                None => return Ok((refs, false)),
             }
         }
-        refs.truncate(limit);
-        Ok(refs)
+    }
+
+    /// Metadata of the listed messages, oldest first, and — when the list
+    /// was cut at its limit — the time before which mail was not read.
+    async fn read_listed(
+        &self,
+        refs: Vec<(String, String)>,
+        more: bool,
+    ) -> AppResult<(Vec<MailMessage>, Option<i64>)> {
+        let mut messages = Vec::new();
+        for (id, _) in refs {
+            messages.push(self.metadata(&id).await?);
+        }
+        messages.sort_by_key(|m| m.received_at);
+        let unread_before = if more {
+            messages.first().map(|m| m.received_at)
+        } else {
+            None
+        };
+        Ok((messages, unread_before))
     }
 
     async fn metadata(&self, id: &str) -> AppResult<MailMessage> {
@@ -185,18 +216,15 @@ impl Gmail {
     async fn full_sync(&self, since: i64) -> AppResult<SyncBatch> {
         // The history id first: nothing received from now on can be missed.
         let history_id = self.profile_history_id().await?;
-        let refs = self
+        let (refs, more) = self
             .list(&job_search_query(since), MAX_SEARCH_RESULTS)
             .await?;
-        let mut messages = Vec::new();
-        for (id, _) in refs {
-            messages.push(self.metadata(&id).await?);
-        }
-        messages.sort_by_key(|m| m.received_at);
+        let (messages, unread_before) = self.read_listed(refs, more).await?;
         Ok(SyncBatch {
             messages,
             cursor: history_id,
-            resynced: false,
+            unread_before,
+            ..SyncBatch::default()
         })
     }
 }
@@ -284,27 +312,22 @@ impl MailProvider for Gmail {
             Ok(SyncBatch {
                 messages,
                 cursor: latest,
-                resynced: false,
+                ..SyncBatch::default()
             })
         })
     }
 
-    fn list_range<'a>(
-        &'a self,
-        after: i64,
-        before: i64,
-    ) -> BoxFuture<'a, AppResult<Vec<MailMessage>>> {
+    fn list_range<'a>(&'a self, after: i64, before: i64) -> BoxFuture<'a, AppResult<RangeBatch>> {
         Box::pin(async move {
-            let refs = self
+            let (refs, more) = self
                 .list(&job_range_query(after, before), MAX_SEARCH_RESULTS)
                 .await?;
-            let mut messages = Vec::new();
-            for (id, _) in refs {
-                messages.push(self.metadata(&id).await?);
-            }
+            let (mut messages, unread_before) = self.read_listed(refs, more).await?;
             messages.retain(|m| m.received_at >= after && m.received_at < before);
-            messages.sort_by_key(|m| m.received_at);
-            Ok(messages)
+            Ok(RangeBatch {
+                messages,
+                unread_before,
+            })
         })
     }
 
@@ -314,7 +337,7 @@ impl MailProvider for Gmail {
         limit: usize,
     ) -> BoxFuture<'a, AppResult<Vec<MailMessage>>> {
         Box::pin(async move {
-            let refs = self.list(&search_query(query), limit.min(50)).await?;
+            let (refs, _) = self.list(&search_query(query), limit.min(50)).await?;
             let mut out = Vec::new();
             for (id, _) in refs {
                 out.push(self.metadata(&id).await?);
@@ -636,6 +659,62 @@ mod tests {
         // Profile before the listing: nothing can slip between them.
         let targets: Vec<String> = server.requests().iter().map(|r| r.target.clone()).collect();
         assert!(targets[0].contains("/profile"));
+    }
+
+    #[tokio::test]
+    async fn a_first_sync_at_its_limit_says_how_far_back_it_read() {
+        // 250 matching emails, 100 per page: the newest 200 are read.
+        let server = MockServer::start(|req| {
+            let t = req.target.as_str();
+            if t.starts_with("/gmail/v1/users/me/profile") {
+                return Some((200, r#"{"historyId":"900"}"#.into()));
+            }
+            if t.starts_with("/gmail/v1/users/me/messages?") {
+                let page = t
+                    .split("pageToken=")
+                    .nth(1)
+                    .and_then(|p| p.split('&').next())
+                    .and_then(|p| p.parse::<i64>().ok())
+                    .unwrap_or(0);
+                // Newest first, like Gmail.
+                let refs: Vec<Value> = (page * 100..(page * 100 + 100).min(250))
+                    .map(|n| json!({ "id": format!("m{}", 250 - n), "threadId": "t" }))
+                    .collect();
+                let mut body = json!({ "messages": refs });
+                if (page + 1) * 100 < 250 {
+                    body["nextPageToken"] = json!((page + 1).to_string());
+                }
+                return Some((200, body.to_string()));
+            }
+            let id = t
+                .strip_prefix("/gmail/v1/users/me/messages/m")?
+                .split('?')
+                .next()?
+                .parse::<i64>()
+                .ok()?;
+            Some((200, meta(&format!("m{id}"), "t", id * 1_000, "Application")))
+        })
+        .await;
+        let batch = gmail(&server).sync_changes(None, 0).await.unwrap();
+        assert_eq!(batch.messages.len(), MAX_SEARCH_RESULTS);
+        // Read: m51..m250; m1..m50 (older) wait for the next run.
+        assert_eq!(batch.unread_before, Some(51_000));
+        assert_eq!(batch.messages[0].message_id, "m51");
+
+        // A smaller mailbox is read whole.
+        let server = MockServer::start(|req| {
+            let t = req.target.as_str();
+            if t.starts_with("/gmail/v1/users/me/profile") {
+                return Some((200, r#"{"historyId":"900"}"#.into()));
+            }
+            if t.starts_with("/gmail/v1/users/me/messages?") {
+                return Some((200, r#"{"messages":[{"id":"a","threadId":"ta"}]}"#.into()));
+            }
+            Some((200, meta("a", "ta", 1_000, "Application")))
+        })
+        .await;
+        let batch = gmail(&server).sync_changes(None, 0).await.unwrap();
+        assert_eq!(batch.unread_before, None);
     }
 
     #[tokio::test]

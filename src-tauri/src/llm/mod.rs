@@ -38,7 +38,7 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    accounts::codex::CodexRuntime,
+    accounts::{codex::CodexRuntime, AccountRuntime},
     error::{AppError, AppResult},
     models::{
         chat::MessageRole,
@@ -262,10 +262,19 @@ impl fmt::Debug for ToolBox {
     }
 }
 
-/// Most model calls in one answer when tools are used.
+/// Most model calls in one answer when tools are used. After this many
+/// rounds the model answers once more with tools switched off.
 pub const MAX_TOOL_ROUNDS: usize = 8;
 /// Most times one answer resumes a provider's paused tool loop.
 pub const MAX_CONTINUATIONS: usize = 4;
+/// Ids ReMa gives tool calls a provider sent without one. They are unique
+/// within an answer and never sent back as the provider's own ids.
+pub const SYNTHETIC_CALL_PREFIX: &str = "rema_call_";
+
+/// Whether a tool call id was made up by ReMa (the provider sent none).
+pub fn is_synthetic_call_id(id: &str) -> bool {
+    id.starts_with(SYNTHETIC_CALL_PREFIX)
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct ChatRequest {
@@ -280,6 +289,9 @@ pub struct ChatRequest {
     pub web: Option<WebSearch>,
     /// Tool use so far in this answer, after `turns`.
     pub rounds: Vec<ToolRound>,
+    /// The model must answer now, without calling tools (the last round of
+    /// a long tool loop). The tools stay declared: earlier rounds used them.
+    pub tools_off: bool,
 }
 
 impl ChatRequest {
@@ -423,13 +435,16 @@ pub struct StreamPiece {
 /// State an adapter keeps across the events of one stream.
 #[derive(Debug, Default)]
 pub struct StreamState {
-    /// The response's content blocks as the provider sent them (Anthropic),
-    /// rebuilt from the stream so a step can be sent back verbatim.
+    /// The step as the provider must receive it back in a tool loop:
+    /// Anthropic's content blocks (rebuilt from the stream), Gemini's parts,
+    /// OpenAI's encrypted reasoning items.
     pub blocks: Vec<Value>,
     /// Partial JSON of blocks whose input streams in pieces, by index.
     pub partial_json: HashMap<usize, String>,
     /// Server-side web tool calls in progress (Unsloth): id → (kind, target).
     pub web_calls: HashMap<String, (WebKind, String)>,
+    /// Inline reasoning removed from a local model's text.
+    pub think: openai::ThinkFilter,
 }
 
 /// How one model call ended.
@@ -468,7 +483,9 @@ impl CallCollector {
         self.calls.push((delta.index, delta));
     }
 
-    fn finish(self) -> Vec<ToolCall> {
+    /// The calls of the answer's `round`-th model step. A call without a
+    /// provider id gets one that no other call of the answer has.
+    fn finish(self, round: usize) -> Vec<ToolCall> {
         self.calls
             .into_iter()
             .enumerate()
@@ -484,7 +501,7 @@ impl CallCollector {
                     id: delta
                         .id
                         .filter(|id| !id.is_empty())
-                        .unwrap_or_else(|| format!("call_{n}")),
+                        .unwrap_or_else(|| format!("{SYNTHETIC_CALL_PREFIX}{round}_{n}")),
                     name,
                     arguments,
                     provider_data: delta.provider_data,
@@ -561,6 +578,10 @@ pub trait LanguageModel: Send + Sync {
 pub struct ProviderLanguageModel {
     http: reqwest::Client,
     codex: Option<Arc<CodexRuntime>>,
+    /// Hands out the Claude Console access token (short-lived, cached by
+    /// the runtime): taken again for every request, so an answer that waits
+    /// long for an approval never sends an expired one.
+    console: Option<Arc<dyn AccountRuntime>>,
 }
 
 impl ProviderLanguageModel {
@@ -568,7 +589,29 @@ impl ProviderLanguageModel {
         Self {
             http: http::client(),
             codex,
+            console: None,
         }
+    }
+
+    /// The Claude Console runtime that renews Console access tokens.
+    pub fn with_console(mut self, console: Arc<dyn AccountRuntime>) -> Self {
+        self.console = Some(console);
+        self
+    }
+
+    /// The endpoint with a current Claude Console token (other connections
+    /// as they are).
+    async fn current(&self, endpoint: &Endpoint) -> AppResult<Option<Endpoint>> {
+        if endpoint.connection != ConnectionMethod::ClaudeConsole {
+            return Ok(None);
+        }
+        let Some(console) = &self.console else {
+            return Ok(None);
+        };
+        Ok(console.credential().await?.map(|credential| Endpoint {
+            credential: Some(credential),
+            ..endpoint.clone()
+        }))
     }
 
     fn codex(&self) -> AppResult<&CodexRuntime> {
@@ -640,6 +683,19 @@ impl LanguageModel for ProviderLanguageModel {
             // Call the model; run the tools it asks for (or resume a paused
             // server-side tool loop) and call it again, until it answers.
             let mut request = request.clone();
+            // Gemini before 3 cannot use Google Search in a request that also
+            // declares functions: such a request gets ReMa's search tools
+            // instead (the answer still rests on current sources).
+            if endpoint.kind == ProviderKind::Gemini
+                && !gemini::combines_search_with_functions(model_id)
+                && !request.tool_specs().is_empty()
+            {
+                if let Some(web) = request.web.take() {
+                    if let Some(fallback) = web.fallback {
+                        request.tools = Some(fallback);
+                    }
+                }
+            }
             let mut separate = false;
             let mut continuations = 0;
             loop {
@@ -710,13 +766,9 @@ impl LanguageModel for ProviderLanguageModel {
                 let Some(tools) = request.tools.as_ref() else {
                     return Ok(step.finish);
                 };
-                if step.calls.is_empty() || step.finish != Finish::Complete {
+                // The final round answers; a call it makes anyway is not run.
+                if step.calls.is_empty() || step.finish != Finish::Complete || request.tools_off {
                     return Ok(step.finish);
-                }
-                if request.rounds.iter().filter(|r| !r.paused).count() == MAX_TOOL_ROUNDS {
-                    return Err(AppError::provider(
-                        "The model kept calling tools without answering. Try a narrower request.",
-                    ));
                 }
                 let mut outputs = Vec::with_capacity(step.calls.len());
                 for call in &step.calls {
@@ -735,6 +787,11 @@ impl LanguageModel for ProviderLanguageModel {
                     content: step.content,
                     paused: false,
                 });
+                // Enough tool use: the next call answers from what the tools
+                // returned, rather than the answer being lost.
+                if request.rounds.iter().filter(|r| !r.paused).count() >= MAX_TOOL_ROUNDS {
+                    request.tools_off = true;
+                }
             }
         })
     }
@@ -751,6 +808,8 @@ impl ProviderLanguageModel {
         cancel: &CancellationToken,
         on_delta: DeltaSink<'_>,
     ) -> AppResult<Step> {
+        let renewed = self.current(endpoint).await?;
+        let endpoint = renewed.as_ref().unwrap_or(endpoint);
         let secrets = endpoint.secrets();
         let (http_request, parse): (RequestBuilder, ParseFn) = match endpoint.kind {
             ProviderKind::Openai => (
@@ -770,7 +829,8 @@ impl ProviderLanguageModel {
                 gemini::parse_event,
             ),
         };
-        let Some(response) = http::send(http_request, cancel, &endpoint.name, &secrets).await?
+        let Some(response) =
+            http::send_retrying(http_request, cancel, &endpoint.name, &secrets).await?
         else {
             return Ok(Step {
                 finish: Finish::Cancelled,
@@ -780,11 +840,10 @@ impl ProviderLanguageModel {
             });
         };
         let web = request.web.as_ref();
-        let mut step = drive_stream(response, cancel, on_delta, parse, web).await?;
-        if endpoint.kind != ProviderKind::Anthropic {
-            step.content = None;
-        }
-        Ok(step)
+        // Only adapters that must send a step back verbatim keep its content
+        // (Anthropic's blocks, Gemini's parts, OpenAI's reasoning items).
+        let round = request.rounds.len();
+        drive_stream(response, cancel, on_delta, parse, web, round).await
     }
 }
 
@@ -809,6 +868,10 @@ fn rejects_web_tools(error: &AppError) -> bool {
             "tools.",
             "unsupported tool",
             "tool type",
+            // Gemini: "Please enable tool_config.include_server_side_tool_
+            // invocations to use Built-in tools with Function calling".
+            "include_server_side_tool_invocations",
+            "built-in tools",
         ]
         .iter()
         .any(|needle| message.contains(needle))
@@ -822,6 +885,7 @@ async fn drive_stream(
     on_delta: DeltaSink<'_>,
     parse: ParseFn,
     web: Option<&WebSearch>,
+    round: usize,
 ) -> AppResult<Step> {
     let mut finish = Finish::Complete;
     let mut paused = false;
@@ -860,7 +924,7 @@ async fn drive_stream(
         },
         StreamEnd::Completed => Step {
             finish,
-            calls: calls.finish(),
+            calls: calls.finish(round),
             paused,
             content: (!state.blocks.is_empty()).then_some(Value::Array(state.blocks)),
         },
@@ -897,6 +961,22 @@ mod tests {
                 turn(MessageRole::Assistant, "answer"),
             ]
         );
+    }
+
+    #[test]
+    fn recognizes_providers_refusing_their_web_tools() {
+        // Gemini 3: built-in search next to functions without the flag.
+        assert!(rejects_web_tools(&AppError::provider(
+            "Gemini returned an error (400): Please enable \
+             tool_config.include_server_side_tool_invocations to use Built-in tools with \
+             Function calling"
+        )));
+        assert!(rejects_web_tools(&AppError::provider(
+            "Anthropic returned an error (400): web search is not enabled for this organization"
+        )));
+        assert!(!rejects_web_tools(&AppError::provider(
+            "OpenAI returned an error (400): max_output_tokens too large"
+        )));
     }
 }
 

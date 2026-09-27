@@ -17,7 +17,8 @@ use crate::{
     connectors::{
         api::ApiClient,
         mail::{
-            body_text, decode_entities, truncate, MailMessage, MailProvider, MailQuery, SyncBatch,
+            body_text, decode_entities, truncate, MailMessage, MailProvider, MailQuery, RangeBatch,
+            SyncBatch,
         },
     },
     error::{AppError, AppResult},
@@ -168,7 +169,9 @@ fn resync_required(status: u16, body: &str) -> bool {
 
 impl OutlookMail {
     /// Follows delta pages from `start` until the delta link. `Ok(None)`: the
-    /// delta token is no longer valid.
+    /// delta token is no longer valid. A round with more pages than one run
+    /// reads keeps its place: the batch's cursor is the next page, where
+    /// the next run continues (`more`).
     async fn delta(&self, start: &str) -> AppResult<Option<SyncBatch>> {
         let mut url = start.to_string();
         let mut messages = Vec::new();
@@ -204,17 +207,28 @@ impl OutlookMail {
                 return Ok(Some(SyncBatch {
                     messages,
                     cursor: delta.to_string(),
-                    resynced: false,
+                    ..SyncBatch::default()
                 }));
             }
             match body.get("@odata.nextLink").and_then(Value::as_str) {
                 Some(next) => url = next.to_string(),
-                None => break,
+                None => {
+                    return Err(AppError::provider(
+                        "Outlook ended the synchronization without a position; the next run \
+                         starts it again.",
+                    ))
+                }
             }
         }
-        Err(AppError::provider(
-            "Outlook returned too many changes at once; the next sync continues.",
-        ))
+        // More pages than one run reads: what was read is kept, and the next
+        // run continues from the next page.
+        messages.sort_by_key(|m: &MailMessage| m.received_at);
+        Ok(Some(SyncBatch {
+            messages,
+            cursor: url,
+            more: true,
+            ..SyncBatch::default()
+        }))
     }
 
     fn initial_url(&self, since: i64) -> String {
@@ -257,20 +271,19 @@ impl MailProvider for OutlookMail {
         })
     }
 
-    fn list_range<'a>(
-        &'a self,
-        after: i64,
-        before: i64,
-    ) -> BoxFuture<'a, AppResult<Vec<MailMessage>>> {
+    fn list_range<'a>(&'a self, after: i64, before: i64) -> BoxFuture<'a, AppResult<RangeBatch>> {
         Box::pin(async move {
+            // Newest first: a range larger than one read is read from its
+            // recent end, and the rest waits for the next run.
             let mut url = format!(
-                "me/mailFolders/inbox/messages?$select={SELECT}&$orderby=receivedDateTime&$top=50&$filter=receivedDateTime+ge+{}+and+receivedDateTime+lt+{}",
+                "me/mailFolders/inbox/messages?$select={SELECT}&$orderby=receivedDateTime+desc&$top=50&$filter=receivedDateTime+ge+{}+and+receivedDateTime+lt+{}",
                 iso(after),
                 iso(before)
             );
             let mut messages = Vec::new();
             let mut seen = HashSet::new();
-            for _ in 0..MAX_PAGES {
+            let mut more = false;
+            for page in 0..MAX_PAGES {
                 let body = self.api.get(&url, &[]).await?;
                 for item in body
                     .get("value")
@@ -288,12 +301,21 @@ impl MailProvider for OutlookMail {
                     }
                 }
                 match body.get("@odata.nextLink").and_then(Value::as_str) {
-                    Some(next) => url = next.to_string(),
+                    Some(next) if page + 1 < MAX_PAGES => url = next.to_string(),
+                    Some(_) => more = true,
                     None => break,
                 }
             }
             messages.sort_by_key(|m| m.received_at);
-            Ok(messages)
+            let unread_before = if more {
+                messages.first().map(|m| m.received_at)
+            } else {
+                None
+            };
+            Ok(RangeBatch {
+                messages,
+                unread_before,
+            })
         })
     }
 
@@ -490,6 +512,77 @@ mod tests {
         assert!(!batch.resynced);
         let first = &server.requests()[0];
         assert!(first.headers.contains("prefer: odata.maxpagesize=50"));
+    }
+
+    #[tokio::test]
+    async fn a_round_longer_than_one_run_continues_where_it_stopped() {
+        // 46 pages of changes: more than one run reads. Before, the run
+        // failed, kept no position and the next one failed the same way.
+        let server = graph(|t, base| {
+            let page = if t.contains("changeType=created") {
+                0
+            } else {
+                t.split("$skiptoken=p").nth(1)?.parse::<usize>().ok()?
+            };
+            let mut body = json!({
+                "value": [message(&format!("m{page}"), "2026-09-20T08:00:00Z", "Update")],
+            });
+            if page < 45 {
+                body["@odata.nextLink"] = json!(format!(
+                    "{base}/graph/v1.0/me/mailFolders/inbox/messages/delta?$skiptoken=p{}",
+                    page + 1
+                ));
+            } else {
+                body["@odata.deltaLink"] = json!(format!(
+                    "{base}/graph/v1.0/me/mailFolders/inbox/messages/delta?$deltatoken=done"
+                ));
+            }
+            Some((200, body.to_string()))
+        })
+        .await;
+        let mail = outlook(&server);
+        let first = mail.sync_changes(None, 0).await.unwrap();
+        assert!(first.more, "said, not failed");
+        assert_eq!(first.messages.len(), MAX_PAGES);
+        assert!(first.cursor.ends_with(&format!("$skiptoken=p{MAX_PAGES}")));
+        // The next run continues the same round and reaches its delta link.
+        let rest = mail.sync_changes(Some(&first.cursor), 0).await.unwrap();
+        assert!(!rest.more && !rest.resynced);
+        assert_eq!(rest.messages.len(), 46 - MAX_PAGES);
+        assert!(rest.cursor.ends_with("$deltatoken=done"));
+    }
+
+    #[tokio::test]
+    async fn a_range_larger_than_one_read_is_read_from_its_recent_end() {
+        let server = graph(|t, base| {
+            if !t.contains("$skiptoken=") {
+                assert!(t.contains("orderby=receivedDateTime+desc"), "{t}");
+            }
+            let page = t
+                .split("$skiptoken=r")
+                .nth(1)
+                .and_then(|p| p.parse::<usize>().ok())
+                .unwrap_or(0);
+            Some((
+                200,
+                json!({
+                    "value": [message(&format!("r{page}"), &format!("2026-09-{:02}T08:00:00Z", 28 - (page % 28)), "Older")],
+                    "@odata.nextLink": format!("{base}/graph/v1.0/me/mailFolders/inbox/messages?$skiptoken=r{}", page + 1),
+                })
+                .to_string(),
+            ))
+        })
+        .await;
+        let range = outlook(&server)
+            .list_range(1_700_000_000_000, 1_800_000_000_000)
+            .await
+            .unwrap();
+        assert_eq!(range.messages.len(), MAX_PAGES);
+        assert_eq!(
+            range.unread_before,
+            range.messages.first().map(|m| m.received_at),
+            "what is older than the oldest read waits for the next run"
+        );
     }
 
     #[tokio::test]

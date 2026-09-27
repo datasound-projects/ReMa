@@ -30,9 +30,15 @@ const OAUTH_BETA: &str = "oauth-2025-04-20";
 const STREAMING_MAX_TOKENS: u32 = 64_000;
 /// Safe for every current model when the provider did not report a limit.
 const FALLBACK_MAX_TOKENS: u32 = 8_192;
+/// Added to a request's output cap for models that think by default:
+/// `max_tokens` caps thinking and answer together, so a cap sized for the
+/// answer alone (a JSON reply of 2,000 tokens) would cut the answer off.
+const THINKING_HEADROOM: u32 = 16_000;
 const RECOMMENDED_COUNT: usize = 4;
 /// Most searches and page fetches in one answer.
 const MAX_WEB_USES: u32 = 8;
+/// Most of one fetched page given to the model (the API sets no limit).
+const MAX_FETCH_TOKENS: u32 = 20_000;
 
 fn authorize(endpoint: &Endpoint, request: RequestBuilder) -> RequestBuilder {
     let request = request.header("anthropic-version", API_VERSION);
@@ -174,6 +180,34 @@ pub fn asks_for_direct_callers(error: &AppError) -> bool {
         if message.contains("(400)") && message.to_lowercase().contains("allowed_callers"))
 }
 
+/// Whether the model thinks when a request does not mention thinking: the
+/// Claude 5 generation (Opus 5 and 5.5, Sonnet 5, Fable, Mythos). ReMa
+/// leaves thinking at the model's default, so their output caps need room
+/// for it.
+pub fn thinks_by_default(model_id: &str) -> bool {
+    match model_version(model_id) {
+        Some((family, major, _)) => match family.as_str() {
+            "opus" | "sonnet" | "haiku" => major >= 5,
+            "fable" | "mythos" => true,
+            _ => false,
+        },
+        None => false,
+    }
+}
+
+/// The request's `max_tokens`: the caller's cap (bounded for streaming), plus
+/// room for thinking on models that think by default.
+fn max_tokens(model_id: &str, requested: Option<u32>) -> u32 {
+    let cap = requested.map_or(FALLBACK_MAX_TOKENS, |limit| limit.min(STREAMING_MAX_TOKENS));
+    if thinks_by_default(model_id) {
+        cap.saturating_add(THINKING_HEADROOM)
+            .min(STREAMING_MAX_TOKENS)
+            .max(cap)
+    } else {
+        cap
+    }
+}
+
 /// The web tools for a model. Dynamic filtering (the `_20260209` and
 /// later versions) is available on Claude 4.6 and later and the Mythos
 /// models; every other model gets basic search. Claude Haiku models have
@@ -220,7 +254,13 @@ fn web_tools(model_id: &str, web: &WebSearch) -> Vec<Value> {
     }
     let mut tools = vec![search];
     if let Some(fetch) = choice.fetch {
-        tools.push(json!({ "type": fetch, "name": "web_fetch", "max_uses": MAX_WEB_USES }));
+        tools.push(json!({
+            "type": fetch,
+            "name": "web_fetch",
+            "max_uses": MAX_WEB_USES,
+            // A long page or PDF must not fill the context by itself.
+            "max_content_tokens": MAX_FETCH_TOKENS,
+        }));
     }
     for tool in &mut tools {
         if choice.direct {
@@ -238,9 +278,7 @@ fn web_tools(model_id: &str, web: &WebSearch) -> Vec<Value> {
 }
 
 pub fn request_body(model_id: &str, request: &ChatRequest) -> Value {
-    let max_tokens = request
-        .max_output_tokens
-        .map_or(FALLBACK_MAX_TOKENS, |limit| limit.min(STREAMING_MAX_TOKENS));
+    let max_tokens = max_tokens(model_id, request.max_output_tokens);
     let mut messages: Vec<Value> = request
         .normalized_turns()
         .into_iter()
@@ -328,6 +366,11 @@ pub fn request_body(model_id: &str, request: &ChatRequest) -> Value {
     }
     if !tools.is_empty() {
         body["tools"] = json!(tools);
+        // The last round of a long tool loop answers without tools (the
+        // tools stay declared: earlier rounds used them).
+        if request.tools_off {
+            body["tool_choice"] = json!({ "type": "none" });
+        }
     }
     body
 }
@@ -776,7 +819,7 @@ mod tests {
             tools[1],
             json!({
                 "type": "web_fetch_20260318", "name": "web_fetch", "max_uses": 8,
-                "response_inclusion": "full"
+                "max_content_tokens": 20_000, "response_inclusion": "full"
             })
         );
         // Without a place in the request, no location is sent.
@@ -787,6 +830,62 @@ mod tests {
         assert!(request_body("claude-sonnet-5", &request)["tools"][0]
             .get("user_location")
             .is_none());
+    }
+
+    #[test]
+    fn leaves_room_for_thinking_on_models_that_think_by_default() {
+        let capped = |model: &str, cap: u32| {
+            request_body(
+                model,
+                &ChatRequest {
+                    max_output_tokens: Some(cap),
+                    ..ChatRequest::default()
+                },
+            )["max_tokens"]
+                .as_u64()
+                .unwrap()
+        };
+        // A 2,000-token JSON reply still fits after thinking.
+        for model in [
+            "claude-opus-5-5",
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-fable-5-1",
+        ] {
+            assert!(thinks_by_default(model), "{model}");
+            assert_eq!(capped(model, 2_000), 18_000, "{model}");
+            assert_eq!(capped(model, 128_000), 64_000, "{model}");
+        }
+        // Models that think only when asked keep the caller's cap.
+        for model in [
+            "claude-opus-4-8",
+            "claude-sonnet-4-6",
+            "claude-haiku-4-5",
+            "llama3",
+        ] {
+            assert!(!thinks_by_default(model), "{model}");
+            assert_eq!(capped(model, 2_000), 2_000, "{model}");
+        }
+    }
+
+    #[test]
+    fn a_fetched_page_is_bounded_and_the_last_round_uses_no_tools() {
+        let request = ChatRequest {
+            web: Some(crate::llm::WebSearch::default()),
+            tools_off: true,
+            ..ChatRequest::default()
+        };
+        let body = request_body("claude-sonnet-5", &request);
+        assert_eq!(body["tools"][1]["max_content_tokens"], 20_000);
+        assert_eq!(body["tool_choice"], json!({ "type": "none" }));
+        let normal = request_body(
+            "claude-sonnet-5",
+            &ChatRequest {
+                tools_off: false,
+                ..request
+            },
+        );
+        assert!(normal.get("tool_choice").is_none());
     }
 
     #[test]

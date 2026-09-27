@@ -39,6 +39,79 @@ pub async fn send(
     }
 }
 
+/// How often a request that met a temporary failure is sent again.
+const RETRIES: u32 = 2;
+/// Longest pause a provider's `retry-after` may ask for.
+const MAX_RETRY_WAIT: Duration = Duration::from_secs(20);
+
+/// Statuses that mean "try again shortly": rate limits and overloaded or
+/// failing servers (Anthropic's 529 "overloaded" included).
+fn temporary(status: StatusCode) -> bool {
+    matches!(status.as_u16(), 408 | 429 | 500 | 502 | 503 | 504 | 529)
+}
+
+/// The pause before the next attempt: the provider's `retry-after` when it
+/// sends one (capped), else 1 s, then 3 s.
+fn retry_wait(response: &Response, attempt: u32) -> Duration {
+    response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|s| s.is_finite() && *s >= 0.0)
+        .map_or(backoff(attempt), |s| {
+            Duration::from_secs_f64(s).min(MAX_RETRY_WAIT)
+        })
+}
+
+fn backoff(attempt: u32) -> Duration {
+    Duration::from_secs(1 + 2 * u64::from(attempt))
+}
+
+/// Like [`send`], but a temporary failure is sent again, at most twice
+/// with a short pause, as the providers' own SDKs do: a rate limit, an
+/// overloaded or failing server, or a connection that could not be made.
+/// Nothing has reached the model's output yet, so a retry cannot repeat
+/// anything. An account without credits is not retried.
+pub async fn send_retrying(
+    request: RequestBuilder,
+    cancel: &CancellationToken,
+    provider: &str,
+    secrets: &[&str],
+) -> AppResult<Option<Response>> {
+    let mut attempt = 0;
+    loop {
+        // A request whose body cannot be copied is sent once.
+        let Some(this) = request.try_clone() else {
+            return send(request, cancel, provider, secrets).await;
+        };
+        let sent = tokio::select! {
+            _ = cancel.cancelled() => return Ok(None),
+            sent = this.send() => sent,
+        };
+        let wait = match sent {
+            Ok(response) if response.status().is_success() => return Ok(Some(response)),
+            Ok(response) => {
+                let status = response.status();
+                let wait = retry_wait(&response, attempt);
+                let error = error_from_response(response, provider, secrets).await;
+                if attempt == RETRIES || !temporary(status) || matches!(error, AppError::Billing(_))
+                {
+                    return Err(error);
+                }
+                wait
+            }
+            Err(error) if attempt < RETRIES && error.is_connect() => backoff(attempt),
+            Err(error) => return Err(error.into()),
+        };
+        attempt += 1;
+        tokio::select! {
+            _ = cancel.cancelled() => return Ok(None),
+            _ = tokio::time::sleep(wait) => {}
+        }
+    }
+}
+
 /// Sends a request that must complete (no cancellation), e.g. model listing.
 pub async fn send_json(
     request: RequestBuilder,

@@ -19,7 +19,7 @@ use super::*;
 use crate::{
     connectors::{
         calendar::{BusyBlock, CalendarEvent, EventDraft},
-        mail::{MailQuery, SyncBatch},
+        mail::{MailQuery, RangeBatch, SyncBatch},
     },
     db::jobs::{self as repo, InterviewState},
     events::RecordingEvents,
@@ -54,6 +54,9 @@ struct FakeMailbox {
     firsts: Mutex<Vec<i64>>,
     /// Backfilled ranges.
     ranges: Mutex<Vec<(i64, i64)>>,
+    /// Most messages a first sync or a range read returns (newest first,
+    /// like the real providers); `None`: no limit.
+    limit: Mutex<Option<usize>>,
 }
 
 impl FakeMailbox {
@@ -65,7 +68,23 @@ impl FakeMailbox {
             syncs: Mutex::default(),
             firsts: Mutex::default(),
             ranges: Mutex::default(),
+            limit: Mutex::default(),
         }
+    }
+
+    /// The newest `limit` of `found` (oldest first), and the time before
+    /// which mail was left unread when there were more.
+    fn cap(&self, mut found: Vec<MailMessage>) -> (Vec<MailMessage>, Option<i64>) {
+        let Some(limit) = *self.limit.lock().unwrap() else {
+            return (found, None);
+        };
+        if found.len() <= limit {
+            return (found, None);
+        }
+        found.sort_by_key(|m| m.received_at);
+        let kept = found.split_off(found.len() - limit);
+        let unread_before = kept.first().map(|m| m.received_at);
+        (kept, unread_before)
     }
 
     fn add(&self, id: &str, thread: &str, from: &str, subject: &str, received_at: i64, body: &str) {
@@ -112,44 +131,52 @@ impl MailProvider for FakeMailbox {
             self.syncs.lock().unwrap().push(cursor.map(str::to_string));
             let messages = self.messages.lock().unwrap();
             let position = cursor.and_then(|c| c.parse::<usize>().ok());
-            let (delivered, resynced): (Vec<MailMessage>, bool) = match position {
-                Some(n) => (messages.iter().skip(n).map(Self::metadata).collect(), false),
-                // First sync, or an expired cursor: bounded by `since`.
+            let (delivered, resynced, unread_before) = match position {
+                Some(n) => (
+                    messages.iter().skip(n).map(Self::metadata).collect(),
+                    false,
+                    None,
+                ),
+                // First sync, or an expired cursor: bounded by `since`, and
+                // by the read limit.
                 None => {
                     self.firsts.lock().unwrap().push(since);
-                    (
+                    let (delivered, unread_before) = self.cap(
                         messages
                             .iter()
                             .filter(|m| m.received_at >= since)
                             .map(Self::metadata)
                             .collect(),
-                        cursor.is_some(),
-                    )
+                    );
+                    (delivered, cursor.is_some(), unread_before)
                 }
             };
             Ok(SyncBatch {
                 messages: delivered,
                 cursor: messages.len().to_string(),
                 resynced,
+                unread_before,
+                ..SyncBatch::default()
             })
         })
     }
 
-    fn list_range<'a>(
-        &'a self,
-        after: i64,
-        before: i64,
-    ) -> BoxFuture<'a, AppResult<Vec<MailMessage>>> {
+    fn list_range<'a>(&'a self, after: i64, before: i64) -> BoxFuture<'a, AppResult<RangeBatch>> {
         Box::pin(async move {
             self.ranges.lock().unwrap().push((after, before));
-            Ok(self
+            let found: Vec<MailMessage> = self
                 .messages
                 .lock()
                 .unwrap()
                 .iter()
                 .filter(|m| m.received_at >= after && m.received_at < before)
                 .map(Self::metadata)
-                .collect())
+                .collect();
+            let (messages, unread_before) = self.cap(found);
+            Ok(RangeBatch {
+                messages,
+                unread_before,
+            })
         })
     }
 
@@ -346,6 +373,8 @@ struct ScriptedModel {
     fail_triage: Mutex<bool>,
     requests: Mutex<Vec<String>>,
     offered_tools: Mutex<bool>,
+    /// Stop every reply at the output limit (half of its JSON).
+    cut_off: Mutex<bool>,
 }
 
 impl ScriptedModel {
@@ -421,7 +450,12 @@ impl LanguageModel for ScriptedModel {
                 shown.push_str(&turn.content);
             }
             self.requests.lock().unwrap().push(shown);
-            on_delta(&self.answer(request));
+            let answer = self.answer(request);
+            if *self.cut_off.lock().unwrap() {
+                on_delta(&answer[..answer.len() / 2]);
+                return Ok(Finish::MaxTokens);
+            }
+            on_delta(&answer);
             Ok(Finish::Complete)
         })
     }
@@ -2093,6 +2127,85 @@ async fn the_lookback_bootstraps_then_syncs_incrementally_and_backfills_once() {
     world.run_task(now() + 5 * HOUR, 7, &gmail, vec![]).await;
     assert_eq!(world.gmail.ranges.lock().unwrap().len(), 1);
     assert_eq!(world.rows().len(), 3, "Older stays tracked");
+}
+
+#[tokio::test]
+async fn a_first_sync_cut_at_its_limit_reads_the_older_mail_in_later_runs() {
+    let world = World::new();
+    let add = |id: &str, company: &str, days: i64| {
+        world.email(
+            &world.gmail,
+            id,
+            &format!("t-{id}"),
+            &format!("Talent <jobs@{}.com>", company.to_lowercase()),
+            &format!("Application received: {company}"),
+            now() - days * DAY_MS,
+            "Thank you for applying. We received your application.",
+            answer("application_confirmed", 0.95, company, "Engineer"),
+        );
+    };
+    add("k1", "Newest", 2);
+    add("k2", "Middle", 5);
+    add("k3", "Oldest", 9);
+    // One read returns one email (Gmail's limit is 200).
+    *world.gmail.limit.lock().unwrap() = Some(1);
+    let gmail = [(&world.gmail, ConnectorId::Gmail)];
+
+    let first = world.run_task(now(), 14, &gmail, vec![]).await;
+    assert_eq!(world.rows().len(), 1);
+    assert!(
+        first
+            .issues
+            .iter()
+            .any(|i| i.contains("older mail is read in the next runs")),
+        "{:?}",
+        first.issues
+    );
+    // The mail before what was read is read in the next runs, newest first,
+    // until the whole lookback is covered.
+    world.run_task(now() + HOUR, 14, &gmail, vec![]).await;
+    assert!(world.rows().iter().any(|r| r.company == "Middle"));
+    let third = world.run_task(now() + 2 * HOUR, 14, &gmail, vec![]).await;
+    assert_eq!(world.rows().len(), 3);
+    assert!(third.issues.iter().all(|i| !i.contains("older mail")));
+    let ranges = world.gmail.ranges.lock().unwrap().len();
+    world.run_task(now() + 3 * HOUR, 14, &gmail, vec![]).await;
+    assert_eq!(
+        world.gmail.ranges.lock().unwrap().len(),
+        ranges,
+        "covered: nothing left to read"
+    );
+}
+
+#[tokio::test]
+async fn a_reply_cut_off_at_the_output_limit_is_reported_and_retried() {
+    let world = World::new();
+    world.email(
+        &world.gmail,
+        "c1",
+        "t-c1",
+        "Talent <jobs@acme.com>",
+        "Application received: Acme",
+        now() - DAY_MS,
+        "Thank you for applying. We received your application.",
+        answer("application_confirmed", 0.95, "Acme", "Engineer"),
+    );
+    *world.model.cut_off.lock().unwrap() = true;
+    let gmail = [(&world.gmail, ConnectorId::Gmail)];
+    let report = world.run_task(now(), 14, &gmail, vec![]).await;
+    assert!(world.rows().is_empty(), "half an answer changes nothing");
+    assert!(
+        report
+            .issues
+            .iter()
+            .any(|i| i.contains("cut off at its output limit")),
+        "{:?}",
+        report.issues
+    );
+    // The email waits and is read once the model answers in full.
+    *world.model.cut_off.lock().unwrap() = false;
+    world.run_task(now() + HOUR, 14, &gmail, vec![]).await;
+    assert_eq!(world.rows().len(), 1);
 }
 
 #[tokio::test]

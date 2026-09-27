@@ -161,6 +161,19 @@ export function CloudProviderRow({
                     Reconnect
                   </button>
                 )}
+                {problem && connection === 'api_key' && (
+                  <button
+                    type="button"
+                    className="button button--secondary"
+                    onClick={() => {
+                      setChoosing(true);
+                      setKeyForm(true);
+                      action.clearError();
+                    }}
+                  >
+                    Replace key
+                  </button>
+                )}
                 {provider.connectionMethods.length > 1 && (
                   <button type="button" className="button button--ghost" onClick={() => setChoosing(true)}>
                     Change connection
@@ -227,9 +240,11 @@ export function CloudProviderRow({
       )}
       {problem && !provider.statusMessage && !running && !choosing && (
         <p className="form__hint">
-          {provider.status === 'expired'
-            ? 'The sign-in expired and could not be renewed. Reconnect to keep using this account.'
-            : 'This computer is no longer signed in. Reconnect to keep using this account.'}
+          {connection === 'api_key'
+            ? `${provider.name} no longer accepts this API key. Replace it to keep using ${provider.name}.`
+            : provider.status === 'expired'
+              ? 'The sign-in expired and could not be renewed. Reconnect to keep using this account.'
+              : 'This computer is no longer signed in. Reconnect to keep using this account.'}
         </p>
       )}
 

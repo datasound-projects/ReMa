@@ -167,6 +167,12 @@ export function CustomEndpointRow({
         </div>
       )}
 
+      {provider && !editing && provider.status === 'reauth_required' && (
+        <p className="notice notice--danger" role="alert">
+          {provider.name} rejected its API key. Edit the endpoint to change the key.
+        </p>
+      )}
+
       {editing && (
         <form
           className="provider__form"

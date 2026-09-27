@@ -119,8 +119,35 @@ fn credits_key(provider_id: &str) -> String {
 }
 
 /// Remembers from a model request's outcome whether the provider's account
-/// ran out of credits, so Settings can say so until a request succeeds.
+/// ran out of credits, and whether it rejected its credentials (an API key
+/// that was revoked, a sign-in that ended), so Settings says so until a
+/// request succeeds or the key is replaced: never "Connected" while every
+/// request fails.
 pub fn note_outcome<T>(state: &AppState, provider_id: &str, outcome: &AppResult<T>) {
+    let health = state.accounts.health(provider_id);
+    let health_changed = match outcome {
+        Err(AppError::Authentication(message)) => {
+            let known = health.as_ref().is_some_and(|(status, current)| {
+                *status == ConnectionStatus::ReauthRequired && current.as_ref() == Some(message)
+            });
+            state.accounts.set_health(
+                provider_id,
+                ConnectionStatus::ReauthRequired,
+                Some(message.clone()),
+            );
+            !known
+        }
+        Ok(_) if health.is_some() => {
+            state
+                .accounts
+                .set_health(provider_id, ConnectionStatus::Connected, None);
+            true
+        }
+        _ => false,
+    };
+    if health_changed {
+        state.events.providers_changed();
+    }
     let key = credits_key(provider_id);
     let changed = state.db.call(|conn| {
         let flagged = repo::get_setting(conn, &key)?.is_some();
@@ -365,8 +392,12 @@ pub async fn save_custom(state: &AppState, input: CustomProviderInput) -> AppRes
         tx.commit()?;
         Ok(())
     })?;
-    // The server may now be a different one (Unsloth Studio or not).
+    // The server may now be a different one (Unsloth Studio or not), and a
+    // key it rejected may have been replaced: the next request tells.
     state.career.forget_runtimes();
+    state
+        .accounts
+        .set_health(&id, ConnectionStatus::Connected, None);
     state.events.providers_changed();
     // Whether it searches itself is learned in the background (§58).
     crate::career_search::capabilities::provision_later(state, &id);

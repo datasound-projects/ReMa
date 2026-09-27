@@ -78,6 +78,22 @@ pub struct SyncBatch {
     /// The stored cursor was invalid or expired and a controlled full
     /// resynchronization (bounded by `since`) was done instead.
     pub resynced: bool,
+    /// A first or recovery sync reached its size limit: mail received
+    /// before this time (epoch ms) was not read. A later run reads it.
+    pub unread_before: Option<i64>,
+    /// More changes wait than one run reads: `cursor` continues this round
+    /// in the next run (nothing is skipped).
+    pub more: bool,
+}
+
+/// The messages of a range (see [`MailProvider::list_range`]).
+#[derive(Debug, Clone, Default)]
+pub struct RangeBatch {
+    /// Metadata only, oldest first.
+    pub messages: Vec<MailMessage>,
+    /// The range held more than one read takes: mail received before this
+    /// time (epoch ms) was not read. A later run reads it.
+    pub unread_before: Option<i64>,
 }
 
 /// A mailbox search, built by Rust (never a raw provider query from a model).
@@ -105,12 +121,10 @@ pub trait MailProvider: Send + Sync {
     ) -> BoxFuture<'a, AppResult<SyncBatch>>;
     /// Messages received in `[after, before)` (metadata only, oldest
     /// first): a range before what was read so far, when the lookback
-    /// grows. Gmail narrows it to likely job mail like a first sync.
-    fn list_range<'a>(
-        &'a self,
-        after: i64,
-        before: i64,
-    ) -> BoxFuture<'a, AppResult<Vec<MailMessage>>>;
+    /// grows. Gmail narrows it to likely job mail like a first sync. The
+    /// newest messages come first when the range holds more than one read
+    /// takes (see [`RangeBatch::unread_before`]).
+    fn list_range<'a>(&'a self, after: i64, before: i64) -> BoxFuture<'a, AppResult<RangeBatch>>;
     /// Matching messages, newest first (metadata only).
     fn search<'a>(
         &'a self,

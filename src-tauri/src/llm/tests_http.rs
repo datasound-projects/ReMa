@@ -632,3 +632,376 @@ async fn reports_search_errors_that_arrive_with_a_200() {
             if e.contains("rate limiting") && target == "AI jobs"
     ));
 }
+
+/// Records the calls it runs and answers each with its own id.
+#[derive(Default)]
+struct RecordingTools(std::sync::Mutex<Vec<ToolCall>>);
+
+impl ToolExecutor for RecordingTools {
+    fn execute<'a>(&'a self, call: &'a ToolCall) -> BoxFuture<'a, ToolOutput> {
+        self.0.lock().unwrap().push(call.clone());
+        Box::pin(async move {
+            ToolOutput {
+                content: format!("result of {}", call.id),
+                is_error: false,
+            }
+        })
+    }
+}
+
+fn tool_box(name: &str, executor: Arc<dyn ToolExecutor>) -> ToolBox {
+    ToolBox {
+        specs: vec![ToolSpec {
+            name: name.into(),
+            description: "A tool.".into(),
+            input_schema: json!({ "type": "object" }),
+        }],
+        executor,
+    }
+}
+
+async fn run(
+    endpoint: &Endpoint,
+    model: &str,
+    request: &ChatRequest,
+    llm: &ProviderLanguageModel,
+) -> (AppResult<Finish>, String) {
+    let mut text = String::new();
+    let mut sink = |delta: &str| text.push_str(delta);
+    let result = llm
+        .stream_chat(
+            endpoint,
+            model,
+            request,
+            CancellationToken::new(),
+            &mut sink,
+        )
+        .await;
+    (result, text)
+}
+
+const GEMINI_SERVER_PARTS: &str = "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"toolCall\":{\"id\":\"s1\",\"toolType\":\"GOOGLE_SEARCH\",\"args\":{\"queries\":[\"AI jobs Vienna\"]}},\"thoughtSignature\":\"sig-a\"},{\"toolResponse\":{\"id\":\"s1\",\"response\":{\"results\":[]}}},{\"functionCall\":{\"id\":\"fc1\",\"name\":\"mcp_rema_search_jobs\",\"args\":{\"q\":\"AI\"}},\"thoughtSignature\":\"sig-b\"}]},\"finishReason\":\"STOP\"}]}\n\n";
+
+#[tokio::test]
+async fn gemini_3_searches_next_to_functions_and_sends_its_parts_back() {
+    let (base_url, mut received) = serve_sequence(vec![
+        (200, vec![GEMINI_SERVER_PARTS]),
+        (
+            200,
+            vec!["data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Done.\"}]},\"finishReason\":\"STOP\"}]}\n\n"],
+        ),
+    ])
+    .await;
+    let endpoint = endpoint(ProviderKind::Gemini, base_url, "gemini-key");
+    let tools = Arc::new(RecordingTools::default());
+    let mut request = request();
+    request.tools = Some(tool_box("mcp_rema_search_jobs", tools.clone()));
+    request.web = Some(WebSearch::default());
+    let (result, text) = run(
+        &endpoint,
+        "gemini-3-pro",
+        &request,
+        &ProviderLanguageModel::new(None),
+    )
+    .await;
+    assert_eq!(result.unwrap(), Finish::Complete);
+    assert_eq!(text, "Done.");
+
+    // Built-in search next to functions needs server-side invocations on
+    // (without it Gemini 3 answers 400).
+    let first = body_of(&received.recv().await.unwrap());
+    let kinds: Vec<String> = first["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t.as_object().unwrap().keys().next().unwrap().clone())
+        .collect();
+    assert_eq!(kinds, ["functionDeclarations", "google_search"]);
+    assert_eq!(
+        first["toolConfig"]["includeServerSideToolInvocations"],
+        json!(true)
+    );
+
+    // The model turn goes back exactly as Gemini sent it (search call and
+    // result, signatures), and the response names the call's own id.
+    assert_eq!(tools.0.lock().unwrap()[0].id, "fc1");
+    let second = body_of(&received.recv().await.unwrap());
+    let contents = second["contents"].as_array().unwrap();
+    let parts = contents[1]["parts"].as_array().unwrap();
+    assert_eq!(parts.len(), 3);
+    assert_eq!(parts[0]["toolCall"]["id"], "s1");
+    assert_eq!(parts[0]["thoughtSignature"], "sig-a");
+    assert_eq!(parts[1]["toolResponse"]["id"], "s1");
+    assert_eq!(parts[2]["thoughtSignature"], "sig-b");
+    assert_eq!(contents[2]["parts"][0]["functionResponse"]["id"], "fc1");
+    assert_eq!(
+        contents[2]["parts"][0]["functionResponse"]["response"]["output"],
+        "result of fc1"
+    );
+}
+
+#[tokio::test]
+async fn gemini_2_gets_remas_search_tools_instead_of_search_next_to_functions() {
+    let (base_url, mut received) = serve_sequence(vec![(
+        200,
+        vec!["data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Ok.\"}]},\"finishReason\":\"STOP\"}]}\n\n"],
+    )])
+    .await;
+    let endpoint = endpoint(ProviderKind::Gemini, base_url, "gemini-key");
+    let web = Arc::new(RecordingWeb::default());
+    let mut request = request();
+    request.tools = Some(tool_box("mcp_rema_search_jobs", Arc::new(fake::NoTools)));
+    request.web = Some(WebSearch {
+        observer: Some(web.clone()),
+        fallback: Some(ToolBox {
+            specs: vec![
+                ToolSpec {
+                    name: "rema_career_search".into(),
+                    description: "Search.".into(),
+                    input_schema: json!({ "type": "object" }),
+                },
+                ToolSpec {
+                    name: "mcp_rema_search_jobs".into(),
+                    description: "A tool.".into(),
+                    input_schema: json!({ "type": "object" }),
+                },
+            ],
+            executor: Arc::new(fake::NoTools),
+        }),
+        ..WebSearch::default()
+    });
+    let (result, text) = run(
+        &endpoint,
+        "gemini-2.5-flash",
+        &request,
+        &ProviderLanguageModel::new(None),
+    )
+    .await;
+    assert_eq!(result.unwrap(), Finish::Complete);
+    assert_eq!(text, "Ok.");
+    let body = body_of(&received.recv().await.unwrap());
+    let tools = body["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 1, "no google_search next to functions");
+    let names: Vec<&str> = tools[0]["functionDeclarations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["rema_career_search", "mcp_rema_search_jobs"]);
+    assert!(body.get("toolConfig").is_none());
+    // Not a refusal of Gemini's search: nothing is reported unavailable.
+    assert!(web.0.lock().unwrap().is_empty());
+}
+
+fn compat_tool_call(name: &str) -> String {
+    format!(
+        "data: {{\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":0,\"function\":{{\"name\":\"{name}\",\"arguments\":\"{{}}\"}}}}]}}}}]}}\n\ndata: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"tool_calls\"}}]}}\n\ndata: [DONE]\n\n"
+    )
+}
+
+#[tokio::test]
+async fn calls_without_provider_ids_get_ids_no_other_call_has() {
+    let call: &'static str = Box::leak(compat_tool_call("lookup").into_boxed_str());
+    let (base_url, mut received) = serve_sequence(vec![
+        (200, vec![call]),
+        (200, vec![call]),
+        (
+            200,
+            vec!["data: {\"choices\":[{\"delta\":{\"content\":\"Answer.\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"],
+        ),
+    ])
+    .await;
+    let endpoint = endpoint(ProviderKind::OpenaiCompatible, base_url, "k");
+    let tools = Arc::new(RecordingTools::default());
+    let mut request = request();
+    request.tools = Some(tool_box("lookup", tools.clone()));
+    let (result, text) = run(
+        &endpoint,
+        "qwen3",
+        &request,
+        &ProviderLanguageModel::new(None),
+    )
+    .await;
+    assert_eq!(result.unwrap(), Finish::Complete);
+    assert_eq!(text, "Answer.");
+    let ids: Vec<String> = tools
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|c| c.id.clone())
+        .collect();
+    assert_eq!(ids.len(), 2);
+    assert_ne!(
+        ids[0], ids[1],
+        "each call keeps its own activity and approval"
+    );
+    assert!(ids.iter().all(|id| is_synthetic_call_id(id)));
+    let _ = received.recv().await;
+    let _ = received.recv().await;
+    let last = body_of(&received.recv().await.unwrap());
+    let results: Vec<&str> = last["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["role"] == "tool")
+        .map(|m| m["tool_call_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(results, [ids[0].as_str(), ids[1].as_str()]);
+}
+
+#[tokio::test]
+async fn a_long_tool_loop_ends_with_an_answer_instead_of_an_error() {
+    let call: &'static str = Box::leak(compat_tool_call("lookup").into_boxed_str());
+    let mut responses: Vec<(u16, Vec<&'static str>)> =
+        (0..MAX_TOOL_ROUNDS).map(|_| (200, vec![call])).collect();
+    responses.push((
+        200,
+        vec!["data: {\"choices\":[{\"delta\":{\"content\":\"What I found so far.\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"],
+    ));
+    let (base_url, mut received) = serve_sequence(responses).await;
+    let endpoint = endpoint(ProviderKind::OpenaiCompatible, base_url, "k");
+    let tools = Arc::new(RecordingTools::default());
+    let mut request = request();
+    request.tools = Some(tool_box("lookup", tools.clone()));
+    let (result, text) = run(
+        &endpoint,
+        "qwen3",
+        &request,
+        &ProviderLanguageModel::new(None),
+    )
+    .await;
+    assert_eq!(result.unwrap(), Finish::Complete);
+    assert_eq!(text, "What I found so far.");
+    assert_eq!(tools.0.lock().unwrap().len(), MAX_TOOL_ROUNDS);
+    let mut bodies = Vec::new();
+    while let Ok(request) = received.try_recv() {
+        bodies.push(body_of(&request));
+    }
+    assert_eq!(bodies.len(), MAX_TOOL_ROUNDS + 1);
+    assert!(bodies[..MAX_TOOL_ROUNDS]
+        .iter()
+        .all(|b| b.get("tool_choice").is_none()));
+    assert_eq!(bodies[MAX_TOOL_ROUNDS]["tool_choice"], "none");
+}
+
+#[tokio::test]
+async fn an_overloaded_provider_is_asked_again_before_anything_streamed() {
+    let (base_url, mut received) = serve_sequence(vec![
+        (
+            529,
+            vec!["{\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}"],
+        ),
+        (
+            200,
+            vec![
+                "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Ok\"}}\n\n",
+                "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+            ],
+        ),
+    ])
+    .await;
+    let endpoint = endpoint(ProviderKind::Anthropic, base_url, "sk-ant-test");
+    let (result, text) = collect(&endpoint, CancellationToken::new()).await;
+    assert_eq!(result.unwrap(), Finish::Complete);
+    assert_eq!(text, "Ok");
+    assert!(received.recv().await.is_some());
+    assert!(received.recv().await.is_some(), "sent twice");
+}
+
+#[tokio::test]
+async fn an_empty_quota_is_not_asked_again() {
+    // One response only: a retry would find nothing listening.
+    let (base_url, _) = serve_sequence(vec![(
+        429,
+        vec!["{\"error\":{\"message\":\"You exceeded your current quota, please check your plan and billing details.\",\"type\":\"insufficient_quota\"}}"],
+    )])
+    .await;
+    let endpoint = endpoint(ProviderKind::Openai, base_url, "sk-test");
+    let (result, _) = collect(&endpoint, CancellationToken::new()).await;
+    assert!(matches!(result.unwrap_err(), AppError::Billing(_)));
+}
+
+#[tokio::test]
+async fn openai_reasoning_goes_back_with_the_calls_it_led_to() {
+    let (base_url, mut received) = serve_sequence(vec![
+        (
+            200,
+            vec![
+                "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\",\"status\":\"completed\",\"summary\":[],\"encrypted_content\":\"enc-1\"}}\n\n",
+                "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_2\",\"summary\":[]}}\n\n",
+                "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_a\",\"name\":\"lookup\",\"arguments\":\"\"}}\n\n",
+                "event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":2,\"delta\":\"{}\"}\n\n",
+                "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n",
+            ],
+        ),
+        (
+            200,
+            vec![
+                "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"Done.\"}\n\n",
+                "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n",
+            ],
+        ),
+    ])
+    .await;
+    let endpoint = endpoint(ProviderKind::Openai, base_url, "sk-test");
+    let mut request = request();
+    request.tools = Some(tool_box("lookup", Arc::new(RecordingTools::default())));
+    let (result, text) = run(
+        &endpoint,
+        "gpt-6",
+        &request,
+        &ProviderLanguageModel::new(None),
+    )
+    .await;
+    assert_eq!(result.unwrap(), Finish::Complete);
+    assert_eq!(text, "Done.");
+    let _ = received.recv().await;
+    let second = body_of(&received.recv().await.unwrap());
+    let input = second["input"].as_array().unwrap();
+    // The encrypted reasoning, then the call it led to; a reasoning item
+    // without encrypted content (nothing to send back) is left out.
+    assert_eq!(
+        input[1],
+        json!({ "type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "enc-1" })
+    );
+    assert_eq!(input[2]["type"], "function_call");
+    assert_eq!(input[3]["type"], "function_call_output");
+    assert_eq!(input.len(), 4);
+}
+
+#[tokio::test]
+async fn each_claude_console_request_takes_the_current_token() {
+    let (base_url, received) = serve_once(
+        200,
+        vec![
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Ok\"}}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        ],
+        false,
+    )
+    .await;
+    let mut console = crate::accounts::fake::FakeAccountRuntime::signed_out();
+    console.credential = Some(Credential::OAuth {
+        access_token: "fresh-console-token".into(),
+        refresh_token: None,
+        expires_at: None,
+    });
+    let llm = ProviderLanguageModel::new(None).with_console(Arc::new(console));
+    let endpoint = Endpoint {
+        connection: ConnectionMethod::ClaudeConsole,
+        credential: Some(Credential::OAuth {
+            access_token: "expired-console-token".into(),
+            refresh_token: None,
+            expires_at: None,
+        }),
+        ..endpoint(ProviderKind::Anthropic, base_url, "unused")
+    };
+    let (result, text) = run(&endpoint, "claude-opus-5", &request(), &llm).await;
+    assert_eq!(result.unwrap(), Finish::Complete);
+    assert_eq!(text, "Ok");
+    let request = received.await.unwrap().to_ascii_lowercase();
+    assert!(request.contains("authorization: bearer fresh-console-token"));
+    assert!(!request.contains("expired-console-token"));
+}

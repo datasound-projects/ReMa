@@ -225,13 +225,19 @@ async fn call(
                 }
             }
             Ok(Err(error)) => {
-                // Settings shows an account without credits.
-                if let AppError::Billing(message) = &error {
-                    providers::note_outcome(
-                        state,
-                        endpoint.kind.as_str(),
-                        &Err::<(), _>(AppError::Billing(message.clone())),
-                    );
+                // Settings shows an account without credits or a rejected
+                // key (a built-in provider's id is its kind).
+                let noted = match &error {
+                    AppError::Billing(message) => Some(AppError::Billing(message.clone())),
+                    AppError::Authentication(message) => {
+                        Some(AppError::Authentication(message.clone()))
+                    }
+                    _ => None,
+                };
+                if let Some(noted) =
+                    noted.filter(|_| endpoint.kind != ProviderKind::OpenaiCompatible)
+                {
+                    providers::note_outcome(state, endpoint.kind.as_str(), &Err::<(), _>(noted));
                 }
                 return Err(Stop::Failed(describe(&error)));
             }

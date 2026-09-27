@@ -113,7 +113,11 @@ export function useChat(conversationId: number | null, onCreated: (id: number) =
 
   useBackendEvent(backendEvents.chatEvent, (event: ChatEvent) => {
     const id = event.type === 'finished' ? event.message.id : event.messageId;
+    const eventConversation = event.type === 'finished' ? event.message.conversationId : event.conversationId;
     setChat((c) => {
+      // Another conversation's stream: not ours to buffer (a new chat has
+      // no id yet, so everything is kept until `send` returns).
+      if (c.conversationId !== null && eventConversation !== c.conversationId) return c;
       if (!c.messages.some((m) => m.id === id)) {
         const entry = pending.current.get(id) ?? { text: '', activity: [] };
         if (event.type === 'delta') entry.text += event.text;

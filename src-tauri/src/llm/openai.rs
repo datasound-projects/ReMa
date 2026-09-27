@@ -169,8 +169,73 @@ pub fn request_body(model_id: &str, request: &ChatRequest) -> Value {
         .collect();
     if !tools.is_empty() {
         body["tools"] = json!(tools);
+        // The last round of a long tool loop answers without tools.
+        if request.tools_off {
+            body["tool_choice"] = json!("none");
+        }
     }
     body
+}
+
+/// Reasoning some local models write into the answer itself
+/// (`<think>…</think>`, e.g. DeepSeek R1 or Qwen on servers that do not
+/// separate it): removed from the text as it streams, so it is neither
+/// shown, stored in the conversation nor parsed as a reply. A tag split
+/// across stream events is held back until it is complete.
+#[derive(Debug, Default)]
+pub struct ThinkFilter {
+    inside: bool,
+    held: String,
+}
+
+const THINK_OPEN: &str = "<think>";
+const THINK_CLOSE: &str = "</think>";
+
+/// The longest end of `text` that begins `tag` ("<thi" for "<think>").
+fn tag_start(text: &str, tag: &str) -> usize {
+    (1..tag.len())
+        .rev()
+        .find(|&len| text.ends_with(&tag[..len]))
+        .unwrap_or(0)
+}
+
+impl ThinkFilter {
+    /// The visible part of the next piece of text.
+    pub fn push(&mut self, text: &str) -> String {
+        let mut rest = std::mem::take(&mut self.held) + text;
+        let mut out = String::new();
+        loop {
+            let tag = if self.inside { THINK_CLOSE } else { THINK_OPEN };
+            match rest.find(tag) {
+                Some(at) => {
+                    if !self.inside {
+                        out.push_str(&rest[..at]);
+                    }
+                    rest = rest[at + tag.len()..].to_string();
+                    self.inside = !self.inside;
+                }
+                None => {
+                    let keep = tag_start(&rest, tag);
+                    let cut = rest.len() - keep;
+                    if !self.inside {
+                        out.push_str(&rest[..cut]);
+                    }
+                    self.held = rest[cut..].to_string();
+                    return out;
+                }
+            }
+        }
+    }
+
+    /// Text held back at the end of the stream (never unfinished reasoning).
+    pub fn flush(&mut self) -> String {
+        let held = std::mem::take(&mut self.held);
+        if self.inside {
+            String::new()
+        } else {
+            held
+        }
+    }
 }
 
 /// Arguments as the JSON text the API expects.
@@ -323,7 +388,11 @@ fn server_tool_event(kind: &str, chunk: &Value, state: &mut StreamState) -> Vec<
 pub fn parse_event(event: &SseEvent, state: &mut StreamState) -> AppResult<StreamPiece> {
     let data = event.data.trim();
     if data == "[DONE]" {
-        return Ok(StreamPiece::done());
+        let held = state.think.flush();
+        return Ok(StreamPiece {
+            text: (!held.is_empty()).then_some(held),
+            ..StreamPiece::done()
+        });
     }
     let chunk: Value = serde_json::from_str(data)
         .map_err(|_| AppError::provider("the model server sent an unreadable stream event"))?;
@@ -342,10 +411,11 @@ pub fn parse_event(event: &SseEvent, state: &mut StreamState) -> AppResult<Strea
         }
     }
     let choice = chunk.pointer("/choices/0");
-    let text = choice
+    let mut text = choice
         .and_then(|c| c.pointer("/delta/content"))
         .and_then(Value::as_str)
-        .map(str::to_string);
+        .map(|t| state.think.push(t))
+        .unwrap_or_default();
     let finish = match choice
         .and_then(|c| c.get("finish_reason"))
         .and_then(Value::as_str)
@@ -355,6 +425,10 @@ pub fn parse_event(event: &SseEvent, state: &mut StreamState) -> AppResult<Strea
         Some(_) => Some(Finish::Complete),
         None => None,
     };
+    if finish.is_some() {
+        text.push_str(&state.think.flush());
+    }
+    let text = (!text.is_empty()).then_some(text);
     let tools = choice
         .and_then(|c| c.pointer("/delta/tool_calls"))
         .and_then(Value::as_array)
@@ -613,6 +687,56 @@ mod tests {
         .unwrap();
         assert_eq!(status.text, None);
         assert!(status.web.is_empty());
+    }
+
+    #[test]
+    fn inline_reasoning_is_left_out_even_when_its_tags_are_split() {
+        let mut state = StreamState::default();
+        let mut text = String::new();
+        for piece in [
+            "<thi",
+            "nk>The user wants {\"json\"}; let me",
+            " think.</th",
+            "ink>\n\n{\"relevant\": [\"a\"]}",
+            " <b>ok</b> a < b",
+        ] {
+            let chunk = json!({ "choices": [{ "delta": { "content": piece } }] }).to_string();
+            if let Some(t) = parse_event(&event(&chunk), &mut state).unwrap().text {
+                text.push_str(&t);
+            }
+        }
+        let end = parse_event(&event("[DONE]"), &mut state).unwrap();
+        text.push_str(end.text.as_deref().unwrap_or_default());
+        assert_eq!(text, "\n\n{\"relevant\": [\"a\"]} <b>ok</b> a < b");
+
+        // Text that only looks like the start of a tag is kept.
+        let mut filter = ThinkFilter::default();
+        assert_eq!(filter.push("a <th"), "a ");
+        assert_eq!(filter.push("ere"), "<there");
+        assert_eq!(filter.push("<"), "");
+        assert_eq!(filter.flush(), "<");
+        // Unfinished reasoning never shows.
+        let mut filter = ThinkFilter::default();
+        assert_eq!(filter.push("<think>still thinking"), "");
+        assert_eq!(filter.flush(), "");
+    }
+
+    #[test]
+    fn the_last_round_of_a_long_tool_loop_asks_for_no_tools() {
+        use crate::llm::ToolSpec;
+        let request = ChatRequest {
+            tools: Some(crate::llm::ToolBox {
+                specs: vec![ToolSpec {
+                    name: "lookup".into(),
+                    description: String::new(),
+                    input_schema: json!({ "type": "object" }),
+                }],
+                executor: std::sync::Arc::new(crate::llm::fake::NoTools),
+            }),
+            tools_off: true,
+            ..ChatRequest::default()
+        };
+        assert_eq!(request_body("qwen3", &request)["tool_choice"], "none");
     }
 
     #[test]

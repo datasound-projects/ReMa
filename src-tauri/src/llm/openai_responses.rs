@@ -31,8 +31,13 @@ pub fn request_body(model_id: &str, request: &ChatRequest) -> Value {
             json!({ "role": role, "content": turn.content })
         })
         .collect();
-    // Tool use so far: the model's text and calls, then their outputs.
+    // Tool use so far: the model's reasoning (encrypted, as OpenAI returned
+    // it: the model keeps its train of thought across the stateless steps),
+    // its text and calls, then their outputs.
     for round in &request.rounds {
+        if let Some(Value::Array(items)) = &round.content {
+            input.extend(items.iter().cloned());
+        }
         if !round.text.trim().is_empty() {
             input.push(json!({ "role": "assistant", "content": round.text }));
         }
@@ -98,8 +103,30 @@ pub fn request_body(model_id: &str, request: &ChatRequest) -> Value {
     }
     if !tools.is_empty() {
         body["tools"] = json!(tools);
+        // The last round of a long tool loop answers without tools.
+        if request.tools_off {
+            body["tool_choice"] = json!("none");
+        }
     }
     body
+}
+
+/// A reasoning item that can be sent back in a stateless request: one that
+/// carries its encrypted content (without it, OpenAI would look the item up
+/// by id, and nothing is stored).
+fn reasoning_item(item: &Value) -> Option<Value> {
+    (item.get("type").and_then(Value::as_str) == Some("reasoning")
+        && item
+            .get("encrypted_content")
+            .and_then(Value::as_str)
+            .is_some_and(|c| !c.is_empty()))
+    .then(|| {
+        let mut item = item.clone();
+        if let Some(fields) = item.as_object_mut() {
+            fields.remove("status");
+        }
+        item
+    })
 }
 
 /// A `url_citation` annotation on the answer text, with the span it cites.
@@ -215,7 +242,7 @@ fn web_search(item: &Value, finished: bool) -> WebEvent {
     }
 }
 
-pub fn parse_event(event: &SseEvent, _state: &mut StreamState) -> AppResult<StreamPiece> {
+pub fn parse_event(event: &SseEvent, state: &mut StreamState) -> AppResult<StreamPiece> {
     let data: Value = serde_json::from_str(event.data.trim())
         .map_err(|_| AppError::provider("OpenAI sent an unreadable stream event"))?;
     let kind = data
@@ -263,6 +290,10 @@ pub fn parse_event(event: &SseEvent, _state: &mut StreamState) -> AppResult<Stre
                 .to_string(),
             ..ToolDelta::default()
         }),
+        "response.output_item.done" if item_type == Some("reasoning") => {
+            state.blocks.extend(reasoning_item(item));
+            StreamPiece::default()
+        }
         "response.output_item.added" | "response.output_item.done"
             if item_type == Some("web_search_call") =>
         {
