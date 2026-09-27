@@ -88,18 +88,19 @@ export function modelName(catalog: ModelCatalog | null, model: ModelRef): string
 }
 
 export const APPLICATION_STATUS_LABELS: Record<ApplicationStatus, string> = {
-  confirmed: 'Confirmed',
-  in_process: 'Application in Process',
-  needs_action: 'Needs Your Action',
-  upcoming_interview: 'Upcoming Interview',
+  confirmed: 'Application received',
+  in_process: 'In process',
+  needs_action: 'Action required',
+  upcoming_interview: 'Interview',
   rejected: 'Rejected',
+  offer: 'Offer',
 };
 
 /** "Job applications · 7 days · Calendar sync". */
 export function describeTaskKind(kind: TaskKind): string {
   if (kind.type === 'prompt') return 'Prompt';
   const days = kind.lookbackDays === 1 ? '1 day' : `${kind.lookbackDays} days`;
-  return ['Job applications', days, kind.syncCalendar && 'Calendar sync'].filter(Boolean).join(' · ');
+  return ['Job Application Mail Monitor', days, kind.syncCalendar && 'Calendar'].filter(Boolean).join(' · ');
 }
 
 /** "14:30–15:30" in `timezone` (local time without one). */
@@ -130,4 +131,16 @@ export function formatInTimezone(ms: number, timezone: string | null): string {
   } catch {
     return formatDateTime(ms);
   }
+}
+
+/** "just now", "5 min ago", "3 h ago", then the date ("27 Sep 14:00"). */
+export function formatRelative(ms: number, now = Date.now()): string {
+  const seconds = Math.round((now - ms) / 1000);
+  if (seconds < 0) return formatDateTime(ms, new Date(now));
+  if (seconds < 60) return 'just now';
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 12) return `${hours} h ago`;
+  return formatDateTime(ms, new Date(now));
 }

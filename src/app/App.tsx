@@ -11,6 +11,7 @@ import { dataOr } from '../hooks/useAsyncData';
 import { useConversations } from '../hooks/useConversations';
 import { useSidebar } from '../hooks/useSidebar';
 import { AgentsPage } from '../pages/AgentsPage';
+import { ApplicationsPage } from '../pages/ApplicationsPage';
 import { ChatPage } from '../pages/ChatPage';
 import { ProfilePage } from '../pages/ProfilePage';
 import { ScheduledTasksPage } from '../pages/ScheduledTasksPage';
@@ -93,6 +94,7 @@ export function App() {
         {view.page === 'chat' && (
           <ChatPage conversationId={view.conversationId} initialAgentIds={view.agentIds} />
         )}
+        {view.page === 'applications' && <ApplicationsPage applicationId={view.applicationId ?? null} />}
         {view.page === 'agents' && <AgentsPage />}
         {view.page === 'tasks' && <ScheduledTasksPage />}
         {view.page === 'profile' && (

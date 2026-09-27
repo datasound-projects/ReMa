@@ -7,10 +7,18 @@
 //! every other call waits for the user's approval, with its arguments
 //! shown: Allow once, Allow for this chat, or Deny. Stopping the answer
 //! denies whatever is still waiting.
+//!
+//! Once the answer has read the user's mail, calendar or applications (see
+//! [`crate::services::connector_tools`]), every MCP call needs approval,
+//! read-only or not, allowed for the chat or not: data read from an email
+//! cannot be sent to a server without the user seeing it.
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
 
 use serde_json::Value;
@@ -44,7 +52,11 @@ pub struct Approvals {
 }
 
 impl Approvals {
-    fn wait(&self, message_id: i64, call_id: &str) -> oneshot::Receiver<ApprovalDecision> {
+    pub(crate) fn wait(
+        &self,
+        message_id: i64,
+        call_id: &str,
+    ) -> oneshot::Receiver<ApprovalDecision> {
         let (tx, rx) = oneshot::channel();
         self.pending
             .lock()
@@ -53,7 +65,7 @@ impl Approvals {
         rx
     }
 
-    fn forget(&self, message_id: i64, call_id: &str) {
+    pub(crate) fn forget(&self, message_id: i64, call_id: &str) {
         self.pending
             .lock()
             .unwrap()
@@ -121,6 +133,8 @@ pub struct ChatTools {
     message_id: i64,
     cancel: CancellationToken,
     offered: Vec<Offered>,
+    /// Set once the answer read private data (mail, calendar, applications).
+    private: Arc<AtomicBool>,
 }
 
 /// `mcp_<server>_<tool>`: `[a-zA-Z0-9_-]`, at most 64 characters, unique.
@@ -181,6 +195,7 @@ impl ChatTools {
         server_ids: &[i64],
         builtin: Option<Arc<Connection>>,
         cancel: CancellationToken,
+        private: Arc<AtomicBool>,
     ) -> AppResult<(Option<ToolBox>, Vec<ToolActivity>, Offer)> {
         let servers = mcp::enabled_selection(state, server_ids)?;
         let mut notices = Vec::new();
@@ -272,6 +287,7 @@ impl ChatTools {
             message_id,
             cancel,
             offered,
+            private,
         });
         Ok((Some(ToolBox { specs, executor }), notices, offer))
     }
@@ -322,8 +338,19 @@ impl ChatTools {
         }
 
         let approvals = &self.state.approvals;
-        if !tool.read_only && !approvals.allowed(self.conversation_id, tool.server_id, &tool.tool) {
+        let private = self.private.load(Ordering::SeqCst);
+        if private
+            || (!tool.read_only
+                && !approvals.allowed(self.conversation_id, tool.server_id, &tool.tool))
+        {
             activity.status = ToolStatus::AwaitingApproval;
+            if private {
+                activity.detail = Some(format!(
+                    "This answer has read your mail, calendar or applications. Allow only if \
+                     you want {} to receive what the model sends it.",
+                    tool.server
+                ));
+            }
             let decision = approvals.wait(self.message_id, &call.id);
             self.report(&activity);
             let decision = tokio::select! {
@@ -333,6 +360,8 @@ impl ChatTools {
             approvals.forget(self.message_id, &call.id);
             match decision {
                 Some(ApprovalDecision::Allow) => {}
+                // After private data, an approval counts for this call only.
+                Some(ApprovalDecision::AllowForChat) if private => {}
                 Some(ApprovalDecision::AllowForChat) => {
                     approvals.allow(self.conversation_id, tool.server_id, &tool.tool)
                 }
@@ -350,6 +379,7 @@ impl ChatTools {
                 }
             }
             activity.status = ToolStatus::Running;
+            activity.detail = None;
         }
 
         self.report(&activity);

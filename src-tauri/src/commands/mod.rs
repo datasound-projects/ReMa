@@ -7,9 +7,10 @@
 
 pub mod agents;
 pub mod analytics;
+pub mod applications;
 pub mod browser;
 pub mod chat;
-pub mod google;
+pub mod connectors;
 pub mod mcp;
 pub mod portfolio;
 pub mod profile;

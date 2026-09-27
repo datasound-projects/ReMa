@@ -85,11 +85,10 @@ export function TaskDetail({ task, catalog, onBack, onEdit }: TaskDetailProps) {
 
         {task.kind.type === 'job_applications' ? (
           <section className="section">
-            <h2 className="section__title">Job applications</h2>
+            <h2 className="section__title">Job Application Mail Monitor</h2>
             <p className="prompt-box">
               <span className="prompt-box__meta">
                 {describeTaskKind(task.kind)}
-                {task.kind.detectConflicts && ' · Conflicts reported'}
               </span>
               {task.prompt || 'No extra instructions.'}
             </p>

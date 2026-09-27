@@ -25,7 +25,6 @@ export interface TaskForm {
   lookback: string;
   customLookback: number;
   syncCalendar: boolean;
-  detectConflicts: boolean;
   prompt: string;
   /** Prompt tasks: give the model the user's Profile. */
   useProfile: boolean;
@@ -69,7 +68,6 @@ export function defaultForm(prompt: string, model: ModelRef | null, useProfile =
     lookback: '7',
     customLookback: 60,
     syncCalendar: true,
-    detectConflicts: true,
     prompt,
     useProfile,
     model,
@@ -95,7 +93,6 @@ export function formFromTask(task: ScheduledTask): TaskForm {
     form.lookback = LOOKBACK_PRESETS.includes(days) ? String(days) : 'custom';
     form.customLookback = days;
     form.syncCalendar = task.kind.syncCalendar;
-    form.detectConflicts = task.kind.detectConflicts;
   }
   form.startDate = task.startDate;
   form.startTime = task.startTime;
@@ -143,7 +140,6 @@ function toKind(form: TaskForm): TaskKind | string {
     type: 'job_applications',
     lookbackDays: days,
     syncCalendar: form.syncCalendar,
-    detectConflicts: form.syncCalendar && form.detectConflicts,
   };
 }
 

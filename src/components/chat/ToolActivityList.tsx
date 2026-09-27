@@ -2,7 +2,7 @@ import { useState } from 'react';
 
 import { toApiError } from '../../services/ipc';
 import { respondToolApproval, type ApprovalDecision, type ToolActivity } from '../../services/chatService';
-import { ChevronDownIcon, ChevronRightIcon, PlugIcon, ToolIcon } from '../icons';
+import { CalendarIcon, BriefcaseIcon, ChevronDownIcon, ChevronRightIcon, MailIcon, PlugIcon, ToolIcon } from '../icons';
 import { isWebActivity } from '../../lib/toolActivity';
 import { WebActivity } from './WebActivity';
 
@@ -23,9 +23,16 @@ function pretty(json: string): string {
   }
 }
 
+function ConnectorToolIcon({ server }: { server: string }) {
+  if (server === 'Mail') return <MailIcon className="tool-call__icon" aria-hidden="true" />;
+  if (server === 'Calendar') return <CalendarIcon className="tool-call__icon" aria-hidden="true" />;
+  return <BriefcaseIcon className="tool-call__icon" aria-hidden="true" />;
+}
+
 /**
- * What the model used while answering: its web searches, and MCP tools
- * (with approval for the ones that need it).
+ * What the model used while answering: its web searches, MCP tools and
+ * connector tools (mail, calendar, applications), with approval for the
+ * ones that need it.
  */
 export function ToolActivityList({ messageId, activity }: { messageId: number; activity: ToolActivity[] }) {
   if (activity.length === 0) return null;
@@ -52,6 +59,10 @@ export function ToolActivityList({ messageId, activity }: { messageId: number; a
 
 function ToolCall({ messageId, activity: a }: { messageId: number; activity: ToolActivity }) {
   const waiting = a.status === 'awaiting_approval';
+  const connector = a.kind === 'connector';
+  // Connector changes, and any MCP call after the answer read private data
+  // (the detail says so), are approved one call at a time.
+  const oncePerCall = connector || (a.kind === 'mcp' && a.detail !== null);
   const [open, setOpen] = useState(false);
   const [sending, setSending] = useState<ApprovalDecision | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -78,7 +89,7 @@ function ToolCall({ messageId, activity: a }: { messageId: number; activity: Too
         disabled={waiting}
       >
         {!waiting && (open ? <ChevronDownIcon className="tool-call__chevron" /> : <ChevronRightIcon className="tool-call__chevron" />)}
-        <ToolIcon className="tool-call__icon" aria-hidden="true" />
+        {connector ? <ConnectorToolIcon server={a.server} /> : <ToolIcon className="tool-call__icon" aria-hidden="true" />}
         <span className="tool-call__name">
           <span className="tool-call__server">{a.server}</span>
           <code className="tool-call__tool">{a.tool}</code>
@@ -87,12 +98,21 @@ function ToolCall({ messageId, activity: a }: { messageId: number; activity: Too
       </button>
       {(open || waiting) && (
         <div className="tool-call__body">
-          {waiting && (
-            <p className="tool-call__ask">
-              The model wants to run <code>{a.tool}</code> on <strong>{a.server}</strong>. This server does not mark the
-              tool as read-only, so it may change something.
-            </p>
-          )}
+          {waiting &&
+            (connector ? (
+              <p className="tool-call__ask">
+                ReMa’s assistant wants to make this change: <strong>{a.detail}</strong>
+              </p>
+            ) : a.detail ? (
+              <p className="tool-call__ask">
+                The model wants to run <code>{a.tool}</code> on <strong>{a.server}</strong>. {a.detail}
+              </p>
+            ) : (
+              <p className="tool-call__ask">
+                The model wants to run <code>{a.tool}</code> on <strong>{a.server}</strong>. This server does not mark
+                the tool as read-only, so it may change something.
+              </p>
+            ))}
           {a.arguments && a.arguments !== '{}' && (
             <>
               <span className="tool-call__label">Arguments</span>
@@ -113,17 +133,19 @@ function ToolCall({ messageId, activity: a }: { messageId: number; activity: Too
                 disabled={sending !== null}
                 onClick={() => void answer('allow')}
               >
-                {sending === 'allow' ? 'Allowing…' : 'Allow once'}
+                {sending === 'allow' ? 'Allowing…' : oncePerCall ? 'Allow' : 'Allow once'}
               </button>
-              <button
-                type="button"
-                className="button button--secondary button--small"
-                disabled={sending !== null}
-                title="Allow this tool without asking again in this chat, until ReMa quits"
-                onClick={() => void answer('allow_for_chat')}
-              >
-                Allow for this chat
-              </button>
+              {!oncePerCall && (
+                <button
+                  type="button"
+                  className="button button--secondary button--small"
+                  disabled={sending !== null}
+                  title="Allow this tool without asking again in this chat, until ReMa quits"
+                  onClick={() => void answer('allow_for_chat')}
+                >
+                  Allow for this chat
+                </button>
+              )}
               <button
                 type="button"
                 className="button button--ghost button--small"

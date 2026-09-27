@@ -6,12 +6,14 @@ export type ProfileSection = 'documents' | 'custom' | 'portfolio';
 /** What the main area shows. */
 export type View =
   | { page: 'chat'; conversationId: number | null; agentIds?: string[] }
+  /** `applicationId`: the application whose details are open. */
+  | { page: 'applications'; applicationId?: number | null }
   | { page: 'agents' }
   | { page: 'tasks' }
   /** `portfolioId`: the Portfolio Studio document open in the editor. */
   | { page: 'profile'; section?: ProfileSection; portfolioId?: number | null }
   /** `focus` scrolls to a section (e.g. MCP from the chat's + menu). */
-  | { page: 'settings'; focus?: 'mcp' };
+  | { page: 'settings'; focus?: 'mcp' | 'connectors' };
 
 export type PageId = View['page'];
 

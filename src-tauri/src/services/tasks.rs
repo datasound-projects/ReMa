@@ -2,14 +2,14 @@
 //! Timing and execution live in `services::scheduler`.
 
 use crate::{
+    connectors,
     db::{
         providers as providers_repo,
         tasks::{self as repo, TaskRow},
     },
     error::{AppError, AppResult},
-    integrations::google,
     models::{
-        google::GoogleService,
+        connectors::ConnectorKind,
         task::{
             EndCondition, Schedule, ScheduledTask, TaskExecution, TaskInput, TaskKind, TaskStatus,
         },
@@ -26,7 +26,7 @@ use crate::{
 const MAX_PROMPT_CHARS: usize = 20_000;
 const MAX_NAME_CHARS: usize = 120;
 const MAX_LOOKBACK_DAYS: u32 = 90;
-const JOB_TASK_NAME: &str = "Job application monitor";
+const JOB_TASK_NAME: &str = "Job Application Mail Monitor";
 const MAX_RUNS_LIMIT: u32 = 100_000;
 /// A start time up to this far in the past still counts as "now".
 const START_GRACE_MS: i64 = 60_000;
@@ -50,7 +50,6 @@ fn parse_kind(kind: TaskKind) -> AppResult<TaskKind> {
         TaskKind::JobApplications {
             lookback_days,
             sync_calendar,
-            detect_conflicts,
         } => {
             if !(1..=MAX_LOOKBACK_DAYS).contains(&lookback_days) {
                 return Err(AppError::validation(format!(
@@ -60,8 +59,6 @@ fn parse_kind(kind: TaskKind) -> AppResult<TaskKind> {
             Ok(TaskKind::JobApplications {
                 lookback_days,
                 sync_calendar,
-                // Conflicts are checked while syncing interviews.
-                detect_conflicts: sync_calendar && detect_conflicts,
             })
         }
     }
@@ -156,12 +153,27 @@ fn no_future_runs() -> AppError {
     AppError::validation("This schedule has no upcoming runs. Check the start and end dates.")
 }
 
-/// The Google services a task needs must be connected and enabled.
+/// A mail monitor task needs a connected mailbox (and a calendar, when it
+/// handles interviews).
 async fn require_tools(state: &AppState, kind: TaskKind) -> AppResult<()> {
     if let TaskKind::JobApplications { sync_calendar, .. } = kind {
-        google::require(state, GoogleService::Gmail).await?;
-        if sync_calendar {
-            google::require(state, GoogleService::Calendar).await?;
+        if connectors::ready(state, ConnectorKind::Mail)
+            .await
+            .is_empty()
+        {
+            return Err(AppError::configuration(
+                "Connect Gmail or Outlook Mail in Settings → Connectors first.",
+            ));
+        }
+        if sync_calendar
+            && connectors::ready(state, ConnectorKind::Calendar)
+                .await
+                .is_empty()
+        {
+            return Err(AppError::configuration(
+                "Connect Google Calendar or Outlook Calendar in Settings → Connectors, or turn \
+                 off calendar sync for this task.",
+            ));
         }
     }
     Ok(())

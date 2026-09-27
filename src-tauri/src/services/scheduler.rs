@@ -21,12 +21,10 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     db::tasks::{self as repo, Finished, NewExecution, TaskRow},
     error::{AppError, AppResult},
-    integrations::google::{self, calendar::CalendarApi, calendar::HttpCalendar, gmail::HttpGmail},
-    jobs::{self, JobRunConfig, RunModel, Tools},
+    jobs::{self, RunModel},
     llm::{ChatRequest, Finish, Turn, WebSearch},
     models::{
         chat::MessageRole,
-        google::GoogleService,
         jobs::JobRunReport,
         task::{ExecutionStatus, ExecutionTrigger, TaskExecution, TaskKind},
     },
@@ -35,7 +33,7 @@ use crate::{
         chat::{
             assessment_prompt, assessment_request, can_search_web, system_prompt, with_profile,
         },
-        providers,
+        mail_monitor, providers,
         schedule::{self, Limits},
     },
     state::AppState,
@@ -445,39 +443,17 @@ async fn run_task(
         TaskKind::JobApplications {
             lookback_days,
             sync_calendar,
-            detect_conflicts,
         } => {
-            google::require(state, GoogleService::Gmail).await?;
-            // Without Calendar the run still updates the overview.
-            let calendar_ready = if sync_calendar {
-                google::require(state, GoogleService::Calendar)
-                    .await
-                    .map_err(|e| e.to_string())
-            } else {
-                Err("Calendar sync is off.".into())
-            };
-            let token = google::access_token(state).await?;
-            let endpoints = &state.google.endpoints;
-            let gmail = HttpGmail::new(state.google.http.clone(), &endpoints.gmail, token.clone());
-            let calendar = HttpCalendar::new(state.google.http.clone(), &endpoints.calendar, token);
-            let report = jobs::run(
+            let report = mail_monitor::run_task(
                 state,
-                task.id,
-                &task.prompt,
                 RunModel {
                     endpoint: &endpoint,
                     model: &task.model,
                     max_output_tokens,
                 },
-                JobRunConfig {
-                    lookback_days,
-                    sync_calendar,
-                    detect_conflicts,
-                },
-                Tools {
-                    gmail: &gmail,
-                    calendar: calendar_ready.map(|()| &calendar as &dyn CalendarApi),
-                },
+                &task.prompt,
+                lookback_days,
+                sync_calendar,
                 &cancel,
                 started_at,
             )

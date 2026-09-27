@@ -2,7 +2,7 @@ pub mod agent;
 pub mod analytics;
 pub mod browser;
 pub mod chat;
-pub mod google;
+pub mod connectors;
 pub mod jobs;
 pub mod mcp;
 pub mod portfolio;

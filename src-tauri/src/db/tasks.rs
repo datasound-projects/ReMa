@@ -412,7 +412,6 @@ mod tests {
             task.kind = TaskKind::JobApplications {
                 lookback_days: 7,
                 sync_calendar: true,
-                detect_conflicts: false,
             };
             save(c, &task)?;
             assert_eq!(get(c, id)?, task);

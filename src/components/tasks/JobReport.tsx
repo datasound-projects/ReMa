@@ -140,10 +140,12 @@ function ApplicationTable({ rows }: { rows: ApplicationRow[] }) {
 const OUTCOME_LABELS: Record<CalendarOutcome, string> = {
   created: 'Created',
   updated: 'Updated',
-  unchanged: 'In Calendar',
+  unchanged: 'In calendar',
   cancelled: 'Marked cancelled',
-  removed: 'Deleted in Calendar',
+  removed: 'Deleted in calendar',
   needs_review: 'Needs review',
+  proposed: 'Waiting for you',
+  conflict: 'Conflict',
 };
 
 function CalendarBlock({ calendar }: { calendar: CalendarReport }) {

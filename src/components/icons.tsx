@@ -566,3 +566,39 @@ export function ZoomOutIcon(props: IconProps) {
     </Icon>
   );
 }
+
+export function BellIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M5.5 8.5a4.5 4.5 0 0 1 9 0c0 3.5 1.5 5 1.5 5H4s1.5-1.5 1.5-5Z" />
+      <path d="M8.5 16.5a1.6 1.6 0 0 0 3 0" />
+    </Icon>
+  );
+}
+
+export function MailIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <rect x="3" y="4.75" width="14" height="10.5" rx="1.75" />
+      <path d="m3.75 6 6.25 4.75L16.25 6" />
+    </Icon>
+  );
+}
+
+export function CalendarIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <rect x="3.25" y="4.5" width="13.5" height="12" rx="1.75" />
+      <path d="M3.25 8.25h13.5M7 3v3M13 3v3" />
+    </Icon>
+  );
+}
+
+export function AlertIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M10 3.5 17.25 16H2.75L10 3.5Z" />
+      <path d="M10 8.25v3.5M10 13.9v.1" />
+    </Icon>
+  );
+}

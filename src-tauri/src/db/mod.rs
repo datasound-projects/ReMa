@@ -6,9 +6,11 @@
 
 pub mod agents;
 pub mod analytics;
+pub mod connectors;
 pub mod conversations;
 pub mod jobs;
 pub mod mcp;
+pub mod notifications;
 pub mod portfolio;
 pub mod profile;
 pub mod providers;
@@ -32,6 +34,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0005_provider_connections.sql"),
     include_str!("migrations/0006_profile_agents_mcp.sql"),
     include_str!("migrations/0007_rema_mcp.sql"),
+    include_str!("migrations/0008_connectors.sql"),
 ];
 
 #[derive(Clone)]

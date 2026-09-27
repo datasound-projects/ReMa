@@ -1,4 +1,5 @@
-//! Job applications, processed Gmail messages and interviews.
+//! Job applications, the mail ReMa has looked at, interviews and the
+//! application timeline.
 
 use std::collections::HashSet;
 
@@ -6,40 +7,64 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 
 use crate::{
     error::{AppError, AppResult},
-    models::{jobs::ApplicationStatus, text_enum},
+    models::{
+        connectors::ProviderId,
+        jobs::{
+            ApplicationStatus, CalendarState, ConflictingEvent, EmailCategory, ProposedSlot,
+            TimelineEntry, UpdateSource,
+        },
+        text_enum,
+    },
 };
 
 // ── Mail ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MailStatus {
+    /// Rejected by the deterministic prefilter; never shown to a model.
+    Filtered,
+    /// Some job signals: waiting for the headers-only relevance check.
+    Candidate,
     /// Not about a job application.
     Irrelevant,
-    /// Relevant, waiting for extraction (per-run limit reached).
+    /// Relevant, waiting for classification (per-run limit reached).
     Pending,
     Processed,
     Failed,
+    /// Classified with low confidence: no state was changed.
+    Ambiguous,
 }
 
 text_enum!(MailStatus {
+    Filtered => "filtered",
+    Candidate => "candidate",
     Irrelevant => "irrelevant",
     Pending => "pending",
     Processed => "processed",
     Failed => "failed",
+    Ambiguous => "ambiguous",
 });
 
 /// How often a failing message is retried in later runs.
 pub const MAX_ATTEMPTS: u32 = 3;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MailRecord {
+    pub provider: ProviderId,
     pub message_id: String,
     pub thread_id: String,
     pub received_at: i64,
     pub sender_domain: Option<String>,
+    /// Kept only for job-related messages.
+    pub sender: Option<String>,
+    pub subject: Option<String>,
+    pub web_link: Option<String>,
     pub status: MailStatus,
+    pub prefilter_score: Option<i64>,
     pub attempts: u32,
     pub classification: Option<ApplicationStatus>,
+    pub category: Option<EmailCategory>,
+    pub confidence: Option<f64>,
     pub extraction: Option<String>,
     pub application_id: Option<i64>,
     pub error: Option<String>,
@@ -47,45 +72,65 @@ pub struct MailRecord {
     pub processed_at: Option<i64>,
 }
 
-const MAIL_COLUMNS: &str = "message_id, thread_id, received_at, sender_domain, status, attempts,
-    classification, extraction, application_id, error, first_seen_at, processed_at";
+const MAIL_COLUMNS: &str = "provider, message_id, thread_id, received_at, sender_domain, sender,
+    subject, web_link, status, prefilter_score, attempts, classification, category, confidence,
+    extraction, application_id, error, first_seen_at, processed_at";
 
 fn mail_from_row(row: &Row) -> rusqlite::Result<MailRecord> {
-    let status: String = row.get(4)?;
-    let classification: Option<String> = row.get(6)?;
+    let provider: String = row.get(0)?;
+    let status: String = row.get(8)?;
+    let classification: Option<String> = row.get(11)?;
+    let category: Option<String> = row.get(12)?;
     Ok(MailRecord {
-        message_id: row.get(0)?,
-        thread_id: row.get(1)?,
-        received_at: row.get(2)?,
-        sender_domain: row.get(3)?,
+        provider: ProviderId::parse(&provider).unwrap_or(ProviderId::Google),
+        message_id: row.get(1)?,
+        thread_id: row.get(2)?,
+        received_at: row.get(3)?,
+        sender_domain: row.get(4)?,
+        sender: row.get(5)?,
+        subject: row.get(6)?,
+        web_link: row.get(7)?,
         status: MailStatus::parse(&status).unwrap_or(MailStatus::Failed),
-        attempts: row.get(5)?,
+        prefilter_score: row.get(9)?,
+        attempts: row.get(10)?,
         classification: classification.as_deref().and_then(ApplicationStatus::parse),
-        extraction: row.get(7)?,
-        application_id: row.get(8)?,
-        error: row.get(9)?,
-        first_seen_at: row.get(10)?,
-        processed_at: row.get(11)?,
+        category: category.as_deref().and_then(EmailCategory::parse),
+        confidence: row.get(13)?,
+        extraction: row.get(14)?,
+        application_id: row.get(15)?,
+        error: row.get(16)?,
+        first_seen_at: row.get(17)?,
+        processed_at: row.get(18)?,
     })
 }
 
-pub fn get_mail(conn: &Connection, message_id: &str) -> AppResult<Option<MailRecord>> {
+pub fn get_mail(
+    conn: &Connection,
+    provider: ProviderId,
+    message_id: &str,
+) -> AppResult<Option<MailRecord>> {
     Ok(conn
         .query_row(
-            &format!("SELECT {MAIL_COLUMNS} FROM mail_messages WHERE message_id = ?1"),
-            [message_id],
+            &format!(
+                "SELECT {MAIL_COLUMNS} FROM mail_messages WHERE provider = ?1 AND message_id = ?2"
+            ),
+            params![provider.as_str(), message_id],
             mail_from_row,
         )
         .optional()?)
 }
 
-/// Of `ids`, the messages recorded by an earlier run (whatever their status;
-/// pending and retryable ones are picked up by [`pending_mail`]).
-pub fn known_messages(conn: &Connection, ids: &[String]) -> AppResult<HashSet<String>> {
+/// Of `ids`, the messages recorded earlier (whatever their status).
+pub fn known_messages(
+    conn: &Connection,
+    provider: ProviderId,
+    ids: &[String],
+) -> AppResult<HashSet<String>> {
     let mut known = HashSet::new();
-    let mut stmt = conn.prepare("SELECT 1 FROM mail_messages WHERE message_id = ?1")?;
+    let mut stmt =
+        conn.prepare("SELECT 1 FROM mail_messages WHERE provider = ?1 AND message_id = ?2")?;
     for id in ids {
-        if stmt.exists([id])? {
+        if stmt.exists(params![provider.as_str(), id])? {
             known.insert(id.clone());
         }
     }
@@ -94,22 +139,32 @@ pub fn known_messages(conn: &Connection, ids: &[String]) -> AppResult<HashSet<St
 
 pub fn upsert_mail(conn: &Connection, mail: &MailRecord) -> AppResult<()> {
     conn.execute(
-        "INSERT INTO mail_messages (message_id, thread_id, received_at, sender_domain, status,
-             attempts, classification, extraction, application_id, error, first_seen_at, processed_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-         ON CONFLICT (message_id) DO UPDATE SET
-             status = excluded.status, attempts = excluded.attempts,
-             classification = excluded.classification, extraction = excluded.extraction,
-             application_id = excluded.application_id, error = excluded.error,
-             processed_at = excluded.processed_at",
+        "INSERT INTO mail_messages (provider, message_id, thread_id, received_at, sender_domain,
+             sender, subject, web_link, status, prefilter_score, attempts, classification, category,
+             confidence, extraction, application_id, error, first_seen_at, processed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+         ON CONFLICT (provider, message_id) DO UPDATE SET
+             sender = excluded.sender, subject = excluded.subject, web_link = excluded.web_link,
+             status = excluded.status, prefilter_score = excluded.prefilter_score,
+             attempts = excluded.attempts, classification = excluded.classification,
+             category = excluded.category, confidence = excluded.confidence,
+             extraction = excluded.extraction, application_id = excluded.application_id,
+             error = excluded.error, processed_at = excluded.processed_at",
         params![
+            mail.provider.as_str(),
             mail.message_id,
             mail.thread_id,
             mail.received_at,
             mail.sender_domain,
+            mail.sender,
+            mail.subject,
+            mail.web_link,
             mail.status.as_str(),
+            mail.prefilter_score,
             mail.attempts,
             mail.classification.map(ApplicationStatus::as_str),
+            mail.category.map(EmailCategory::as_str),
+            mail.confidence,
             mail.extraction,
             mail.application_id,
             mail.error,
@@ -120,15 +175,86 @@ pub fn upsert_mail(conn: &Connection, mail: &MailRecord) -> AppResult<()> {
     Ok(())
 }
 
-/// Relevant messages still waiting for extraction, oldest first.
-pub fn pending_mail(conn: &Connection) -> AppResult<Vec<MailRecord>> {
+fn query_mail(
+    conn: &Connection,
+    sql_where: &str,
+    args: impl rusqlite::Params,
+) -> AppResult<Vec<MailRecord>> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT {MAIL_COLUMNS} FROM mail_messages
-         WHERE status = 'pending' OR (status = 'failed' AND attempts < ?1)
-         ORDER BY received_at, message_id"
+        "SELECT {MAIL_COLUMNS} FROM mail_messages {sql_where}"
     ))?;
-    let rows = stmt.query_map([MAX_ATTEMPTS], mail_from_row)?;
+    let rows = stmt.query_map(args, mail_from_row)?;
     Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// Messages waiting for the headers-only relevance check, oldest first.
+pub fn candidate_mail(conn: &Connection, provider: ProviderId) -> AppResult<Vec<MailRecord>> {
+    query_mail(
+        conn,
+        "WHERE provider = ?1 AND status = 'candidate' ORDER BY received_at, message_id",
+        [provider.as_str()],
+    )
+}
+
+/// Relevant messages still waiting for classification, oldest first.
+pub fn pending_mail(conn: &Connection, provider: ProviderId) -> AppResult<Vec<MailRecord>> {
+    query_mail(
+        conn,
+        "WHERE provider = ?1 AND (status = 'pending' OR (status = 'failed' AND attempts < ?2))
+         ORDER BY received_at, message_id",
+        params![provider.as_str(), MAX_ATTEMPTS],
+    )
+}
+
+/// Job-related messages of an application (correspondence), newest first.
+pub fn mail_for_application(conn: &Connection, application_id: i64) -> AppResult<Vec<MailRecord>> {
+    query_mail(
+        conn,
+        "WHERE application_id = ?1 ORDER BY received_at DESC LIMIT 50",
+        [application_id],
+    )
+}
+
+/// Low-confidence classifications, newest first.
+pub fn ambiguous_mail(conn: &Connection, limit: usize) -> AppResult<Vec<MailRecord>> {
+    query_mail(
+        conn,
+        "WHERE status = 'ambiguous' ORDER BY received_at DESC LIMIT ?1",
+        [limit as i64],
+    )
+}
+
+/// Whether a message is known to be job-related (the assistant's mail
+/// tools only return such messages).
+pub fn is_job_mail(conn: &Connection, provider: ProviderId, message_id: &str) -> AppResult<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM mail_messages WHERE provider = ?1 AND message_id = ?2
+                 AND (application_id IS NOT NULL OR status IN ('pending', 'processed', 'ambiguous'))",
+            params![provider.as_str(), message_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+/// Addresses that sent job-related mail before (known recruiters).
+pub fn known_job_senders(conn: &Connection) -> AppResult<HashSet<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT lower(sender) FROM mail_messages
+         WHERE sender IS NOT NULL AND status IN ('processed', 'pending', 'ambiguous')",
+    )?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    let mut senders = HashSet::new();
+    for sender in rows {
+        let sender = sender?;
+        let address = match (sender.rfind('<'), sender.rfind('>')) {
+            (Some(s), Some(e)) if s < e => sender[s + 1..e].to_string(),
+            _ => sender,
+        };
+        senders.insert(address.trim().to_string());
+    }
+    Ok(senders)
 }
 
 // ── Applications ────────────────────────────────────────────────────
@@ -190,11 +316,15 @@ pub fn get_application(conn: &Connection, id: i64) -> AppResult<ApplicationRecor
         .ok_or_else(|| AppError::not_found("Application not found"))
 }
 
-pub fn application_for_thread(conn: &Connection, thread_id: &str) -> AppResult<Option<i64>> {
+pub fn application_for_thread(
+    conn: &Connection,
+    provider: ProviderId,
+    thread_id: &str,
+) -> AppResult<Option<i64>> {
     Ok(conn
         .query_row(
-            "SELECT application_id FROM application_threads WHERE thread_id = ?1",
-            [thread_id],
+            "SELECT application_id FROM application_threads WHERE provider = ?1 AND thread_id = ?2",
+            params![provider.as_str(), thread_id],
             |r| r.get(0),
         )
         .optional()?)
@@ -233,11 +363,16 @@ pub fn applications_by_domain(
     )
 }
 
+/// Every application, most recently updated first.
+pub fn all_applications(conn: &Connection) -> AppResult<Vec<ApplicationRecord>> {
+    query_apps(conn, "ORDER BY last_update_at DESC, id DESC", [])
+}
+
 /// Updated since `since`, or still needing attention; newest first.
 pub fn overview_applications(conn: &Connection, since: i64) -> AppResult<Vec<ApplicationRecord>> {
     query_apps(
         conn,
-        "WHERE last_update_at >= ?1 OR status IN ('needs_action', 'upcoming_interview')
+        "WHERE last_update_at >= ?1 OR status IN ('needs_action', 'upcoming_interview', 'offer')
          ORDER BY last_update_at DESC, id DESC",
         [since],
     )
@@ -297,38 +432,105 @@ pub fn save_application(conn: &Connection, app: &ApplicationRecord) -> AppResult
     Ok(())
 }
 
-/// Links a Gmail thread to an application (first link wins).
-pub fn link_thread(conn: &Connection, thread_id: &str, application_id: i64) -> AppResult<()> {
+/// Links a mail thread to an application (first link wins).
+pub fn link_thread(
+    conn: &Connection,
+    provider: ProviderId,
+    thread_id: &str,
+    application_id: i64,
+) -> AppResult<()> {
     conn.execute(
-        "INSERT OR IGNORE INTO application_threads (thread_id, application_id) VALUES (?1, ?2)",
-        params![thread_id, application_id],
+        "INSERT OR IGNORE INTO application_threads (provider, thread_id, application_id)
+         VALUES (?1, ?2, ?3)",
+        params![provider.as_str(), thread_id, application_id],
     )?;
     Ok(())
 }
 
-pub fn record_update(
-    conn: &Connection,
-    application_id: i64,
-    message_id: &str,
-    status: ApplicationStatus,
-    summary: Option<&str>,
-    occurred_at: i64,
-    now: i64,
-) -> AppResult<()> {
+/// Thread ids known to belong to applications.
+pub fn application_threads(conn: &Connection, provider: ProviderId) -> AppResult<HashSet<String>> {
+    let mut stmt = conn.prepare("SELECT thread_id FROM application_threads WHERE provider = ?1")?;
+    let rows = stmt.query_map([provider.as_str()], |r| r.get::<_, String>(0))?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+// ── Timeline ────────────────────────────────────────────────────────
+
+/// One audit entry for the application timeline.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimelineRecord<'a> {
+    pub application_id: i64,
+    pub source: UpdateSource,
+    pub provider: Option<ProviderId>,
+    pub message_id: Option<&'a str>,
+    pub category: Option<EmailCategory>,
+    pub confidence: Option<f64>,
+    pub status: ApplicationStatus,
+    pub previous_status: Option<ApplicationStatus>,
+    pub change: &'a str,
+    pub summary: Option<&'a str>,
+    pub occurred_at: i64,
+    pub created_at: i64,
+}
+
+/// Adds a timeline entry. One entry per message and application.
+pub fn add_timeline(conn: &Connection, entry: &TimelineRecord<'_>) -> AppResult<()> {
     conn.execute(
-        "INSERT OR IGNORE INTO application_updates
-             (application_id, message_id, status, summary, occurred_at, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT OR IGNORE INTO application_updates (application_id, source, provider, message_id,
+             category, confidence, status, previous_status, change, summary, occurred_at, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
-            application_id,
-            message_id,
-            status.as_str(),
-            summary,
-            occurred_at,
-            now
+            entry.application_id,
+            entry.source.as_str(),
+            entry.provider.map(ProviderId::as_str),
+            entry.message_id,
+            entry.category.map(EmailCategory::as_str),
+            entry.confidence,
+            entry.status.as_str(),
+            entry.previous_status.map(ApplicationStatus::as_str),
+            entry.change,
+            entry.summary,
+            entry.occurred_at,
+            entry.created_at,
         ],
     )?;
     Ok(())
+}
+
+pub fn timeline(conn: &Connection, application_id: i64) -> AppResult<Vec<TimelineEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, source, change, status, previous_status, category, confidence, summary,
+             occurred_at, created_at
+         FROM application_updates WHERE application_id = ?1 ORDER BY occurred_at DESC, id DESC",
+    )?;
+    let rows = stmt.query_map([application_id], |r| {
+        let source: String = r.get(1)?;
+        let status: String = r.get(3)?;
+        let previous: Option<String> = r.get(4)?;
+        let category: Option<String> = r.get(5)?;
+        Ok(TimelineEntry {
+            id: r.get(0)?,
+            source: UpdateSource::parse(&source).unwrap_or(UpdateSource::Gmail),
+            change: r.get(2)?,
+            status: ApplicationStatus::parse(&status).unwrap_or(ApplicationStatus::InProcess),
+            previous_status: previous.as_deref().and_then(ApplicationStatus::parse),
+            category: category.as_deref().and_then(EmailCategory::parse),
+            confidence: r.get(6)?,
+            summary: r.get(7)?,
+            occurred_at: r.get(8)?,
+            created_at: r.get(9)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// Timeline entries created since `since` (dashboard "updates today").
+pub fn updates_since(conn: &Connection, since: i64) -> AppResult<u32> {
+    Ok(conn.query_row(
+        "SELECT COUNT(DISTINCT application_id) FROM application_updates WHERE created_at >= ?1",
+        [since],
+        |r| r.get(0),
+    )?)
 }
 
 // ── Interviews ──────────────────────────────────────────────────────
@@ -348,10 +550,12 @@ text_enum!(InterviewState {
     Cancelled => "cancelled",
 });
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct InterviewRecord {
     pub id: i64,
     pub application_id: i64,
+    /// The mail provider the interview came from.
+    pub provider: ProviderId,
     pub source_thread_id: String,
     pub source_message_id: String,
     pub state: InterviewState,
@@ -363,41 +567,103 @@ pub struct InterviewRecord {
     pub meeting_url: Option<String>,
     pub participants: Vec<String>,
     pub review_reason: Option<String>,
+    pub confidence: Option<f64>,
+    /// company | role | start | conversation, to recognize the same interview.
+    pub fingerprint: Option<String>,
+    pub calendar_provider: Option<ProviderId>,
     pub calendar_event_id: Option<String>,
     pub calendar_hash: Option<String>,
     pub calendar_synced_at: Option<i64>,
+    pub calendar_state: CalendarState,
+    pub conflicts: Vec<ConflictingEvent>,
+    pub proposed_slots: Vec<ProposedSlot>,
     pub created_at: i64,
     pub updated_at: i64,
 }
 
-const INTERVIEW_COLUMNS: &str = "id, application_id, source_thread_id, source_message_id, state,
-    interview_type, start_at, end_at, timezone, location, meeting_url, participants, review_reason,
-    calendar_event_id, calendar_hash, calendar_synced_at, created_at, updated_at";
+impl InterviewRecord {
+    pub fn blank(
+        application_id: i64,
+        provider: ProviderId,
+        thread: &str,
+        message: &str,
+        now: i64,
+    ) -> Self {
+        Self {
+            id: 0,
+            application_id,
+            provider,
+            source_thread_id: thread.to_string(),
+            source_message_id: message.to_string(),
+            state: InterviewState::Proposed,
+            interview_type: None,
+            start_at: None,
+            end_at: None,
+            timezone: None,
+            location: None,
+            meeting_url: None,
+            participants: Vec::new(),
+            review_reason: None,
+            confidence: None,
+            fingerprint: None,
+            calendar_provider: None,
+            calendar_event_id: None,
+            calendar_hash: None,
+            calendar_synced_at: None,
+            calendar_state: CalendarState::None,
+            conflicts: Vec::new(),
+            proposed_slots: Vec::new(),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+}
+
+const INTERVIEW_COLUMNS: &str = "id, application_id, provider, source_thread_id, source_message_id,
+    state, interview_type, start_at, end_at, timezone, location, meeting_url, participants,
+    review_reason, confidence, fingerprint, calendar_provider, calendar_event_id, calendar_hash,
+    calendar_synced_at, calendar_state, conflicts, proposed_slots, created_at, updated_at";
 
 fn interview_from_row(row: &Row) -> rusqlite::Result<InterviewRecord> {
-    let state: String = row.get(4)?;
-    let participants: Option<String> = row.get(11)?;
+    let provider: String = row.get(2)?;
+    let state: String = row.get(5)?;
+    let participants: Option<String> = row.get(12)?;
+    let calendar_provider: Option<String> = row.get(16)?;
+    let calendar_state: String = row.get(20)?;
+    let conflicts: Option<String> = row.get(21)?;
     Ok(InterviewRecord {
         id: row.get(0)?,
         application_id: row.get(1)?,
-        source_thread_id: row.get(2)?,
-        source_message_id: row.get(3)?,
+        provider: ProviderId::parse(&provider).unwrap_or(ProviderId::Google),
+        source_thread_id: row.get(3)?,
+        source_message_id: row.get(4)?,
         state: InterviewState::parse(&state).unwrap_or(InterviewState::NeedsReview),
-        interview_type: row.get(5)?,
-        start_at: row.get(6)?,
-        end_at: row.get(7)?,
-        timezone: row.get(8)?,
-        location: row.get(9)?,
-        meeting_url: row.get(10)?,
+        interview_type: row.get(6)?,
+        start_at: row.get(7)?,
+        end_at: row.get(8)?,
+        timezone: row.get(9)?,
+        location: row.get(10)?,
+        meeting_url: row.get(11)?,
         participants: participants
             .and_then(|p| serde_json::from_str(&p).ok())
             .unwrap_or_default(),
-        review_reason: row.get(12)?,
-        calendar_event_id: row.get(13)?,
-        calendar_hash: row.get(14)?,
-        calendar_synced_at: row.get(15)?,
-        created_at: row.get(16)?,
-        updated_at: row.get(17)?,
+        review_reason: row.get(13)?,
+        confidence: row.get(14)?,
+        fingerprint: row.get(15)?,
+        calendar_provider: calendar_provider.as_deref().and_then(ProviderId::parse),
+        calendar_event_id: row.get(17)?,
+        calendar_hash: row.get(18)?,
+        calendar_synced_at: row.get(19)?,
+        calendar_state: CalendarState::parse(&calendar_state).unwrap_or(CalendarState::None),
+        conflicts: conflicts
+            .and_then(|c| serde_json::from_str(&c).ok())
+            .unwrap_or_default(),
+        proposed_slots: row
+            .get::<_, Option<String>>(22)?
+            .and_then(|c| serde_json::from_str(&c).ok())
+            .unwrap_or_default(),
+        created_at: row.get(23)?,
+        updated_at: row.get(24)?,
     })
 }
 
@@ -413,6 +679,12 @@ fn query_interviews(
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
+pub fn get_interview(conn: &Connection, id: i64) -> AppResult<InterviewRecord> {
+    query_interviews(conn, "WHERE id = ?1", [id])?
+        .pop()
+        .ok_or_else(|| AppError::not_found("Interview not found"))
+}
+
 pub fn interviews_for_application(
     conn: &Connection,
     application_id: i64,
@@ -424,15 +696,23 @@ pub fn interviews_for_application(
     )
 }
 
-pub fn interview_from_message(
+/// Another interview (e.g. from a second thread) with the same fingerprint
+/// that already has a calendar event.
+pub fn interview_with_fingerprint(
     conn: &Connection,
-    message_id: &str,
+    fingerprint: &str,
+    except_id: i64,
 ) -> AppResult<Option<InterviewRecord>> {
-    Ok(query_interviews(conn, "WHERE source_message_id = ?1", [message_id])?.pop())
+    Ok(query_interviews(
+        conn,
+        "WHERE fingerprint = ?1 AND id != ?2 AND calendar_event_id IS NOT NULL LIMIT 1",
+        params![fingerprint, except_id],
+    )?
+    .pop())
 }
 
 /// Confirmed interviews that have not ended, plus cancelled ones still
-/// linked to a Calendar event that ReMa may need to mark.
+/// linked to a calendar event that ReMa may need to mark.
 pub fn interviews_to_sync(conn: &Connection, now: i64) -> AppResult<Vec<InterviewRecord>> {
     query_interviews(
         conn,
@@ -440,6 +720,19 @@ pub fn interviews_to_sync(conn: &Connection, now: i64) -> AppResult<Vec<Intervie
             OR (state = 'cancelled' AND calendar_event_id IS NOT NULL AND end_at > ?1)
          ORDER BY start_at, id",
         [now],
+    )
+}
+
+/// Confirmed interviews in a time window (the assistant's "interviews next week").
+pub fn interviews_between(
+    conn: &Connection,
+    from: i64,
+    to: i64,
+) -> AppResult<Vec<InterviewRecord>> {
+    query_interviews(
+        conn,
+        "WHERE state = 'confirmed' AND start_at >= ?1 AND start_at < ?2 ORDER BY start_at",
+        params![from, to],
     )
 }
 
@@ -451,18 +744,22 @@ pub fn interviews_needing_review(conn: &Connection, since: i64) -> AppResult<Vec
     )
 }
 
-fn participants_json(participants: &[String]) -> Option<String> {
-    (!participants.is_empty()).then(|| serde_json::to_string(participants).unwrap_or_default())
+fn json_list<T: serde::Serialize>(items: &[T]) -> Option<String> {
+    (!items.is_empty()).then(|| serde_json::to_string(items).unwrap_or_default())
 }
 
 pub fn insert_interview(conn: &Connection, i: &InterviewRecord) -> AppResult<i64> {
     conn.execute(
-        "INSERT INTO interviews (application_id, source_thread_id, source_message_id, state,
-             interview_type, start_at, end_at, timezone, location, meeting_url, participants,
-             review_reason, calendar_event_id, calendar_hash, calendar_synced_at, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+        "INSERT INTO interviews (application_id, provider, source_thread_id, source_message_id,
+             state, interview_type, start_at, end_at, timezone, location, meeting_url, participants,
+             review_reason, confidence, fingerprint, calendar_provider, calendar_event_id,
+             calendar_hash, calendar_synced_at, calendar_state, conflicts, proposed_slots,
+             created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
+             ?19, ?20, ?21, ?22, ?23, ?24)",
         params![
             i.application_id,
+            i.provider.as_str(),
             i.source_thread_id,
             i.source_message_id,
             i.state.as_str(),
@@ -472,11 +769,17 @@ pub fn insert_interview(conn: &Connection, i: &InterviewRecord) -> AppResult<i64
             i.timezone,
             i.location,
             i.meeting_url,
-            participants_json(&i.participants),
+            json_list(&i.participants),
             i.review_reason,
+            i.confidence,
+            i.fingerprint,
+            i.calendar_provider.map(ProviderId::as_str),
             i.calendar_event_id,
             i.calendar_hash,
             i.calendar_synced_at,
+            i.calendar_state.as_str(),
+            json_list(&i.conflicts),
+            json_list(&i.proposed_slots),
             i.created_at,
             i.updated_at,
         ],
@@ -486,13 +789,16 @@ pub fn insert_interview(conn: &Connection, i: &InterviewRecord) -> AppResult<i64
 
 pub fn save_interview(conn: &Connection, i: &InterviewRecord) -> AppResult<()> {
     conn.execute(
-        "UPDATE interviews SET source_thread_id = ?2, source_message_id = ?3, state = ?4,
-             interview_type = ?5, start_at = ?6, end_at = ?7, timezone = ?8, location = ?9,
-             meeting_url = ?10, participants = ?11, review_reason = ?12, calendar_event_id = ?13,
-             calendar_hash = ?14, calendar_synced_at = ?15, updated_at = ?16
+        "UPDATE interviews SET provider = ?2, source_thread_id = ?3, source_message_id = ?4,
+             state = ?5, interview_type = ?6, start_at = ?7, end_at = ?8, timezone = ?9,
+             location = ?10, meeting_url = ?11, participants = ?12, review_reason = ?13,
+             confidence = ?14, fingerprint = ?15, calendar_provider = ?16, calendar_event_id = ?17,
+             calendar_hash = ?18, calendar_synced_at = ?19, calendar_state = ?20, conflicts = ?21,
+             proposed_slots = ?22, updated_at = ?23
          WHERE id = ?1",
         params![
             i.id,
+            i.provider.as_str(),
             i.source_thread_id,
             i.source_message_id,
             i.state.as_str(),
@@ -502,11 +808,17 @@ pub fn save_interview(conn: &Connection, i: &InterviewRecord) -> AppResult<()> {
             i.timezone,
             i.location,
             i.meeting_url,
-            participants_json(&i.participants),
+            json_list(&i.participants),
             i.review_reason,
+            i.confidence,
+            i.fingerprint,
+            i.calendar_provider.map(ProviderId::as_str),
             i.calendar_event_id,
             i.calendar_hash,
             i.calendar_synced_at,
+            i.calendar_state.as_str(),
+            json_list(&i.conflicts),
+            json_list(&i.proposed_slots),
             i.updated_at,
         ],
     )?;

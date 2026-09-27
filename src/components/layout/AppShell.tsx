@@ -8,6 +8,7 @@ import { SIDEBAR_SHORTCUT } from '../../hooks/useSidebar';
 import { ChartIcon, GlobeIcon, PanelIcon } from '../icons';
 import { BrandMark } from '../ui/BrandMark';
 import { IconButton } from '../ui/IconButton';
+import { NotificationBell } from './NotificationBell';
 import { ThemeToggle } from './ThemeToggle';
 
 // The dashboard (and its charting library) loads when Analytics first opens.
@@ -141,6 +142,7 @@ export function AppShell({ sidebar, sidebarCollapsed, onToggleSidebar, children 
           >
             <GlobeIcon />
           </IconButton>
+          <NotificationBell />
           <ThemeToggle />
         </div>
       </header>

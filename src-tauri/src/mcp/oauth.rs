@@ -118,7 +118,10 @@ pub async fn sign_in(
         listener,
         |target| target.starts_with("/callback"),
         |target| target.contains("code="),
-        oauth_loopback::Pages { service: server },
+        oauth_loopback::Pages {
+            service: server,
+            success_title: None,
+        },
         cancel,
         SIGN_IN_TIMEOUT,
     )

@@ -298,13 +298,25 @@
   color: var(--color-warning);
 }
 
+.app-status--needs_action,
+.calendar-outcome--proposed {
+  background: var(--color-warning-subtle);
+  color: var(--color-warning);
+}
+
+.calendar-outcome--conflict {
+  background: var(--color-danger-subtle);
+  color: var(--color-danger);
+}
+
 .app-status--rejected,
 .calendar-outcome--cancelled {
   background: var(--color-danger-subtle);
   color: var(--color-danger);
 }
 
-.app-status--confirmed {
+.app-status--confirmed,
+.app-status--offer {
   background: var(--color-success-subtle);
   color: var(--color-success);
 }

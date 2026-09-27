@@ -36,15 +36,41 @@ export const commands = {
 	checkProviderConnection: (providerId: string) => __TAURI_INVOKE<ProviderView>("check_provider_connection", { providerId }),
 	/**  Signs out with the runtime's official logout and disconnects. */
 	signOutProvider: (providerId: string) => __TAURI_INVOKE<null>("sign_out_provider", { providerId }),
-	getGoogleStatus: () => __TAURI_INVOKE<GoogleStatus>("get_google_status"),
-	/**  Stores the user's own Google Cloud "Desktop app" OAuth client. */
-	saveGoogleClient: (clientId: string, clientSecret: string) => __TAURI_INVOKE<GoogleStatus>("save_google_client", { clientId, clientSecret }),
-	/**  Opens Google's consent page in the browser and waits for the redirect. */
-	connectGoogle: () => __TAURI_INVOKE<GoogleStatus>("connect_google"),
-	cancelGoogleConnect: () => __TAURI_INVOKE<null>("cancel_google_connect"),
-	/**  Revokes ReMa's access at Google and removes the stored tokens. */
-	disconnectGoogle: () => __TAURI_INVOKE<GoogleStatus>("disconnect_google"),
-	setGoogleServiceEnabled: (service: GoogleService, enabled: boolean) => __TAURI_INVOKE<GoogleStatus>("set_google_service_enabled", { service, enabled }),
+	/**  Every connector's state. Never contains tokens. */
+	getConnectors: () => __TAURI_INVOKE<ConnectorsOverview>("get_connectors"),
+	/**
+	 *  Opens the provider's sign-in in the default browser and waits for the
+	 *  redirect. Resolves when the account is connected (or the sign-in failed,
+	 *  was cancelled or timed out).
+	 */
+	connectConnector: (id: ConnectorId) => __TAURI_INVOKE<ConnectorsOverview>("connect_connector", { id }),
+	cancelConnectorSignIn: (provider: ProviderId) => __TAURI_INVOKE<null>("cancel_connector_sign_in", { provider }),
+	/**
+	 *  Stops the connector's sync; the last connector of an account also signs
+	 *  out (revokes access where the provider allows it and deletes the tokens).
+	 *  Application history is kept.
+	 */
+	disconnectConnector: (id: ConnectorId) => __TAURI_INVOKE<ConnectorsOverview>("disconnect_connector", { id }),
+	/**  "Sync now". */
+	syncConnector: (id: ConnectorId) => __TAURI_INVOKE<ConnectorsOverview>("sync_connector", { id }),
+	setConnectorBackgroundSync: (id: ConnectorId, enabled: boolean) => __TAURI_INVOKE<ConnectorsOverview>("set_connector_background_sync", { id, enabled }),
+	setConnectorPreferences: (preferences: ConnectorPreferences) => __TAURI_INVOKE<ConnectorsOverview>("set_connector_preferences", { preferences }),
+	/**  "Run ReMa in background" (system tray) and "Start ReMa at login". */
+	setBackgroundSettings: (runInBackground: boolean, startAtLogin: boolean) => __TAURI_INVOKE<ConnectorsOverview>("set_background_settings", { runInBackground, startAtLogin }),
+	getApplications: () => __TAURI_INVOKE<ApplicationsOverview>("get_applications"),
+	getApplication: (id: number) => __TAURI_INVOKE<ApplicationDetail>("get_application", { id }),
+	/**  A status change by the user (recorded on the timeline). */
+	setApplicationStatus: (id: number, status: ApplicationStatus, note: string | null) => __TAURI_INVOKE<ApplicationDetail>("set_application_status", { id, status, note }),
+	/**
+	 *  Adds a confirmed interview to the connected calendar. A conflict is an
+	 *  error unless `allow_conflict` confirms it.
+	 */
+	addInterviewToCalendar: (interviewId: number, allowConflict: boolean) => __TAURI_INVOKE<ApplicationDetail>("add_interview_to_calendar", { interviewId, allowConflict }),
+	declineInterviewCalendar: (interviewId: number) => __TAURI_INVOKE<ApplicationDetail>("decline_interview_calendar", { interviewId }),
+	listNotifications: () => __TAURI_INVOKE<NotificationItem[]>("list_notifications"),
+	/**  Marks the given notifications (or all, when `ids` is omitted) as read. */
+	markNotificationsRead: (ids: number[] | null) => __TAURI_INVOKE<null>("mark_notifications_read", { ids }),
+	clearNotifications: () => __TAURI_INVOKE<null>("clear_notifications"),
 	getProfile: () => __TAURI_INVOKE<ProfileView>("get_profile"),
 	saveProfile: (profile: Profile) => __TAURI_INVOKE<ProfileView>("save_profile", { profile }),
 	/**
@@ -228,11 +254,13 @@ export const commands = {
 export const events = {
 	agentsChanged: makeEvent<AgentsChanged>("agents-changed"),
 	analyticsChanged: makeEvent<AnalyticsChanged>("analytics-changed"),
+	applicationsChanged: makeEvent<ApplicationsChanged>("applications-changed"),
 	browserChanged: makeEvent<BrowserChanged>("browser-changed"),
 	chatEvent: makeEvent<ChatEvent>("chat-event"),
+	connectorsChanged: makeEvent<ConnectorsChanged>("connectors-changed"),
 	conversationsChanged: makeEvent<ConversationsChanged>("conversations-changed"),
-	googleChanged: makeEvent<GoogleChanged>("google-changed"),
 	mcpChanged: makeEvent<McpChanged>("mcp-changed"),
+	notificationsChanged: makeEvent<NotificationsChanged>("notifications-changed"),
 	portfolioChanged: makeEvent<PortfolioChanged>("portfolio-changed"),
 	profileChanged: makeEvent<ProfileChanged>("profile-changed"),
 	providersChanged: makeEvent<ProvidersChanged>("providers-changed"),
@@ -255,7 +283,13 @@ export type ActivityKind =
  *  ReMa's own search step before a job-search answer (`arguments`
  *  holds its status line).
  */
-"retrieval";
+"retrieval" | 
+/**
+ *  A connector tool: mail, calendar or the application tracker
+ *  (`server` names the connector). Changes always need approval, once
+ *  per call.
+ */
+"connector";
 
 /**  A page a web search found or opened. */
 export type ActivitySource = {
@@ -340,6 +374,14 @@ export type AppStatus = {
 /**  ReMa's color theme. Light is the default. */
 export type Appearance = "light" | "dark";
 
+export type ApplicationDetail = {
+	application: ApplicationRow,
+	reference: string | null,
+	timeline: TimelineEntry[],
+	interviews: InterviewView[],
+	correspondence: Correspondence[],
+};
+
 /**  One row of the application overview. */
 export type ApplicationRow = {
 	id: number,
@@ -367,7 +409,28 @@ export type ApplicationStatus =
 /**  The user has to do something (reply, assessment, pick a slot). */
 "needs_action" | 
 /**  A confirmed interview is coming up. */
-"upcoming_interview" | "rejected";
+"upcoming_interview" | "rejected" | 
+/**  The company made an offer. */
+"offer";
+
+/**  Applications or their timeline changed. */
+export type ApplicationsChanged = null;
+
+export type ApplicationsOverview = {
+	summary: ApplicationsSummary,
+	applications: ApplicationRow[],
+	/**  Emails the classifier was not sure about (no status was changed). */
+	needsReview: Correspondence[],
+};
+
+/**  Dashboard counts ("3 application updates today, …"). */
+export type ApplicationsSummary = {
+	updatesToday: number,
+	interviewsScheduled: number,
+	actionRequired: number,
+	offers: number,
+	total: number,
+};
 
 export type ApprovalDecision = "allow" | 
 /**  Allow this tool for the rest of the conversation (until ReMa quits). */
@@ -392,6 +455,16 @@ export type AutofillResult = {
 
 /**  Health of the backend core. */
 export type BackendStatus = "ready";
+
+/**  Explicit background execution options. Nothing runs once ReMa quits. */
+export type BackgroundSettings = {
+	/**  Closing the window keeps ReMa running in the system tray. */
+	runInBackground: boolean,
+	/**  ReMa starts (in the background) when the user logs in. */
+	startAtLogin: boolean,
+	/**  The platform offers a system tray (needed to run in the background). */
+	trayAvailable: boolean,
+};
 
 /**  Where the web page is drawn, in CSS pixels of ReMa's window. */
 export type BrowserBounds = {
@@ -430,7 +503,11 @@ export type CalendarOutcome = "created" | "updated" | "unchanged" |
 /**  The user deleted ReMa's event in Calendar; it is not recreated. */
 "removed" | 
 /**  Details are missing or unclear; nothing was written to Calendar. */
-"needs_review";
+"needs_review" | 
+/**  Free: proposed to the user ("Ask before adding"). */
+"proposed" | 
+/**  Overlaps existing events: nothing was written; the user was told. */
+"conflict";
 
 export type CalendarReport = {
 	created: number,
@@ -441,6 +518,20 @@ export type CalendarReport = {
 	needsReview: number,
 	items: CalendarItem[],
 };
+
+/**  What ReMa did or proposes for an interview's calendar event. */
+export type CalendarState = "none" | 
+/**  Free; waiting for the user to add it. */
+"proposed" | 
+/**  Overlaps existing events; nothing was written. */
+"conflict" | "created" | 
+/**  The user chose not to add it. */
+"declined" | 
+/**  The user deleted ReMa's event in the calendar. */
+"removed";
+
+/**  A permission a connector needs, mapped to provider scopes in Rust. */
+export type Capability = "mail_read" | "calendar_read" | "calendar_write" | "free_busy";
 
 export type CategoryCount = {
 	category: RequirementCategory,
@@ -506,6 +597,70 @@ export type ConnectionStatus = "disconnected" | "connected" |
 /**  The runtime is missing or failed; `status_message` says why. */
 "unavailable";
 
+/**  One connector card in Settings → Connectors. */
+export type ConnectorId = "gmail" | "google_calendar" | "outlook_mail" | "outlook_calendar";
+
+export type ConnectorKind = "mail" | "calendar";
+
+export type ConnectorPreferences = {
+	interviewMode: InterviewMode,
+	/**  Minutes between background syncs (5–1440). */
+	syncIntervalMinutes: number,
+	/**  Free time required before and after an interview (0–120 minutes). */
+	prepBufferMinutes: number,
+};
+
+/**  What a connector card shows. */
+export type ConnectorState = 
+/**  Not added (shows `+`). */
+"disconnected" | 
+/**  Waiting for the browser sign-in. */
+"connecting" | "connected" | 
+/**  Access was revoked or expired; the user must reconnect. */
+"reauth_required" | 
+/**  Connected, but a permission this connector needs was not granted. */
+"permission_missing" | 
+/**  A sync is running right now. */
+"syncing" | 
+/**  The last sync failed (retryable). */
+"error" | 
+/**  This build of ReMa has no sign-in configured for the provider. */
+"unavailable";
+
+export type ConnectorStatus = {
+	id: ConnectorId,
+	provider: ProviderId,
+	kind: ConnectorKind,
+	name: string,
+	/**  "Google" / "Microsoft" (shown as "by Google"). */
+	publisher: string,
+	description: string,
+	state: ConnectorState,
+	/**  The user added this connector (it may still need attention). */
+	enabled: boolean,
+	accountEmail: string | null,
+	accountName: string | null,
+	permissions: PermissionView[],
+	/**  Mail connectors: synchronize while ReMa runs. */
+	backgroundSync: boolean | null,
+	lastSyncStartedAt: number | null,
+	lastSyncAt: number | null,
+	nextSyncAt: number | null,
+	/**  A short user-readable explanation for the current state. */
+	message: string | null,
+	/**  Technical details for "Show details" (no secrets). */
+	detail: string | null,
+};
+
+/**  Connectors changed (state, account, sync). */
+export type ConnectorsChanged = null;
+
+export type ConnectorsOverview = {
+	connectors: ConnectorStatus[],
+	preferences: ConnectorPreferences,
+	background: BackgroundSettings,
+};
+
 export type Conversation = {
 	id: number,
 	title: string,
@@ -528,6 +683,22 @@ export type ConversationDetail = {
 
 /**  The conversation list changed (created, renamed, updated, deleted). */
 export type ConversationsChanged = null;
+
+/**  A job-related email, shown as correspondence (never its body). */
+export type Correspondence = {
+	/**  "google" / "microsoft". */
+	provider: string,
+	messageId: string,
+	subject: string | null,
+	sender: string | null,
+	receivedAt: number,
+	category: EmailCategory | null,
+	confidence: number | null,
+	/**  Opens the message in Gmail / Outlook on the web. */
+	webLink: string | null,
+	/**  processed | ambiguous | failed | pending */
+	status: string,
+};
 
 export type CoverageCounts = {
 	requirements: number,
@@ -627,6 +798,9 @@ export type Education = {
 	end: string,
 	description: string,
 };
+
+/**  What a job-related email is about (the classifier's strict schema). */
+export type EmailCategory = "application_received" | "application_update" | "recruiter_message" | "interview_request" | "interview_confirmed" | "interview_rescheduled" | "interview_cancelled" | "assessment_request" | "action_required" | "rejection" | "offer" | "other_job_related" | "not_job_related";
 
 export type EmploymentType = "full_time" | "part_time" | "contract" | "freelance" | "temporary" | "internship";
 
@@ -760,41 +934,36 @@ export type GapPriority = {
 	reasons: string[],
 };
 
-/**  The Google connection changed. */
-export type GoogleChanged = null;
-
-export type GoogleClientSource = 
-/**  Compiled into this build of ReMa. */
-"builtin" | 
-/**  Entered by the user in Settings. */
-"custom";
-
-/**  A Google Workspace capability ReMa can use. */
-export type GoogleService = "gmail" | "calendar";
-
-export type GoogleServiceStatus = {
-	/**  The user wants ReMa to use this service. */
-	enabled: boolean,
-	/**  Google granted the permission this service needs. */
-	granted: boolean,
-};
-
-/**  Google Workspace connection as shown in Settings. Never contains tokens. */
-export type GoogleStatus = {
-	client: GoogleClientSource | null,
-	connected: boolean,
-	/**  Google rejected the stored authorization; the user must reconnect. */
-	needsReconnect: boolean,
-	email: string | null,
-	gmail: GoogleServiceStatus,
-	calendar: GoogleServiceStatus,
-	/**  A sign-in is waiting for the browser. */
-	connecting: boolean,
-};
-
 export type Importance = "required" | "preferred";
 
 export type IntervalUnit = "minutes" | "hours";
+
+/**  What happens when an email confirms an interview. */
+export type InterviewMode = 
+/**  Propose the event; the user adds it (default). */
+"ask" | 
+/**  Add it when the confirmation is unambiguous and the time is free. */
+"auto";
+
+export type InterviewView = {
+	id: number,
+	/**  proposed | confirmed | needs_review | cancelled */
+	state: string,
+	interviewType: string | null,
+	startAt: number | null,
+	endAt: number | null,
+	timezone: string | null,
+	location: string | null,
+	meetingUrl: string | null,
+	participants: string[],
+	reviewReason: string | null,
+	calendarState: CalendarState,
+	/**  "google" / "microsoft" when an event exists or is proposed. */
+	calendarProvider: string | null,
+	conflicts: ConflictingEvent[],
+	/**  Times an interview request proposes, with availability. */
+	proposedSlots: ProposedSlot[],
+};
 
 export type JobColumn = "rank" | "company" | "role" | "location" | "work_mode" | "salary" | "seniority" | "match" | "skill_gap" | "posted" | "discovered" | "source";
 
@@ -1097,7 +1266,26 @@ export type ModelRef = {
 	modelId: string,
 };
 
+export type NotificationItem = {
+	id: number,
+	kind: string,
+	title: string,
+	body: string,
+	applicationId: number | null,
+	createdAt: number,
+	read: boolean,
+};
+
+/**  A notification was added or read. */
+export type NotificationsChanged = null;
+
 export type PageSize = "a4" | "letter";
+
+export type PermissionView = {
+	capability: Capability,
+	label: string,
+	granted: boolean,
+};
 
 export type PipelineStatus = {
 	jobs: number,
@@ -1287,6 +1475,19 @@ export type ProfileView = {
 	/**  When the Custom Profile was last saved; `None` if never. */
 	updatedAt: number | null,
 };
+
+/**  A time an interview request proposes, checked against the calendar. */
+export type ProposedSlot = {
+	startAt: number,
+	endAt: number,
+	timezone: string,
+	/**  `None` when no calendar is connected. */
+	available: boolean | null,
+	conflicts: ConflictingEvent[],
+};
+
+/**  The account provider behind a connector. */
+export type ProviderId = "google" | "microsoft";
 
 /**  The API family a provider speaks. Each kind has one adapter in `llm/`. */
 export type ProviderKind = "openai" | "anthropic" | "gemini" | 
@@ -1667,16 +1868,20 @@ export type TaskKind =
 /**  Sends the prompt to the model and keeps its answer. */
 { type: "prompt" } | 
 /**
- *  Checks Gmail for job-application emails, keeps the application
- *  overview up to date and can sync confirmed interviews to Calendar.
- *  The prompt adds the user's instructions.
+ *  The Job Application Mail Monitor: checks the connected mailboxes
+ *  (Gmail, Outlook Mail) for job-application emails, keeps the
+ *  application tracker up to date and handles confirmed interviews in
+ *  the connected calendars (with conflict checks). The prompt adds the
+ *  user's instructions.
  */
 { type: "job_applications"; 
 /**
  *  Days of email to check on every run (1–90). Each run also
  *  covers everything since the previous successful run.
  */
-lookbackDays: number; syncCalendar: boolean; detectConflicts: boolean };
+lookbackDays: number; 
+/**  Check calendars and handle confirmed interviews. */
+syncCalendar: boolean };
 
 /**  Lifecycle of a task as shown to the user. */
 export type TaskStatus = 
@@ -1689,6 +1894,21 @@ export type TaskStatus =
 
 /**  Tasks or their executions changed (created, edited, ran, finished). */
 export type TasksChanged = null;
+
+/**  One entry of an application's audit timeline. */
+export type TimelineEntry = {
+	id: number,
+	source: UpdateSource,
+	change: string,
+	status: ApplicationStatus,
+	previousStatus: ApplicationStatus | null,
+	category: EmailCategory | null,
+	/**  0–1, for automatic updates. */
+	confidence: number | null,
+	summary: string | null,
+	occurredAt: number,
+	createdAt: number,
+};
 
 /**
  *  A tool call (or an unavailable server) while answering, shown with the
@@ -1719,6 +1939,13 @@ export type ToolStatus =
 "denied" | 
 /**  A selected server could not be used for this answer. */
 "unavailable";
+
+/**  Where a timeline entry came from. */
+export type UpdateSource = "gmail" | "outlook" | "google_calendar" | "outlook_calendar" | 
+/**  Changed by the user in ReMa. */
+"user" | 
+/**  Changed by the assistant with the user's approval. */
+"assistant";
 
 /**  `service: None` turns the service off (and removes its key). */
 export type WebSearchInput = {

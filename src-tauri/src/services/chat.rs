@@ -33,7 +33,10 @@ use crate::{
         provider::{ModelRef, ProviderKind},
     },
     retrieval::{self, render, JobQuery, Outcome},
-    services::{agents, chat_tools::ChatTools, mcp, profile_context, providers},
+    services::{
+        agents, chat_tools::ChatTools, connector_tools, connector_tools::ConnectorTools, mcp,
+        profile_context, providers,
+    },
     state::AppState,
     time::now_ms,
 };
@@ -856,6 +859,9 @@ async fn generate(
         } else {
             None
         };
+        // Set once a tool returns the user's mail, calendar or application
+        // data; from then on MCP calls need approval.
+        let private = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (mut tools, more, offer) =
             if conversation.mcp_server_ids.is_empty() && builtin.is_none() {
                 (
@@ -871,10 +877,40 @@ async fn generate(
                     &conversation.mcp_server_ids,
                     builtin.as_ref().map(|h| h.connection.clone()),
                     cancel.clone(),
+                    private.clone(),
                 )
                 .await?
             };
         notices.extend(more);
+        // A question about the user's mail, calendar or applications gets
+        // the connector tools and no web access in this answer.
+        let asks_private = turns
+            .last()
+            .filter(|t| t.role == MessageRole::User)
+            .is_some_and(|t| connector_tools::wants_private_data(&t.content));
+        let connector = if asks_private && !cannot_use_tools(&model_key) {
+            ConnectorTools::prepare(
+                state,
+                conversation_id,
+                message_id,
+                cancel.clone(),
+                private.clone(),
+            )
+            .await
+        } else {
+            None
+        };
+        let private_answer = connector.is_some();
+        if let Some((mut specs, executor)) = connector {
+            let next = tools.as_ref().map(|t| t.executor.clone());
+            if let Some(mcp) = &tools {
+                specs.extend(mcp.specs.clone());
+            }
+            tools = Some(ToolBox {
+                specs,
+                executor: Arc::new(executor.with_next(next)),
+            });
+        }
         for notice in notices {
             state
                 .generations
@@ -888,9 +924,9 @@ async fn generate(
         let has_mcp = offer.user;
         // A model without a hosted web search gets ReMa's own web tools when
         // a search service is set up.
-        let hosted_search = can_search_web(&endpoint);
+        let hosted_search = can_search_web(&endpoint) && !private_answer;
         let mut web_tools = false;
-        if !hosted_search {
+        if !hosted_search && !private_answer {
             if let Ok(Some(service)) = retrieval::backend::configured(state).await {
                 let mut specs = retrieval::tools::specs();
                 if let Some(mcp) = &tools {
@@ -925,6 +961,9 @@ async fn generate(
         }
         if offer.builtin {
             system.push_str(REMA_MCP_PROMPT);
+        }
+        if private_answer {
+            system.push_str(connector_tools::PROMPT);
         }
         if web_tools {
             system.push_str(
@@ -1179,6 +1218,72 @@ mod tests {
             .collect();
         assert_eq!(turns, ["one", "ok", "two"]);
         assert_eq!(list_conversations(&state).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn questions_about_applications_get_connector_tools_and_no_web() {
+        let (state, _, llm) = setup(FakeLanguageModel::replying(&["It is in process."])).await;
+        let now = now_ms();
+        state
+            .db
+            .call(|c| {
+                crate::db::jobs::insert_application(
+                    c,
+                    &crate::db::jobs::ApplicationRecord {
+                        id: 0,
+                        company: "Acme".into(),
+                        company_key: "acme".into(),
+                        role: None,
+                        role_key: None,
+                        reference: None,
+                        sender_domain: None,
+                        status: crate::models::jobs::ApplicationStatus::InProcess,
+                        requires_action: false,
+                        next_action: None,
+                        last_update_at: now,
+                        created_at: now,
+                        updated_at: now,
+                    },
+                )
+            })
+            .unwrap();
+
+        let sent = send_message(
+            &state,
+            send(None, "What happened with my Acme application?"),
+        )
+        .await
+        .unwrap();
+        wait_until_done(&state, sent.assistant_message.id).await;
+        let (_, request) = llm.requests.lock().unwrap()[0].clone();
+        assert!(request.web.is_none(), "no web access next to private data");
+        let names: Vec<String> = request
+            .tool_specs()
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
+        assert!(names.contains(&connector_tools::APPLICATIONS_FIND_MATCH.to_string()));
+        assert!(
+            !names.iter().any(|n| n.starts_with("mail_")),
+            "no mailbox connected"
+        );
+        assert!(!names.iter().any(|n| n.starts_with("rema_web")));
+        assert!(request
+            .system
+            .unwrap()
+            .contains("Web search is turned off for this answer"));
+
+        // Other questions keep the web and get no connector tools.
+        let sent = send_message(&state, send(None, "Explain the STAR method"))
+            .await
+            .unwrap();
+        wait_until_done(&state, sent.assistant_message.id).await;
+        let (_, request) = llm.requests.lock().unwrap()[1].clone();
+        assert!(request.web.is_some());
+        assert!(request
+            .tool_specs()
+            .iter()
+            .all(|s| !s.name.starts_with("applications_")));
     }
 
     #[tokio::test]

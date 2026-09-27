@@ -1,7 +1,7 @@
 import { useState } from 'react';
 
 import { dataOr } from '../../hooks/useAsyncData';
-import { useGoogleStatus } from '../../hooks/useGoogle';
+import { useConnectors } from '../../hooks/useConnectors';
 import { WEEKDAYS } from '../../lib/format';
 import {
   defaultForm,
@@ -49,7 +49,11 @@ export function TaskDialog({
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const update = (patch: Partial<TaskForm>) => setForm((f) => ({ ...f, ...patch }));
-  const google = dataOr(useGoogleStatus().state, null);
+  const connectors = dataOr(useConnectors().state, null)?.connectors ?? [];
+  const usable = (kind: 'mail' | 'calendar') =>
+    connectors.filter((c) => c.kind === kind && (c.state === 'connected' || c.state === 'syncing'));
+  const mailboxes = usable('mail');
+  const calendars = usable('calendar');
   const jobs = form.type === 'job_applications';
 
   const taskTimezone = task?.timezone ?? timezone;
@@ -115,7 +119,7 @@ export function TaskDialog({
             onChange={(e) => update({ type: e.target.value as TaskForm['type'] })}
           >
             <option value="prompt">Prompt</option>
-            <option value="job_applications">Job applications (Gmail)</option>
+            <option value="job_applications">Job Application Mail Monitor</option>
           </select>
         </label>
 
@@ -181,23 +185,18 @@ export function TaskDialog({
                 checked={form.syncCalendar}
                 onChange={(e) => update({ syncCalendar: e.target.checked })}
               />
-              <span>Add confirmed interviews to Google Calendar</span>
-            </label>
-            <label className="checkbox">
-              <input
-                type="checkbox"
-                checked={form.syncCalendar && form.detectConflicts}
-                disabled={!form.syncCalendar}
-                onChange={(e) => update({ detectConflicts: e.target.checked })}
-              />
-              <span>Report calendar conflicts</span>
+              <span>Handle confirmed interviews in my calendar (conflicts are always checked)</span>
             </label>
             <p className="form__hint">
-              {google?.connected
-                ? `Uses ${google.email ?? 'your Google account'}: Gmail read-only${
-                    form.syncCalendar ? ' and Calendar' : ''
-                  }. Each run also covers emails since the last successful run.`
-                : 'Connect Google in Settings to use this task.'}
+              {mailboxes.length === 0
+                ? 'Connect Gmail or Outlook Mail in Settings → Connectors to use this task.'
+                : `Checks ${mailboxes.map((c) => c.name).join(' and ')}${
+                    form.syncCalendar
+                      ? calendars.length > 0
+                        ? ` with ${calendars.map((c) => c.name).join(' and ')}`
+                        : ' (connect a calendar in Settings → Connectors for interviews)'
+                      : ''
+                  }. Each run also covers mail since the last successful sync.`}
             </p>
           </div>
         )}
@@ -207,7 +206,7 @@ export function TaskDialog({
             <span className="field__label">Name</span>
             <input
               className="input"
-              placeholder={jobs ? 'Job application monitor' : 'From the prompt'}
+              placeholder={jobs ? 'Job Application Mail Monitor' : 'From the prompt'}
               value={form.name}
               onChange={(e) => update({ name: e.target.value })}
             />

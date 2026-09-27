@@ -6,9 +6,9 @@ use crate::{
     accounts::Accounts,
     analytics::AnalyticsContext,
     browser::BrowserContext,
+    connectors::ConnectorsContext,
     db::Database,
     events::EventSink,
-    integrations::google::GoogleContext,
     llm::LanguageModel,
     mcp::McpContext,
     secrets::SecretVault,
@@ -49,7 +49,8 @@ pub struct AppState {
     /// Chat responses currently streaming.
     pub generations: Generations,
     pub scheduler: SchedulerHandle,
-    pub google: GoogleContext,
+    /// Gmail, Google Calendar, Outlook Mail and Outlook Calendar.
+    pub connectors: ConnectorsContext,
     pub browser: BrowserContext,
     pub analytics: AnalyticsContext,
     /// MCP server connections.
@@ -64,8 +65,10 @@ pub struct AppState {
 pub mod testing {
     use super::*;
     use crate::{
-        accounts::fake::FakeAccountRuntime, events::RecordingEvents,
-        integrations::google::GoogleEndpoints, secrets::MemoryStore,
+        accounts::fake::FakeAccountRuntime,
+        connectors::{google::GoogleEndpoints, microsoft::MicrosoftEndpoints, Apps},
+        events::RecordingEvents,
+        secrets::MemoryStore,
     };
 
     /// A fresh, empty folder under the system temp directory.
@@ -98,7 +101,11 @@ pub mod testing {
             events: events.clone(),
             generations: Generations::default(),
             scheduler: SchedulerHandle::default(),
-            google: GoogleContext::new(GoogleEndpoints::default()),
+            connectors: ConnectorsContext::new(
+                GoogleEndpoints::default(),
+                MicrosoftEndpoints::default(),
+                Apps::default(),
+            ),
             browser: Default::default(),
             analytics: Default::default(),
             mcp: Default::default(),

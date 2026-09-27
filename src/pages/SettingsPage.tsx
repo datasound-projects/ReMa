@@ -2,7 +2,7 @@ import { useState } from 'react';
 
 import { PlusIcon } from '../components/icons';
 import { PageContainer } from '../components/layout/PageContainer';
-import { GoogleSection } from '../components/settings/GoogleSection';
+import { ConnectorsSection } from '../components/settings/ConnectorsSection';
 import { McpSection } from '../components/settings/McpSection';
 import { WebSearchSection } from '../components/settings/WebSearchSection';
 import { CloudProviderRow } from '../components/settings/CloudProviderRow';
@@ -18,7 +18,7 @@ import { setDefaultModel, type ModelRef } from '../services/providerService';
 
 const modelKey = (m: ModelRef) => `${m.providerId}/${m.modelId}`;
 
-export function SettingsPage({ focus }: { focus?: 'mcp' }) {
+export function SettingsPage({ focus }: { focus?: 'mcp' | 'connectors' }) {
   const settings = useProviderSettings();
   const catalog = dataOr(useModelCatalog().state, null);
   const status = useAppStatus().state;
@@ -135,11 +135,12 @@ export function SettingsPage({ focus }: { focus?: 'mcp' }) {
         {error && <p className="form-error">{error}</p>}
       </section>
 
+      <ConnectorsSection focus={focus === 'connectors'} />
+
       <WebSearchSection />
 
       <McpSection focus={focus === 'mcp'} />
 
-      <GoogleSection />
 
       <section className="section" aria-labelledby="about-heading">
         <h2 id="about-heading" className="section__title">

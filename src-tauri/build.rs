@@ -22,6 +22,15 @@ fn main() {
         std::fs::write(PERMISSION_SET_PATH, set).expect("write the permission set");
     }
     println!("cargo:rerun-if-changed=src/ipc_commands.rs");
+    // ReMa's own OAuth app registrations are compiled in (see `connectors`).
+    for var in [
+        "REMA_GOOGLE_CLIENT_ID",
+        "REMA_GOOGLE_CLIENT_SECRET",
+        "REMA_MICROSOFT_CLIENT_ID",
+        "REMA_MICROSOFT_TENANT",
+    ] {
+        println!("cargo:rerun-if-env-changed={var}");
+    }
     // Development builds look for runtimes fetched into `runtimes/` (see
     // `accounts::locate`), which are named after the target.
     println!(

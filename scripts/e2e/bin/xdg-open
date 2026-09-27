@@ -1,0 +1,12 @@
+#!/bin/sh
+# Plays the system browser for end-to-end runs: follows the sign-in page's
+# redirects to ReMa's loopback address and saves the page it shows.
+# Other links (help pages, mail links) are only logged.
+log="${REMA_E2E_BROWSER_LOG:-/tmp/rema-e2e-browser.log}"
+echo "open $1" >> "$log"
+case "$1" in
+  http://127.0.0.1:*|http://localhost:*)
+    curl -s -L --max-redirs 5 "$1" >> "$log" 2>&1
+    echo >> "$log"
+    ;;
+esac

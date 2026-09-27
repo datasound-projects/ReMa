@@ -58,16 +58,18 @@ pub enum EndCondition {
 pub enum TaskKind {
     /// Sends the prompt to the model and keeps its answer.
     Prompt,
-    /// Checks Gmail for job-application emails, keeps the application
-    /// overview up to date and can sync confirmed interviews to Calendar.
-    /// The prompt adds the user's instructions.
+    /// The Job Application Mail Monitor: checks the connected mailboxes
+    /// (Gmail, Outlook Mail) for job-application emails, keeps the
+    /// application tracker up to date and handles confirmed interviews in
+    /// the connected calendars (with conflict checks). The prompt adds the
+    /// user's instructions.
     #[serde(rename_all = "camelCase")]
     JobApplications {
         /// Days of email to check on every run (1–90). Each run also
         /// covers everything since the previous successful run.
         lookback_days: u32,
+        /// Check calendars and handle confirmed interviews.
         sync_calendar: bool,
-        detect_conflicts: bool,
     },
 }
 

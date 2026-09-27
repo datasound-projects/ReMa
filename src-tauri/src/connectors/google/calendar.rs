@@ -1,121 +1,35 @@
-//! Google Calendar (primary calendar) as a deterministic tool.
-//!
-//! Only four operations exist: list events in a window, look up an event,
-//! create an interview event and update one. Every event ReMa writes carries
-//! a private extended property with its interview id, so a lost database
-//! write can never lead to a duplicate event.
+//! Google Calendar (primary calendar) behind [`CalendarProvider`]: events in
+//! a window, free/busy, and the interview events ReMa manages.
 
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 
-use super::gmail::google_error;
 use crate::{
-    error::{AppError, AppResult},
-    llm::{
-        http::{error_message, scrub},
-        BoxFuture,
+    connectors::{
+        api::ApiClient,
+        calendar::{
+            rfc3339, BusyBlock, CalendarEvent, CalendarProvider, EventDraft, INTERVIEW_PROPERTY,
+        },
     },
+    error::{AppError, AppResult},
+    llm::BoxFuture,
+    models::connectors::ProviderId,
 };
 
-/// Private extended property linking an event to a ReMa interview.
-pub const INTERVIEW_PROPERTY: &str = "remaInterviewId";
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CalendarEvent {
-    pub id: String,
-    pub title: String,
-    pub start_at: Option<i64>,
-    pub end_at: Option<i64>,
-    pub all_day: bool,
-    /// Marked as "free" (does not block time).
-    pub transparent: bool,
-    pub interview_id: Option<i64>,
-}
-
-/// The content of an interview event ReMa writes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EventDraft {
-    pub interview_id: i64,
-    pub summary: String,
-    pub description: String,
-    pub location: Option<String>,
-    pub start_at: i64,
-    pub end_at: i64,
-    pub timezone: String,
-    /// The interview was cancelled: keep the event but mark it and free the time.
-    pub cancelled: bool,
-}
-
-fn rfc3339(millis: i64) -> String {
-    jiff::Timestamp::from_millisecond(millis)
-        .map(|t| t.to_string())
-        .unwrap_or_default()
-}
-
 impl EventDraft {
-    pub fn to_json(&self) -> Value {
-        let mut event = json!({
+    /// The Google Calendar event body.
+    pub fn to_google(&self) -> Value {
+        json!({
             "summary": self.summary,
             "description": self.description,
+            "location": self.location.clone().unwrap_or_default(),
             "start": { "dateTime": rfc3339(self.start_at), "timeZone": self.timezone },
             "end": { "dateTime": rfc3339(self.end_at), "timeZone": self.timezone },
             "transparency": if self.cancelled { "transparent" } else { "opaque" },
             "extendedProperties": {
                 "private": { INTERVIEW_PROPERTY: self.interview_id.to_string() }
             },
-        });
-        event["location"] = json!(self.location.clone().unwrap_or_default());
-        event
-    }
-
-    /// Fingerprint of the written content, to detect needed updates.
-    pub fn content_hash(&self) -> String {
-        let digest = Sha256::digest(self.to_json().to_string().as_bytes());
-        digest.iter().map(|b| format!("{b:02x}")).collect()
-    }
-}
-
-pub trait CalendarApi: Send + Sync {
-    /// Events overlapping `[time_min, time_max)` on the primary calendar.
-    fn list_events<'a>(
-        &'a self,
-        time_min: i64,
-        time_max: i64,
-    ) -> BoxFuture<'a, AppResult<Vec<CalendarEvent>>>;
-    /// `None` if the event no longer exists (deleted in Calendar).
-    fn get_event<'a>(&'a self, id: &'a str) -> BoxFuture<'a, AppResult<Option<CalendarEvent>>>;
-    /// An event ReMa created for this interview, found by its private property.
-    fn find_by_interview<'a>(
-        &'a self,
-        interview_id: i64,
-    ) -> BoxFuture<'a, AppResult<Option<CalendarEvent>>>;
-    fn create_event<'a>(&'a self, draft: &'a EventDraft) -> BoxFuture<'a, AppResult<String>>;
-    fn update_event<'a>(
-        &'a self,
-        id: &'a str,
-        draft: &'a EventDraft,
-    ) -> BoxFuture<'a, AppResult<()>>;
-}
-
-/// Existing events that overlap an interview and block time. ReMa's own
-/// event for the interview, free ("transparent") and all-day events do not
-/// count. Nothing is moved: conflicts are only reported.
-pub fn find_conflicts(
-    events: &[CalendarEvent],
-    start_at: i64,
-    end_at: i64,
-    interview_id: i64,
-) -> Vec<CalendarEvent> {
-    events
-        .iter()
-        .filter(|e| e.interview_id != Some(interview_id))
-        .filter(|e| !e.all_day && !e.transparent)
-        .filter(|e| match (e.start_at, e.end_at) {
-            (Some(s), Some(end)) => s < end_at && start_at < end,
-            _ => false,
         })
-        .cloned()
-        .collect()
+    }
 }
 
 fn parse_time(value: &Value) -> (Option<i64>, bool) {
@@ -161,46 +75,22 @@ pub fn parse_event(value: &Value) -> Option<CalendarEvent> {
     })
 }
 
-/// The real client for the Google Calendar REST API.
-pub struct HttpCalendar {
-    http: reqwest::Client,
-    base: String,
-    token: String,
+/// Google Calendar behind the calendar interface.
+pub struct GoogleCalendar {
+    pub api: ApiClient,
+    /// Used for free/busy (the primary calendar's id is the account email).
+    pub calendar_id: String,
 }
 
-impl HttpCalendar {
-    pub fn new(http: reqwest::Client, base: &str, access_token: String) -> Self {
-        Self {
-            http,
-            base: base.trim_end_matches('/').to_string(),
-            token: access_token,
-        }
-    }
+fn event_path(id: &str) -> String {
+    let id: String = id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+        .collect();
+    format!("calendars/primary/events/{id}")
+}
 
-    fn url(&self, path: &str) -> String {
-        format!("{}/calendars/primary/{path}", self.base)
-    }
-
-    async fn send(&self, request: reqwest::RequestBuilder) -> AppResult<Option<Value>> {
-        let response = request.bearer_auth(&self.token).send().await?;
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        if status.is_success() {
-            return serde_json::from_str(&body)
-                .map(Some)
-                .map_err(|_| AppError::provider("Google Calendar sent an unreadable response."));
-        }
-        if status.as_u16() == 404 || status.as_u16() == 410 {
-            return Ok(None);
-        }
-        let detail = serde_json::from_str::<Value>(&body)
-            .ok()
-            .and_then(|v| error_message(&v))
-            .map(|m| scrub(&m, &[&self.token]))
-            .unwrap_or_default();
-        Err(google_error("Google Calendar", status.as_u16(), &detail))
-    }
-
+impl GoogleCalendar {
     async fn list(&self, query: &[(&str, String)]) -> AppResult<Vec<CalendarEvent>> {
         let mut events = Vec::new();
         let mut page: Option<String> = None;
@@ -209,12 +99,7 @@ impl HttpCalendar {
             if let Some(token) = &page {
                 params.push(("pageToken", token.clone()));
             }
-            let Some(body) = self
-                .send(self.http.get(self.url("events")).query(&params))
-                .await?
-            else {
-                break;
-            };
+            let body = self.api.get("calendars/primary/events", &params).await?;
             events.extend(
                 body.get("items")
                     .and_then(Value::as_array)
@@ -231,7 +116,11 @@ impl HttpCalendar {
     }
 }
 
-impl CalendarApi for HttpCalendar {
+impl CalendarProvider for GoogleCalendar {
+    fn provider(&self) -> ProviderId {
+        ProviderId::Google
+    }
+
     fn list_events<'a>(
         &'a self,
         time_min: i64,
@@ -249,12 +138,62 @@ impl CalendarApi for HttpCalendar {
         })
     }
 
+    fn get_availability<'a>(
+        &'a self,
+        time_min: i64,
+        time_max: i64,
+    ) -> BoxFuture<'a, AppResult<Vec<BusyBlock>>> {
+        Box::pin(async move {
+            let body = json!({
+                "timeMin": rfc3339(time_min),
+                "timeMax": rfc3339(time_max),
+                "items": [{ "id": "primary" }],
+            });
+            let response = self
+                .api
+                .send(reqwest::Method::POST, "freeBusy", |r| r.json(&body))
+                .await?;
+            let value = self.api.expect_ok(response)?;
+            let calendars = value.get("calendars").and_then(Value::as_object);
+            let busy = calendars
+                .and_then(|c| {
+                    c.get("primary")
+                        .or_else(|| c.get(&self.calendar_id))
+                        .or_else(|| c.values().next())
+                })
+                .and_then(|c| c.get("busy"))
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            Ok(busy
+                .iter()
+                .filter_map(|b| {
+                    let time = |key: &str| {
+                        b.get(key)?
+                            .as_str()?
+                            .parse::<jiff::Timestamp>()
+                            .ok()
+                            .map(|t| t.as_millisecond())
+                    };
+                    Some(BusyBlock {
+                        start_at: time("start")?,
+                        end_at: time("end")?,
+                    })
+                })
+                .collect())
+        })
+    }
+
     fn get_event<'a>(&'a self, id: &'a str) -> BoxFuture<'a, AppResult<Option<CalendarEvent>>> {
         Box::pin(async move {
-            let body = self
-                .send(self.http.get(self.url(&format!("events/{id}"))))
+            let response = self
+                .api
+                .send(reqwest::Method::GET, &event_path(id), |r| r)
                 .await?;
-            Ok(body.as_ref().and_then(parse_event))
+            if matches!(response.status, 404 | 410) {
+                return Ok(None);
+            }
+            Ok(parse_event(&self.api.expect_ok(response)?))
         })
     }
 
@@ -280,11 +219,16 @@ impl CalendarApi for HttpCalendar {
 
     fn create_event<'a>(&'a self, draft: &'a EventDraft) -> BoxFuture<'a, AppResult<String>> {
         Box::pin(async move {
-            let body = self
-                .send(self.http.post(self.url("events")).json(&draft.to_json()))
-                .await?
-                .ok_or_else(|| AppError::provider("Google Calendar could not create the event."))?;
-            body.get("id")
+            let body = draft.to_google();
+            let response = self
+                .api
+                .send(reqwest::Method::POST, "calendars/primary/events", |r| {
+                    r.json(&body)
+                })
+                .await?;
+            let value = self.api.expect_ok(response)?;
+            value
+                .get("id")
                 .and_then(Value::as_str)
                 .map(str::to_string)
                 .ok_or_else(|| AppError::provider("Google Calendar returned no event id."))
@@ -297,60 +241,39 @@ impl CalendarApi for HttpCalendar {
         draft: &'a EventDraft,
     ) -> BoxFuture<'a, AppResult<()>> {
         Box::pin(async move {
-            self.send(
-                self.http
-                    .patch(self.url(&format!("events/{id}")))
-                    .json(&draft.to_json()),
-            )
-            .await?
-            .ok_or_else(|| AppError::not_found("The Calendar event no longer exists."))?;
-            Ok(())
+            let body = draft.to_google();
+            let response = self
+                .api
+                .send(reqwest::Method::PATCH, &event_path(id), |r| r.json(&body))
+                .await?;
+            if matches!(response.status, 404 | 410) {
+                return Err(AppError::not_found("The calendar event no longer exists."));
+            }
+            self.api.expect_ok(response).map(|_| ())
         })
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
-    use crate::test_support::MockServer;
+    use crate::{connectors::api::StaticToken, test_support::MockServer};
 
     const HOUR: i64 = 3_600_000;
 
-    fn event(id: &str, start: i64, end: i64) -> CalendarEvent {
-        CalendarEvent {
-            id: id.into(),
-            title: id.into(),
-            start_at: Some(start),
-            end_at: Some(end),
-            all_day: false,
-            transparent: false,
-            interview_id: None,
+    fn calendar(server: &MockServer) -> GoogleCalendar {
+        GoogleCalendar {
+            api: ApiClient::new(
+                reqwest::Client::new(),
+                Arc::new(StaticToken("tok".into())),
+                "Google Calendar",
+                "Google Calendar",
+                &format!("{}/calendar/v3", server.base_url),
+            ),
+            calendar_id: "me@example.com".into(),
         }
-    }
-
-    #[test]
-    fn detects_only_real_overlaps() {
-        let (start, end) = (10 * HOUR, 11 * HOUR);
-        let mut own = event("own", start, end);
-        own.interview_id = Some(7);
-        let mut free = event("free", start, end);
-        free.transparent = true;
-        let mut all_day = event("holiday", 0, 24 * HOUR);
-        all_day.all_day = true;
-        let events = vec![
-            event("overlap", 10 * HOUR + HOUR / 2, 11 * HOUR + HOUR / 2),
-            event("before", 9 * HOUR, 10 * HOUR),
-            event("after", 11 * HOUR, 12 * HOUR),
-            event("inside", 10 * HOUR + 10, 10 * HOUR + 20),
-            own,
-            free,
-            all_day,
-        ];
-        let ids: Vec<_> = find_conflicts(&events, start, end, 7)
-            .into_iter()
-            .map(|e| e.id)
-            .collect();
-        assert_eq!(ids, ["overlap", "inside"]);
     }
 
     #[test]
@@ -363,7 +286,6 @@ mod tests {
         .unwrap();
         assert_eq!(timed.end_at.unwrap() - timed.start_at.unwrap(), HOUR / 2);
         assert_eq!(timed.interview_id, Some(12));
-
         let all_day = parse_event(
             &json!({"id": "e2", "start": {"date": "2026-09-28"}, "end": {"date": "2026-09-29"}}),
         )
@@ -376,34 +298,28 @@ mod tests {
     }
 
     #[test]
-    fn drafts_carry_the_interview_link_and_a_stable_hash() {
+    fn drafts_keep_the_stated_time_zone_and_the_interview_link() {
         let draft = EventDraft {
             interview_id: 5,
-            summary: "AI Engineer Interview — Acme".into(),
-            description: "Role: AI Engineer".into(),
+            summary: "Interview — Acme — AI Engineer".into(),
+            description: "Company: Acme".into(),
             location: None,
             start_at: 1_790_000_000_000,
             end_at: 1_790_003_600_000,
             timezone: "Europe/Vienna".into(),
             cancelled: false,
         };
-        let body = draft.to_json();
+        let body = draft.to_google();
         assert_eq!(
             body["extendedProperties"]["private"]["remaInterviewId"],
             "5"
         );
         assert_eq!(body["start"]["timeZone"], "Europe/Vienna");
         assert!(body["start"]["dateTime"].as_str().unwrap().ends_with('Z'));
-        assert_eq!(draft.content_hash(), draft.clone().content_hash());
-        let moved = EventDraft {
-            start_at: draft.start_at + HOUR,
-            ..draft.clone()
-        };
-        assert_ne!(moved.content_hash(), draft.content_hash());
     }
 
     #[tokio::test]
-    async fn creates_updates_and_finds_events_over_http() {
+    async fn creates_updates_finds_events_and_reads_free_busy() {
         let server = MockServer::start(|req| {
             let t = req.target.as_str();
             if req.method == "POST" && t.ends_with("/calendars/primary/events") {
@@ -416,17 +332,16 @@ mod tests {
                 return Some((200, r#"{"items":[{"id":"new-event","start":{"dateTime":"2026-09-28T08:00:00Z"},
                     "end":{"dateTime":"2026-09-28T09:00:00Z"},"extendedProperties":{"private":{"remaInterviewId":"5"}}}]}"#.into()));
             }
+            if req.method == "POST" && t.ends_with("/freeBusy") {
+                return Some((200, r#"{"calendars":{"primary":{"busy":[{"start":"2026-09-28T08:30:00Z","end":"2026-09-28T09:30:00Z"}]}}}"#.into()));
+            }
             if t.contains("/events/gone") {
                 return Some((410, "{}".into()));
             }
             None
         })
         .await;
-        let api = HttpCalendar::new(
-            reqwest::Client::new(),
-            &format!("{}/calendar/v3", server.base_url),
-            "tok".into(),
-        );
+        let api = calendar(&server);
         let draft = EventDraft {
             interview_id: 5,
             summary: "Interview".into(),
@@ -444,11 +359,13 @@ mod tests {
             "new-event"
         );
         assert_eq!(api.get_event("gone").await.unwrap(), None);
-
+        let busy = api.get_availability(0, HOUR).await.unwrap();
+        assert_eq!(busy.len(), 1);
+        assert_eq!(busy[0].end_at - busy[0].start_at, HOUR);
         let created = server
             .requests()
             .into_iter()
-            .find(|r| r.method == "POST")
+            .find(|r| r.method == "POST" && r.target.ends_with("/events"))
             .unwrap();
         assert!(created.body.contains("remaInterviewId"));
         assert!(created.headers.contains("authorization: bearer tok"));

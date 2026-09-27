@@ -1,9 +1,14 @@
 pub mod accounts;
 pub mod agents;
+pub mod applications;
+pub mod background;
 pub mod chat;
 pub mod chat_tools;
+pub mod connector_tools;
 pub mod documents;
+pub mod mail_monitor;
 pub mod mcp;
+pub mod notifications;
 pub mod portfolio;
 pub mod profile;
 pub mod profile_context;

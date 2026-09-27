@@ -1,4 +1,4 @@
-//! Deterministic checks before an interview may reach Google Calendar.
+//! Deterministic checks before an interview may reach a calendar.
 //!
 //! The model extracts; Rust verifies. A confirmed interview is written to
 //! Calendar only if every critical detail is stated in the email itself:
@@ -9,7 +9,7 @@
 
 use jiff::{civil, tz::TimeZone, ToSpan};
 
-use super::extract::{ClaimState, InterviewClaim};
+use super::extract::{ClaimState, InterviewClaim, SlotClaim};
 use crate::services::schedule;
 
 /// A verified interview time and its details.
@@ -324,6 +324,45 @@ pub fn validate(claim: &InterviewClaim, email_text: &str, now: i64) -> Interview
     }
 }
 
+/// A proposed time from an interview request, verified like a confirmed
+/// interview: the quote must be in the email and state this date and start
+/// time, the time zone must be stated, and the end or duration known.
+/// Returns `(start, end, time zone name)`.
+pub fn validate_slot(slot: &SlotClaim, email_text: &str, now: i64) -> Option<(i64, i64, String)> {
+    let email = normalize(email_text);
+    let quote = slot.quote.as_deref()?;
+    if normalize(quote).is_empty() || !email.contains(&normalize(quote)) {
+        return None;
+    }
+    let date = schedule::parse_date(slot.date.as_deref()?).ok()?;
+    let start = schedule::parse_time(slot.start_time.as_deref()?).ok()?;
+    if !mentions_date(quote, date) || !mentions_time(quote, start) {
+        return None;
+    }
+    let tz_text = slot.timezone.as_deref()?;
+    // The zone must be written in the email (name, offset or abbreviation).
+    if !email.contains(&normalize(tz_text)) {
+        return None;
+    }
+    let (tz, tz_name) = resolve_timezone(tz_text)?;
+    let end = match (slot.end_time.as_deref(), slot.duration_minutes) {
+        (Some(end), _) => schedule::parse_time(end)
+            .ok()
+            .filter(|end| mentions_time(quote, *end))?,
+        (None, Some(minutes)) if (5..=480).contains(&minutes) => {
+            if !contains_token(&email, &minutes.to_string()) {
+                return None;
+            }
+            start.checked_add((minutes as i64).minutes()).ok()?
+        }
+        _ => return None,
+    };
+    let start_at = schedule::local_to_millis(date, start, &tz).ok()?;
+    let end_at = schedule::local_to_millis(date, end, &tz).ok()?;
+    (start_at < end_at && end_at - start_at <= 8 * 3_600_000 && start_at > now)
+        .then_some((start_at, end_at, tz_name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,6 +386,7 @@ mod tests {
             meeting_url: Some("https://meet.example.com/abc-def".into()),
             participants: vec!["Tom".into()],
             interviewer: None,
+            proposed_slots: vec![],
             unclear: None,
         }
     }
@@ -487,6 +527,71 @@ mod tests {
             validate(&c, email, later),
             InterviewCheck::Past(_)
         ));
+    }
+
+    #[test]
+    fn proposed_slots_are_verified_against_the_email() {
+        let email = "Could you do one of these (all times CET)? Tue 29 Sep 2026 10:00-11:00, \
+                     or Wed 30 Sep 2026 14:00-15:00.";
+        let slot = |date: &str, start: &str, end: &str, quote: &str| SlotClaim {
+            date: Some(date.into()),
+            start_time: Some(start.into()),
+            end_time: Some(end.into()),
+            duration_minutes: None,
+            timezone: Some("CET".into()),
+            quote: Some(quote.into()),
+        };
+        let ok = validate_slot(
+            &slot(
+                "2026-09-29",
+                "10:00",
+                "11:00",
+                "Tue 29 Sep 2026 10:00-11:00",
+            ),
+            email,
+            now(),
+        )
+        .unwrap();
+        assert_eq!(ok.1 - ok.0, 3_600_000);
+        // 10:00 CET is 09:00 UTC.
+        assert_eq!(
+            schedule::millis_to_local(ok.0, &TimeZone::UTC).unwrap().1,
+            "09:00"
+        );
+        assert!(
+            validate_slot(
+                &slot(
+                    "2026-09-29",
+                    "09:00",
+                    "10:00",
+                    "Tue 29 Sep 2026 10:00-11:00"
+                ),
+                email,
+                now()
+            )
+            .is_none(),
+            "a time the quote does not state"
+        );
+        assert!(
+            validate_slot(
+                &slot("2026-10-02", "10:00", "11:00", "Fri 2 Oct 10:00-11:00"),
+                email,
+                now()
+            )
+            .is_none(),
+            "a quote not in the email"
+        );
+        let mut no_zone = slot(
+            "2026-09-30",
+            "14:00",
+            "15:00",
+            "Wed 30 Sep 2026 14:00-15:00",
+        );
+        no_zone.timezone = Some("PST".into());
+        assert!(
+            validate_slot(&no_zone, email, now()).is_none(),
+            "zone not stated"
+        );
     }
 
     #[test]

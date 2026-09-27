@@ -13,7 +13,8 @@ use crate::models::{
     analytics::AnalyticsChanged,
     browser::{BrowserChanged, BrowserStatus},
     chat::{ChatEvent, ConversationsChanged},
-    google::GoogleChanged,
+    connectors::ConnectorsChanged,
+    jobs::{ApplicationsChanged, NotificationsChanged},
     mcp::McpChanged,
     portfolio::PortfolioChanged,
     profile::ProfileChanged,
@@ -26,7 +27,11 @@ pub trait EventSink: Send + Sync {
     fn conversations_changed(&self);
     fn providers_changed(&self);
     fn tasks_changed(&self);
-    fn google_changed(&self);
+    fn connectors_changed(&self);
+    fn applications_changed(&self);
+    fn notifications_changed(&self);
+    /// Shows an operating-system notification.
+    fn notify(&self, title: &str, body: &str);
     fn profile_changed(&self);
     fn browser_changed(&self, status: BrowserStatus);
     fn analytics_changed(&self);
@@ -55,8 +60,27 @@ impl EventSink for TauriEvents {
         let _ = TasksChanged.emit(&self.0);
     }
 
-    fn google_changed(&self) {
-        let _ = GoogleChanged.emit(&self.0);
+    fn connectors_changed(&self) {
+        let _ = ConnectorsChanged.emit(&self.0);
+    }
+
+    fn applications_changed(&self) {
+        let _ = ApplicationsChanged.emit(&self.0);
+    }
+
+    fn notifications_changed(&self) {
+        let _ = NotificationsChanged.emit(&self.0);
+    }
+
+    fn notify(&self, title: &str, body: &str) {
+        use tauri_plugin_notification::NotificationExt;
+        let _ = self
+            .0
+            .notification()
+            .builder()
+            .title(title)
+            .body(body)
+            .show();
     }
 
     fn profile_changed(&self) {
@@ -91,7 +115,11 @@ pub struct RecordingEvents {
     pub conversations: Mutex<usize>,
     pub providers: Mutex<usize>,
     pub tasks: Mutex<usize>,
-    pub google: Mutex<usize>,
+    pub connectors: Mutex<usize>,
+    pub applications: Mutex<usize>,
+    pub notifications: Mutex<usize>,
+    /// OS notifications as (title, body).
+    pub shown: Mutex<Vec<(String, String)>>,
     pub profile: Mutex<usize>,
     pub browser: Mutex<Vec<BrowserStatus>>,
     pub analytics: Mutex<usize>,
@@ -117,8 +145,23 @@ impl EventSink for RecordingEvents {
         *self.tasks.lock().unwrap() += 1;
     }
 
-    fn google_changed(&self) {
-        *self.google.lock().unwrap() += 1;
+    fn connectors_changed(&self) {
+        *self.connectors.lock().unwrap() += 1;
+    }
+
+    fn applications_changed(&self) {
+        *self.applications.lock().unwrap() += 1;
+    }
+
+    fn notifications_changed(&self) {
+        *self.notifications.lock().unwrap() += 1;
+    }
+
+    fn notify(&self, title: &str, body: &str) {
+        self.shown
+            .lock()
+            .unwrap()
+            .push((title.to_string(), body.to_string()));
     }
 
     fn profile_changed(&self) {

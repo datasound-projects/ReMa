@@ -10,7 +10,7 @@ import { SettingsPage } from '../pages/SettingsPage';
 
 describe('navigation', () => {
   it('places Agents directly below Chat', () => {
-    expect(MAIN_NAV.map((i) => i.label)).toEqual(['Chat', 'Agents', 'Scheduled Tasks', 'Profile']);
+    expect(MAIN_NAV.map((i) => i.label)).toEqual(['Chat', 'Agents', 'Scheduled Tasks', 'Applications', 'Profile']);
     expect(FOOTER_NAV.map((i) => i.label)).toEqual(['Settings']);
   });
 
@@ -25,5 +25,9 @@ describe('navigation', () => {
     const headings = screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent);
     expect(headings.some((h) => h?.startsWith('MCP'))).toBe(true);
     expect(headings.some((h) => /agent/i.test(h ?? ''))).toBe(false);
+    // Mail and calendar are connectors; users never enter OAuth clients.
+    expect(headings).toContain('Connectors');
+    expect(screen.queryByText(/client (id|secret)/i)).toBeNull();
+    expect(headings.some((h) => /google workspace/i.test(h ?? ''))).toBe(false);
   });
 });

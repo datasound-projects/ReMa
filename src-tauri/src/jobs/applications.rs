@@ -1,10 +1,11 @@
 //! Turning validated email facts into application state.
 //!
-//! Matching an email to an existing application is deterministic: the
-//! Gmail thread, then a reference number, then the normalized company and
-//! role, then the company's own email domain. The model's suggested match
-//! is accepted only if the company agrees. Only the newest email decides an
-//! application's status.
+//! Matching an email to an existing application is deterministic: the mail
+//! thread, then a reference number, then the normalized company and role,
+//! then the company's own email domain. The model's suggested match is
+//! accepted only if the company agrees. Only the newest email decides an
+//! application's status. Every change leaves a timeline entry with its
+//! source and the classifier's confidence.
 
 use rusqlite::Connection;
 
@@ -13,11 +14,34 @@ use super::{
     interviews::{InterviewCheck, VerifiedInterview},
 };
 use crate::{
-    db::jobs::{self as repo, ApplicationRecord, InterviewRecord, InterviewState},
+    connectors::mail::MailMessage,
+    db::jobs::{self as repo, ApplicationRecord, InterviewRecord, InterviewState, TimelineRecord},
     error::AppResult,
-    integrations::google::gmail::MessageMeta,
-    models::jobs::ApplicationStatus,
+    models::{
+        connectors::ProviderId,
+        jobs::{ApplicationStatus, UpdateSource},
+    },
 };
+
+/// The timeline source for mail from a provider.
+pub fn mail_source(provider: ProviderId) -> UpdateSource {
+    match provider {
+        ProviderId::Google => UpdateSource::Gmail,
+        ProviderId::Microsoft => UpdateSource::Outlook,
+    }
+}
+
+/// "Application changed to Interview", or what the email was about.
+pub fn change_text(
+    previous: Option<ApplicationStatus>,
+    status: ApplicationStatus,
+    category_label: &str,
+) -> String {
+    match previous {
+        Some(previous) if previous == status => category_label.to_string(),
+        _ => format!("Application changed to {}", status.label()),
+    }
+}
 
 const LEGAL_SUFFIXES: &[&str] = &[
     "inc",
@@ -169,13 +193,13 @@ fn roles_compatible(a: &ApplicationRecord, role_key: Option<&str>) -> bool {
 }
 
 /// Finds the application an email belongs to.
-fn find_application(
+pub fn find_application(
     conn: &Connection,
-    meta: &MessageMeta,
+    meta: &MailMessage,
     extraction: &Extraction,
 ) -> AppResult<Option<ApplicationRecord>> {
-    // 1. Same Gmail thread.
-    if let Some(id) = repo::application_for_thread(conn, &meta.thread_id)? {
+    // 1. Same mail thread / conversation.
+    if let Some(id) = repo::application_for_thread(conn, meta.provider(), &meta.thread_id)? {
         return Ok(Some(repo::get_application(conn, id)?));
     }
     let company = company_key(&extraction.company);
@@ -230,14 +254,21 @@ pub struct Applied {
     pub created: bool,
     /// The application became rejected with this email.
     pub rejected_now: bool,
+    pub previous_status: Option<ApplicationStatus>,
+    pub status: ApplicationStatus,
+    /// This email decided the status (it is the newest).
+    pub status_changed: bool,
+    /// The interview this email created or updated.
+    pub interview_id: Option<i64>,
 }
 
 /// Status, action and next step after deterministic interview rules.
 fn effective_status(
+    status: ApplicationStatus,
     extraction: &Extraction,
     check: Option<&InterviewCheck>,
 ) -> (ApplicationStatus, bool, Option<String>) {
-    let mut status = extraction.status;
+    let mut status = status;
     let mut requires_action = extraction.requires_action;
     let mut next_action = extraction.next_action.clone();
     let claim_state = extraction.interview.as_ref().map(|i| i.state);
@@ -276,21 +307,59 @@ fn effective_status(
     (status, requires_action, next_action)
 }
 
-/// Stores one validated email: application, history, thread link, interview.
+/// Stores one validated email: application, timeline, thread link and
+/// interview. An email that implies no status (other job-related mail) only
+/// adds to an application it clearly belongs to; `Ok(None)` otherwise.
 pub fn apply(
     conn: &Connection,
-    meta: &MessageMeta,
+    meta: &MailMessage,
     extraction: &Extraction,
     check: Option<&InterviewCheck>,
     now: i64,
-) -> AppResult<Applied> {
-    let (status, requires_action, next_action) = effective_status(extraction, check);
+) -> AppResult<Option<Applied>> {
+    let provider = meta.provider();
     let domain = meta.sender_domain().filter(|d| !is_shared_domain(d));
     let reference = extraction.reference.as_deref().and_then(reference_key);
+    let existing = find_application(conn, meta, extraction)?;
 
-    let (application_id, created, rejected_now) = match find_application(conn, meta, extraction)? {
+    let Some(implied) = extraction.status else {
+        // Timeline only, never a new application.
+        let Some(app) = existing else {
+            return Ok(None);
+        };
+        repo::link_thread(conn, provider, &meta.thread_id, app.id)?;
+        repo::add_timeline(
+            conn,
+            &TimelineRecord {
+                application_id: app.id,
+                source: mail_source(provider),
+                provider: Some(provider),
+                message_id: Some(&meta.message_id),
+                category: Some(extraction.category),
+                confidence: Some(extraction.confidence),
+                status: app.status,
+                previous_status: Some(app.status),
+                change: extraction.category.label(),
+                summary: extraction.summary.as_deref(),
+                occurred_at: meta.received_at,
+                created_at: now,
+            },
+        )?;
+        return Ok(Some(Applied {
+            application_id: app.id,
+            created: false,
+            rejected_now: false,
+            previous_status: Some(app.status),
+            status: app.status,
+            status_changed: false,
+            interview_id: None,
+        }));
+    };
+    let (status, requires_action, next_action) = effective_status(implied, extraction, check);
+
+    let (application_id, created, previous, current, newest) = match existing {
         Some(mut app) => {
-            let was_rejected = app.status == ApplicationStatus::Rejected;
+            let previous = app.status;
             // Fill in details the application did not have yet.
             if app.role.is_none() && extraction.role.is_some() {
                 app.role = extraction.role.clone();
@@ -308,8 +377,7 @@ pub fn apply(
             }
             app.updated_at = now;
             repo::save_application(conn, &app)?;
-            let rejected_now = newest && !was_rejected && status == ApplicationStatus::Rejected;
-            (app.id, false, rejected_now)
+            (app.id, false, Some(previous), app.status, newest)
         }
         None => {
             let id = repo::insert_application(
@@ -330,28 +398,76 @@ pub fn apply(
                     updated_at: now,
                 },
             )?;
-            (id, true, status == ApplicationStatus::Rejected)
+            (id, true, None, status, true)
         }
     };
 
-    repo::link_thread(conn, &meta.thread_id, application_id)?;
-    repo::record_update(
+    repo::link_thread(conn, provider, &meta.thread_id, application_id)?;
+    let change = if created {
+        format!("Application added: {}", status.label())
+    } else if newest {
+        change_text(previous, status, extraction.category.label())
+    } else {
+        format!(
+            "{} (older email; status unchanged)",
+            extraction.category.label()
+        )
+    };
+    repo::add_timeline(
         conn,
-        application_id,
-        &meta.id,
-        status,
-        extraction.summary.as_deref(),
-        meta.received_at,
-        now,
+        &TimelineRecord {
+            application_id,
+            source: mail_source(provider),
+            provider: Some(provider),
+            message_id: Some(&meta.message_id),
+            category: Some(extraction.category),
+            confidence: Some(extraction.confidence),
+            status: current,
+            previous_status: previous,
+            change: &change,
+            summary: extraction.summary.as_deref(),
+            occurred_at: meta.received_at,
+            created_at: now,
+        },
     )?;
-    if let Some(claim) = &extraction.interview {
-        apply_interview(conn, application_id, meta, claim.state, check, now)?;
-    }
-    Ok(Applied {
+    let interview_id = match &extraction.interview {
+        Some(claim) => apply_interview(
+            conn,
+            application_id,
+            meta,
+            claim.state,
+            check,
+            extraction.confidence,
+            now,
+        )?,
+        None => None,
+    };
+    Ok(Some(Applied {
         application_id,
         created,
-        rejected_now,
-    })
+        rejected_now: newest
+            && previous != Some(ApplicationStatus::Rejected)
+            && current == ApplicationStatus::Rejected,
+        previous_status: previous,
+        status: current,
+        status_changed: newest && previous != Some(current),
+        interview_id,
+    }))
+}
+
+/// Identifies an interview: company, role, start and conversation.
+pub fn fingerprint(app: &ApplicationRecord, start_at: i64, thread_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let text = format!(
+        "{}|{}|{start_at}|{thread_id}",
+        app.company_key,
+        app.role_key.as_deref().unwrap_or("")
+    );
+    Sha256::digest(text.as_bytes())
+        .iter()
+        .take(12)
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 fn active(i: &InterviewRecord) -> bool {
@@ -381,43 +497,37 @@ fn set_verified(interview: &mut InterviewRecord, v: &VerifiedInterview) {
 }
 
 /// Creates or updates the interview record for an email. Re-processing the
-/// same email never creates a second interview.
+/// same email never creates a second interview. Returns the interview.
 fn apply_interview(
     conn: &Connection,
     application_id: i64,
-    meta: &MessageMeta,
+    meta: &MailMessage,
     claim_state: ClaimState,
     check: Option<&InterviewCheck>,
+    confidence: f64,
     now: i64,
-) -> AppResult<()> {
+) -> AppResult<Option<i64>> {
+    let provider = meta.provider();
     let existing = repo::interviews_for_application(conn, application_id)?;
     let from_this_email = existing
         .iter()
-        .find(|i| i.source_message_id == meta.id)
+        .find(|i| i.source_message_id == meta.message_id && i.provider == provider)
         .cloned();
-    let blank = || InterviewRecord {
-        id: 0,
-        application_id,
-        source_thread_id: meta.thread_id.clone(),
-        source_message_id: meta.id.clone(),
-        state: InterviewState::Proposed,
-        interview_type: None,
-        start_at: None,
-        end_at: None,
-        timezone: None,
-        location: None,
-        meeting_url: None,
-        participants: Vec::new(),
-        review_reason: None,
-        calendar_event_id: None,
-        calendar_hash: None,
-        calendar_synced_at: None,
-        created_at: now,
-        updated_at: now,
+    let blank = || {
+        let mut record = InterviewRecord::blank(
+            application_id,
+            provider,
+            &meta.thread_id,
+            &meta.message_id,
+            now,
+        );
+        record.confidence = Some(confidence);
+        record
     };
     let history = |id: i64, change: &str, details: Option<&str>| {
-        repo::add_interview_history(conn, id, change, details, Some(&meta.id), now)
+        repo::add_interview_history(conn, id, change, details, Some(&meta.message_id), now)
     };
+    let app = repo::get_application(conn, application_id)?;
 
     match (claim_state, check) {
         (ClaimState::Cancelled, _) => {
@@ -426,15 +536,17 @@ fn apply_interview(
                 target.updated_at = now;
                 repo::save_interview(conn, &target)?;
                 history(target.id, "cancelled", None)?;
+                return Ok(Some(target.id));
             }
+            Ok(None)
         }
         (_, Some(InterviewCheck::Upcoming(v) | InterviewCheck::Past(v))) => {
             // Same email seen again: nothing new.
-            if from_this_email
+            if let Some(same) = from_this_email
                 .as_ref()
-                .is_some_and(|i| i.start_at == Some(v.start_at))
+                .filter(|i| i.start_at == Some(v.start_at))
             {
-                return Ok(());
+                return Ok(Some(same.id));
             }
             let same_time = existing
                 .iter()
@@ -448,7 +560,8 @@ fn apply_interview(
                 // A repeated confirmation of a known interview: refresh details only.
                 set_verified(&mut same, v);
                 same.updated_at = now;
-                return repo::save_interview(conn, &same);
+                repo::save_interview(conn, &same)?;
+                return Ok(Some(same.id));
             }
             // A reschedule, or a confirmation of an interview we knew as
             // proposed / needing review, updates that interview.
@@ -480,8 +593,11 @@ fn apply_interview(
                         interview.participants = before.participants;
                     }
                     interview.state = InterviewState::Confirmed;
-                    interview.source_message_id = meta.id.clone();
+                    interview.provider = provider;
+                    interview.source_message_id = meta.message_id.clone();
                     interview.source_thread_id = meta.thread_id.clone();
+                    interview.confidence = Some(confidence);
+                    interview.fingerprint = Some(fingerprint(&app, v.start_at, &meta.thread_id));
                     interview.updated_at = now;
                     repo::save_interview(conn, &interview)?;
                     let change = if previous.is_some() && previous != Some(v.start_at) {
@@ -491,13 +607,16 @@ fn apply_interview(
                     };
                     let details = previous.map(|p| format!("previous start {p}"));
                     history(interview.id, change, details.as_deref())?;
+                    Ok(Some(interview.id))
                 }
                 None => {
                     let mut interview = blank();
                     set_verified(&mut interview, v);
                     interview.state = InterviewState::Confirmed;
+                    interview.fingerprint = Some(fingerprint(&app, v.start_at, &meta.thread_id));
                     let id = repo::insert_interview(conn, &interview)?;
                     history(id, "confirmed", None)?;
+                    Ok(Some(id))
                 }
             }
         }
@@ -513,6 +632,7 @@ fn apply_interview(
                     interview.review_reason = Some(reason.clone());
                     interview.updated_at = now;
                     repo::save_interview(conn, &interview)?;
+                    Ok(Some(interview.id))
                 }
                 None => {
                     let mut interview = blank();
@@ -520,12 +640,12 @@ fn apply_interview(
                     interview.review_reason = Some(reason.clone());
                     let id = repo::insert_interview(conn, &interview)?;
                     history(id, state.as_str(), Some(reason))?;
+                    Ok(Some(id))
                 }
             }
         }
-        _ => {}
+        _ => Ok(None),
     }
-    Ok(())
 }
 
 /// Applications marked "upcoming interview" whose interviews are all over
@@ -549,29 +669,45 @@ pub fn settle_past_interviews(conn: &Connection, now: i64) -> AppResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{db::Database, jobs::extract::InterviewClaim};
+    use crate::{db::Database, jobs::extract::InterviewClaim, models::jobs::EmailCategory};
 
-    fn meta(id: &str, thread: &str, from: &str, received_at: i64) -> MessageMeta {
-        MessageMeta {
-            id: id.into(),
+    fn meta(id: &str, thread: &str, from: &str, received_at: i64) -> MailMessage {
+        MailMessage {
+            provider: Some(ProviderId::Google),
+            message_id: id.into(),
             thread_id: thread.into(),
+            conversation_id: thread.into(),
             received_at,
-            from: from.into(),
-            subject: String::new(),
-            snippet: String::new(),
+            sender: from.into(),
+            ..MailMessage::default()
+        }
+    }
+
+    fn category_for(status: ApplicationStatus) -> EmailCategory {
+        match status {
+            ApplicationStatus::Confirmed => EmailCategory::ApplicationReceived,
+            ApplicationStatus::InProcess => EmailCategory::ApplicationUpdate,
+            ApplicationStatus::NeedsAction => EmailCategory::ActionRequired,
+            ApplicationStatus::UpcomingInterview => EmailCategory::InterviewConfirmed,
+            ApplicationStatus::Rejected => EmailCategory::Rejection,
+            ApplicationStatus::Offer => EmailCategory::Offer,
         }
     }
 
     fn extraction(company: &str, role: Option<&str>, status: ApplicationStatus) -> Extraction {
         Extraction {
+            category: category_for(status),
+            confidence: 0.9,
             company: company.into(),
             role: role.map(str::to_string),
             reference: None,
-            status,
+            stage: None,
+            status: Some(status),
             requires_action: false,
             next_action: None,
             summary: None,
             existing_application_id: None,
+            contacts: vec![],
             interview: None,
         }
     }
@@ -604,8 +740,19 @@ mod tests {
             meeting_url: None,
             participants: vec![],
             interviewer: None,
+            proposed_slots: vec![],
             unclear: None,
         }
+    }
+
+    fn applied(
+        c: &Connection,
+        meta: &MailMessage,
+        e: &Extraction,
+        check: Option<&InterviewCheck>,
+        now: i64,
+    ) -> Applied {
+        apply(c, meta, e, check, now).unwrap().unwrap()
     }
 
     #[test]
@@ -623,68 +770,130 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         db.call(|c| {
             use ApplicationStatus::*;
-            let first = apply(
+            let first = applied(
                 c,
                 &meta("m1", "t1", "jobs@acme.io", 10),
                 &extraction("Acme GmbH", Some("AI Engineer"), Confirmed),
                 None,
                 1,
-            )?;
+            );
             assert!(first.created);
-            // Same thread.
-            let same_thread = apply(
+            let same_thread = applied(
                 c,
                 &meta("m2", "t1", "x@other.com", 20),
                 &extraction("ACME", None, InProcess),
                 None,
                 2,
-            )?;
-            // Other thread, same company + role.
-            let same_role = apply(
+            );
+            let same_role = applied(
                 c,
                 &meta("m3", "t2", "hr@acme.io", 30),
                 &extraction("Acme", Some("AI Engineer (m/w/d)"), InProcess),
                 None,
                 3,
-            )?;
-            // Other thread, same company domain, no role.
-            let same_domain = apply(
+            );
+            let same_domain = applied(
                 c,
                 &meta("m4", "t3", "talent@acme.io", 40),
                 &extraction("Acme Labs", None, InProcess),
                 None,
                 4,
-            )?;
-            for applied in [same_thread, same_role, same_domain] {
-                assert_eq!(applied.application_id, first.application_id);
-                assert!(!applied.created);
+            );
+            for a in [same_thread, same_role, same_domain] {
+                assert_eq!(a.application_id, first.application_id);
+                assert!(!a.created);
             }
-            // Different role at the same company: a separate application.
-            let other_role = apply(
+            let other_role = applied(
                 c,
                 &meta("m5", "t4", "jobs@acme.io", 50),
                 &extraction("Acme", Some("Data Scientist"), Confirmed),
                 None,
                 5,
-            )?;
+            );
             assert!(other_role.created);
             // Shared ATS domain never links different companies.
-            let ats_a = apply(
+            let ats_a = applied(
                 c,
                 &meta("m6", "t5", "no-reply@greenhouse.io", 60),
                 &extraction("Beta", Some("ML Engineer"), Confirmed),
                 None,
                 6,
-            )?;
-            let ats_b = apply(
+            );
+            let ats_b = applied(
                 c,
                 &meta("m7", "t6", "no-reply@greenhouse.io", 70),
                 &extraction("Gamma", Some("ML Engineer"), Confirmed),
                 None,
                 7,
-            )?;
+            );
             assert_ne!(ats_a.application_id, ats_b.application_id);
             assert_eq!(repo::count_rows(c, "job_applications")?, 4);
+            // The same thread id at another provider is another thread.
+            let mut outlook = meta("m8", "t1", "x@elsewhere.com", 80);
+            outlook.provider = Some(ProviderId::Microsoft);
+            let separate = applied(c, &outlook, &extraction("Delta", None, Confirmed), None, 8);
+            assert_ne!(separate.application_id, first.application_id);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn every_change_leaves_an_audit_entry_with_source_and_confidence() {
+        let db = Database::open_in_memory().unwrap();
+        db.call(|c| {
+            use ApplicationStatus::*;
+            let first = applied(
+                c,
+                &meta("m1", "t1", "jobs@acme.io", 10),
+                &extraction("Acme", Some("AI Engineer"), Confirmed),
+                None,
+                1,
+            );
+            let mut reject = extraction("Acme", Some("AI Engineer"), Rejected);
+            reject.confidence = 0.97;
+            let second = applied(c, &meta("m2", "t1", "jobs@acme.io", 20), &reject, None, 2);
+            assert!(second.status_changed && second.rejected_now);
+            let timeline = repo::timeline(c, first.application_id)?;
+            assert_eq!(timeline.len(), 2);
+            assert_eq!(timeline[0].change, "Application changed to Rejected");
+            assert_eq!(timeline[0].source, UpdateSource::Gmail);
+            assert_eq!(timeline[0].confidence, Some(0.97));
+            assert_eq!(timeline[0].previous_status, Some(Confirmed));
+            assert_eq!(
+                timeline[1].change,
+                "Application added: Application received"
+            );
+            // The same email again adds nothing.
+            applied(c, &meta("m2", "t1", "jobs@acme.io", 20), &reject, None, 3);
+            assert_eq!(repo::timeline(c, first.application_id)?.len(), 2);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn job_mail_without_a_status_only_joins_a_known_application() {
+        let db = Database::open_in_memory().unwrap();
+        db.call(|c| {
+            let mut other = extraction("Acme", None, ApplicationStatus::InProcess);
+            other.category = EmailCategory::OtherJobRelated;
+            other.status = None;
+            assert!(apply(c, &meta("m1", "t1", "x@acme.io", 10), &other, None, 1)?.is_none());
+            let app = applied(
+                c,
+                &meta("m2", "t2", "x@acme.io", 20),
+                &extraction("Acme", None, ApplicationStatus::Confirmed),
+                None,
+                2,
+            );
+            let joined = applied(c, &meta("m3", "t2", "x@acme.io", 30), &other, None, 3);
+            assert_eq!(joined.application_id, app.application_id);
+            assert!(!joined.status_changed);
+            assert_eq!(
+                repo::get_application(c, app.application_id)?.status,
+                ApplicationStatus::Confirmed
+            );
             Ok(())
         })
         .unwrap();
@@ -695,22 +904,21 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         db.call(|c| {
             use ApplicationStatus::*;
-            let rejected = apply(
+            let rejected = applied(
                 c,
                 &meta("m2", "t1", "a@acme.io", 200),
                 &extraction("Acme", Some("AI"), Rejected),
                 None,
                 1,
-            )?;
+            );
             assert!(rejected.rejected_now);
-            // An older email processed later does not undo the rejection.
-            apply(
+            applied(
                 c,
                 &meta("m1", "t1", "a@acme.io", 100),
                 &extraction("Acme", Some("AI"), InProcess),
                 None,
                 2,
-            )?;
+            );
             let app = repo::get_application(c, rejected.application_id)?;
             assert_eq!(app.status, Rejected);
             assert_eq!(app.last_update_at, 200);
@@ -726,43 +934,47 @@ mod tests {
             use ApplicationStatus::*;
             let mut e = extraction("Acme", Some("AI Engineer"), UpcomingInterview);
             e.interview = Some(claim(ClaimState::Confirmed));
-            let applied = apply(
+            let first = applied(
                 c,
                 &meta("m1", "t1", "a@acme.io", 10),
                 &e,
                 Some(&InterviewCheck::Upcoming(verified(1_000_000))),
                 1,
-            )?;
-            let app_id = applied.application_id;
+            );
+            let app_id = first.application_id;
             assert_eq!(repo::get_application(c, app_id)?.status, UpcomingInterview);
+            let interview = &repo::interviews_for_application(c, app_id)?[0];
+            assert!(interview.fingerprint.is_some());
+            assert_eq!(interview.confidence, Some(0.9));
 
-            // Processing the same email again changes nothing.
-            apply(
+            applied(
                 c,
                 &meta("m1", "t1", "a@acme.io", 10),
                 &e,
                 Some(&InterviewCheck::Upcoming(verified(1_000_000))),
                 2,
-            )?;
+            );
             assert_eq!(repo::interviews_for_application(c, app_id)?.len(), 1);
 
             let mut moved = e.clone();
+            moved.category = EmailCategory::InterviewRescheduled;
             moved.interview = Some(claim(ClaimState::Rescheduled));
-            apply(
+            applied(
                 c,
                 &meta("m2", "t1", "a@acme.io", 20),
                 &moved,
                 Some(&InterviewCheck::Upcoming(verified(2_000_000))),
                 3,
-            )?;
+            );
             let interviews = repo::interviews_for_application(c, app_id)?;
             assert_eq!(interviews.len(), 1, "a reschedule never duplicates");
             assert_eq!(interviews[0].start_at, Some(2_000_000));
             assert_eq!(interviews[0].source_message_id, "m2");
 
             let mut cancelled = extraction("Acme", Some("AI Engineer"), InProcess);
+            cancelled.category = EmailCategory::InterviewCancelled;
             cancelled.interview = Some(claim(ClaimState::Cancelled));
-            apply(c, &meta("m3", "t1", "a@acme.io", 30), &cancelled, None, 4)?;
+            applied(c, &meta("m3", "t1", "a@acme.io", 30), &cancelled, None, 4);
             let interview = &repo::interviews_for_application(c, app_id)?[0];
             assert_eq!(interview.state, InterviewState::Cancelled);
             let history: Vec<String> = repo::interview_history(c, interview.id)?
@@ -785,8 +997,8 @@ mod tests {
             let check = InterviewCheck::NeedsReview(
                 "the email does not state the interview time zone".into(),
             );
-            let applied = apply(c, &meta("m1", "t1", "a@acme.io", 10), &e, Some(&check), 1)?;
-            let app = repo::get_application(c, applied.application_id)?;
+            let a = applied(c, &meta("m1", "t1", "a@acme.io", 10), &e, Some(&check), 1);
+            let app = repo::get_application(c, a.application_id)?;
             assert_eq!(app.status, ApplicationStatus::NeedsAction);
             assert!(app.next_action.unwrap().contains("time zone"));
             let interview = &repo::interviews_for_application(c, app.id)?[0];
