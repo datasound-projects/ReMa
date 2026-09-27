@@ -68,6 +68,7 @@ pub async fn start_sign_in(
             return match complete(state, kind, method, label).await {
                 Ok(()) => {
                     state.accounts.finish(id, seq);
+                    crate::career_search::capabilities::provision_later(state, id);
                     state.events.providers_changed();
                     providers::provider_view(state, id)
                 }

@@ -121,3 +121,119 @@ configured at any point.
   documented formats.
 - The stand-in posting pages were served from 127.0.0.1, so their links are
   named after that host in the tables.
+
+## 6. Production-grade career search (specification A)
+
+Specification: `0db2db26-ReMa_Production_Grade_Always_On_Career_Search.md`
+(§1–§86); implementation in [implementation.md §8](implementation.md), plan
+and checklist in [../production-plan.md](../production-plan.md).
+
+Environment as in §1–§5, plus: the **real bundled Codex 0.157.1 binary**
+as the ChatGPT-account runtime, against the stand-in in HTTPS mode (port
+8778, a throw-away test CA trusted through `SSL_CERT_FILE`), with ReMa's
+private Codex home seeded by `scripts/e2e/seed-codex-home.py` (test tokens
+for a test workspace — the ChatGPT sign-in itself cannot run here because
+auth.openai.com and chatgpt.com are blocked); a scripted stand-in for
+Anthropic's `ant` CLI (Claude Console sign-in); the DuckDuckGo HTML stand-in
+(`REMA_DEV_DDG_URL`). No provider credential was used; every key typed in
+was a test string answered by the stand-ins. Brave, Tavily, SearXNG and
+SerpAPI were never configured.
+
+### 6.1 Automated checks
+
+| Check | Result |
+|---|---|
+| `cargo fmt --check` | clean |
+| `cargo clippy --all-targets --locked -- -D warnings` | clean |
+| `cargo test --locked` | 684 passed, 3 ignored (explicit-only tests) |
+| `pnpm lint`, `pnpm typecheck` | clean |
+| `pnpm test` | 118 passed (23 files) |
+| `pnpm build` | built |
+
+| Spec | Tests |
+|---|---|
+| §5–§6, §58, §67 capability | `capability_follows_the_runtime_not_the_provider_name`, `refusals_are_told_apart_from_passing_errors`, `diagnostics_carry_no_secrets_or_queries`, `a_provider_that_refused_its_search_is_not_asked_again_for_a_while` |
+| §7, §81 bootstrap and migration | `the_bootstrap_line_names_the_parts_and_no_user_data`, `an_old_search_setting_never_decides_whether_remas_search_runs` |
+| §13–§15 OpenAI | `builds_stateless_requests_with_web_search` (100-domain cap), `reports_url_citations` (ranges), `reads_the_queries_of_a_search_and_its_outcome` |
+| §17–§19 Codex | `the_runtime_searches_live_by_default`, `a_searching_thread_gets_the_career_sites_and_the_place`, `reads_every_query_of_a_codex_search`, `code_mode_models_get_web_search_without_code_execution`, `codex_web_tool_results_count_as_reported_sources` |
+| §22–§25 Anthropic | `picks_the_web_tool_versions_each_model_has`, `a_search_the_organization_turned_off_continues_with_remas_tools`, `a_model_told_to_search_directly_is_asked_again_directly` |
+| §34–§37 discovery | `reads_duckduckgo_results_without_ads_or_its_own_pages`, `queries_carry_what_is_sought_not_the_users_words`, `registry_sites_scope_the_first_searches_and_networks_are_not_read`, `research_with_few_sources_discovers_reads_and_ranks_pages`, `discovery_follows_robots_rules_and_is_never_the_only_route` |
+| §41–§42 scopes, registry | `current_career_questions_require_search` (contracts), `contract_requests_search_the_marketplaces_first`, `every_source_is_well_formed_and_enabled` |
+| §46–§47 extraction, evidence | `leaves_out_banners_ads_and_hidden_text_and_keeps_tables_and_dates`, `dates_come_from_json_ld_or_a_time_element`, `chunks_follow_the_page_structure`, `ranking_brings_the_passage_that_answers_the_question` |
+| §48–§51 citations, verification | `references_the_table_does_not_have_never_look_like_sources`, `links_to_pages_that_are_not_sources_lose_the_link`, `provider_citations_map_to_the_same_model`, `posting_facts_survive_the_merge_and_show_in_the_table` |
+| §31, §63–§65 local tools | `pages_are_read_only_when_remas_search_found_them_or_the_user_gave_them`, `a_refused_page_is_shown_by_its_host_only`, `the_company_a_model_names_is_researched_by_name` |
+| §70, §73, §76 prompts | `recognizes_job_searches` (the counts and "newly posted" are not part of the role) |
+| §56–§57 Settings | Vitest `CareerSearchSection` (automatic, no key, capability lines for a local server, Anthropic and a ChatGPT account) |
+
+### 6.2 In-app end-to-end (debug build)
+
+Run 1 started from an empty data directory. F1 and F2 each started from an
+empty data directory again (§80).
+
+| # | Spec | Scenario | Observed |
+|---|---|---|---|
+| 1 | §7, §77, §80 | First start, nothing configured | `[career-search] bootstrap router=ready registry_sources=34 discovery=jobs-mcp,company-sites,duckduckgo,optional-service …`; Settings → Career Search "Automatic", "Nothing to set up. No API key required.", ReMa job sources and company research ready, no search service. |
+| 2 | §58, §67 | ChatGPT sign-in (Codex, account already signed in) | Connected as ana@example.com · Plus, GPT-6-Astra; `ready provider=openai auth=chatgpt runtime=codex-app-server native_search=true native_mode=live live=true domain_filter=true … inference=ready jobs_mcp=ready` at once, without a search. |
+| 3 | §71 | "Find current AI jobs in Vienna." with GPT-6-Astra | **First run failed the test**: Codex 0.157's code-mode models got no usable web tool ("code-mode host is disabled"), so ReMa reported "the model answered without searching the web … Used ReMa Jobs instead" — correct fallback, but no live Codex search. Fixed (implementation §8.3). After the fix: Codex offered `web.run`, searched with `external_web_access: true`, 20 career domains and location Vienna; `webSearch` items with results reached ReMa; "Searched career sources · ReMa Jobs + ChatGPT web search · 4 searches · 2 pages read · 6 postings" (`executed=true`). The user enabled nothing. |
+| 4 | §78, §79 | "Find me most recent AI jobs in Vienna Austria with salary starting from 85k a year." (Codex) | 5 postings, "salary from 85,000/year"; "Salary: 3 state a salary from 85,000/year · 2 do not state one (shown, not confirmed to meet the minimum). Not shown: 1 below the salary minimum · 1 closed." No search-service error. |
+| 5 | §75 | Same chat: Codex → Claude Sonnet 5 → local model → Codex, "Find current AI jobs in Vienna." each time, model changed in the composer only | Claude: `web_search_20260318` + `web_fetch_20260318`, 20 domains, Vienna, 6 postings; local: ReMa Jobs, 5 postings; Codex again: `web.run`, 6 postings. No Settings visit, no restart. |
+| 6 | §25, §54, §72 | Claude with web search turned off for the organization (400) | "Anthropic web search: Anthropic returned an error (400): web search is not enabled for this organization. Used ReMa Jobs instead." with 5 postings; the next request did not ask Anthropic's search again: "Anthropic web search: turned off by the provider (web search is not enabled for this organization). Used ReMa Jobs instead." (`native_search=false`). |
+| 7 | §70 | OpenAI API key (connection changed from ChatGPT), "Find 10 AI Engineer positions currently open in Vienna, posted recently, and cite the direct source for every role." | Responses request: `web_search`, 20 allowed domains, location Vienna, `tool_choice: required`, `include: web_search_call.action.sources`; `executed=true`; 6 postings, each row linking its posting; nothing invented to reach 10. |
+| 8 | §72 | Claude Console sign-in (ant CLI stand-in) | `ready provider=anthropic auth=claude-console runtime=messages …`; same query searched with Anthropic's tools (Console token as bearer), 6 postings. |
+| 9 | §73, §74 | "Find 10 currently open AI Engineer jobs in Vienna." with the plain local model (no tool calling) | ReMa searched before the model: ReMa Jobs, 7 searches, 5 postings with source links; the model's text came after the table. |
+| 10 | §31–§37, §63–§65 | General question to the local model: "What is Wien AI Labs generally known for?" | The model called `rema_career_search` (company "Wien AI Labs"): Wikidata knew nothing, so DuckDuckGo ran (`site:kununu.com …`, `site:crunchbase.com …`, then the open query; robots.txt read first); 3 candidates, 2 pages read, the robots-closed page not read (`[career-search] discovery providers=DuckDuckGo candidates=3 pages_read=2 pages_failed=1`). The model then read the team page (allowed: ReMa found it) and tried `https://collector.example/upload?cv=1` (refused). The model's last request held the team table ("Sophie Lehner, Head of AI") but neither the cookie banner nor the hidden injected instruction. |
+| 11 | §32 | Unsloth Studio model, same jobs query | Search step with `enable_tools: true`, `enabled_tools: ["web_search"]` only, `permission_mode: off`; answer step without tools; 6 postings. |
+| 12 | §60, §76 | Scheduled task "Every hour: Find newly posted AI jobs in Vienna.", Run now, then the scheduler | **First Run now showed "1 current posting for newly posted AI"**: the role kept "newly posted". Fixed. Run now: succeeded, 6 postings, "Searched with ReMa Jobs + ChatGPT web search (4 searches)"; context: Search used · 4 searches, scope Jobs, sources ReMa Jobs, Arbeitnow, The Muse, Hacker News, ChatGPT web search. At 18:00 the scheduler fired it ("Scheduled", 14 s, 6 postings, `executed=true`); next run 19:00. |
+| 13 | §81 | Upgrade: `websearch.kind = none` in the settings table before start | `[career-search] migration optional_service=none cleared=true`; the rows were gone; search unaffected. |
+| 14 | §80 | F1: empty data directory, Claude API key only | Searched: "ReMa Jobs + Anthropic web search", 6 postings. |
+| 15 | §80 | F2: empty data directory, local model only | Searched: ReMa Jobs, 7 searches, 5 postings. |
+| 16 | §66 | Diagnostics | Every search logged one `[career-search] search …` line (runtime facts, requirement, scopes, executed, counts, fallback, duration); no query text, page text or credential. |
+| 17 | — | External browser | Opened only for the Claude Console sign-in; never during a search. |
+| 18 | §64 | Model requests | The stand-in flagged no request carrying a credential, the team page's contact details or the planted instructions. |
+
+### 6.3 Problems found in the in-app runs and fixed
+
+| Problem | Fix |
+|---|---|
+| Codex 0.157's current models (`code_mode_only`) could not search: their web tool lives in code mode, which ReMa keeps off | `features.code_mode={enabled=false,direct_only_tool_namespaces=["web"]}`: `web.run` offered directly, code execution still off; `web.run` results count as reported sources |
+| An account that was already signed in to Codex was not provisioned after connecting | Provisioned on that path too |
+| "turned off by the provider: Anthropic web search: Anthropic returned an error (400): …" repeated the engine | Only the provider's own words are kept: "turned off by the provider (web search is not enabled for this organization)" |
+| Settings said "own web search (live) · live" for Codex | Said once |
+| "newly posted AI jobs" searched for the role "newly posted AI"; "Find 10 AI Engineer …" for "10 AI Engineer" | Recency words and counts are not part of the role |
+| A local model's `rema_career_search("Wien AI Labs AI team Vienna")` never searched the company: its name had no "at/about" before it, and unrelated employers' postings made the result look sufficient | The tool takes the company in question (`company`); keyword queries with job nouns count as job searches |
+| A refused page read was not visible | Shown in the activity by its host only |
+| Scheduled job runs showed a second "Searching the web" stage after the assessment | Provider searches count inside the stage that runs them |
+| Unsloth's detail read "web_search (Unsloth Studio)" in logs and Settings | "web_search" (the runtime names Unsloth Studio) |
+
+### 6.4 Acceptance (§69–§82)
+
+| § | Requirement | Evidence |
+|---|---|---|
+| 69 | Every supported runtime tested separately | OpenAI Responses (7), Codex/ChatGPT (3–5, 12), Anthropic API key (5, 6, 14), Claude Console (8), Unsloth (11), OpenAI-compatible local (9, 10, 15). Not supported by ReMa, so not tested: Claude Agent SDK, OpenAI Agents API |
+| 70 | OpenAI: sources, real search, URLs, citations, nothing invented | 7 |
+| 71 | Codex: search configured automatically, live search executes, nothing enabled by the user | 2, 3 (after the fix) |
+| 72 | Claude: real web search or ReMa fallback, no setup | 5, 6, 8, 14 |
+| 73 | Local: ReMa searches, URLs, pages, evidence, model receives it, sources | 9, 10 |
+| 74 | Weak local model | 9 (no tool calling; search before inference) |
+| 75 | Codex → Claude → local → Codex | 5 |
+| 76 | Scheduled task: Run now and the scheduler | 12 |
+| 77 | Zero configuration | 1–15 (no service at any point) |
+| 78 | UI regression prompt | 4 |
+| 79 | Salary statuses | 4 |
+| 80 | Fresh machine: Codex, Claude, local | Run 1 (Codex), F1 (Claude), F2 (local) — fresh data directories in this container |
+| 81 | Upgrade | 13; `an_old_search_setting_never_decides_whether_remas_search_runs` (Brave kept under Advanced) |
+| 82 | No false guarantee | A source or provider that fails is named and skipped (6); all routes failing is the honest outage message (§4 row 27) |
+
+### 6.5 Limitations
+
+- Live provider searches still need a real key or account on a normal
+  network: OpenAI, ChatGPT and DuckDuckGo hosts are blocked here, and no
+  Anthropic key was available. The Codex runtime is the real binary; its
+  backend, the ChatGPT workspace check and `web.run`'s search endpoint are
+  stand-ins built from Codex 0.157.1's own source.
+- The ChatGPT and Claude Console sign-ins were not performed against the
+  real services (the Codex home was seeded with test tokens; the `ant` CLI
+  is a script).
+- DuckDuckGo's HTML endpoint may refuse automated clients or disallow them
+  in robots.txt; ReMa then skips it (logged, never shown) and answers from
+  its other routes.

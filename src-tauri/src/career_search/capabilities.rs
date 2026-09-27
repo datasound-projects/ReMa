@@ -154,10 +154,7 @@ pub async fn detect(state: &AppState, endpoint: &Endpoint, model_id: &str) -> Ru
     if let Some(reason) = state.career.refusal(&provider_key(endpoint)) {
         caps.native_search_available = false;
         caps.native_search_live = false;
-        caps.note = Some(format!(
-            "turned off by the provider: {}",
-            reason.trim_end_matches('.')
-        ));
+        caps.note = Some(format!("turned off by the provider ({reason})"));
     }
     caps
 }
@@ -232,7 +229,7 @@ pub fn base(endpoint: &Endpoint, model_id: &str) -> RuntimeCapabilities {
             caps.native_search_available = true;
             caps.native_search_live = true;
             caps.native_citations = true;
-            caps.native_detail = Some("web_search (Unsloth Studio)".into());
+            caps.native_detail = Some("web_search".into());
         }
         (ProviderKind::OpenaiCompatible, _) => {
             caps.note = Some("no web search of its own; ReMa searches for it".into());
@@ -302,7 +299,28 @@ pub async fn provision(state: &AppState, provider_id: &str) -> Option<RuntimeCap
         })
         .unwrap_or_default();
     let caps = detect(state, &endpoint, &model_id).await;
-    eprintln!("{}", log_line(Some(&caps), "ready", &[]));
+    // The lightweight health check of §67: metadata only, nothing billed.
+    let inference = if model_id.is_empty() {
+        "no-models"
+    } else {
+        "ready"
+    };
+    let jobs_mcp = if crate::rema_mcp::is_enabled(state) {
+        "ready"
+    } else {
+        "off"
+    };
+    eprintln!(
+        "{}",
+        log_line(
+            Some(&caps),
+            "ready",
+            &[
+                ("inference", inference.to_string()),
+                ("jobs_mcp", jobs_mcp.to_string()),
+            ]
+        )
+    );
     Some(caps)
 }
 

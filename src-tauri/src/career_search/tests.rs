@@ -710,7 +710,7 @@ async fn a_provider_that_refused_its_search_is_not_asked_again_for_a_while() {
     let claude = endpoint(ProviderKind::Anthropic, false);
     state.career.note_native(
         &crate::career_search::capabilities::provider_key(&claude),
-        Err("Anthropic web search: Anthropic: web search is not enabled for this organization (400)"),
+        Err("Anthropic web search: Anthropic returned an error (400): web search is not enabled for this organization."),
     );
     let Outcome::Found(found) = router::search_jobs(
         &state,
@@ -728,11 +728,10 @@ async fn a_provider_that_refused_its_search_is_not_asked_again_for_a_while() {
         llm.requests.lock().unwrap().is_empty(),
         "the refused search was not tried again"
     );
+    // Said once, in the provider's own words.
     assert!(
-        found
-            .fallbacks
-            .iter()
-            .any(|f| f.starts_with("Anthropic web search: turned off by the provider")),
+        found.fallbacks.iter().any(|f| f
+            == "Anthropic web search: turned off by the provider (web search is not enabled for this organization)"),
         "{:?}",
         found.fallbacks
     );

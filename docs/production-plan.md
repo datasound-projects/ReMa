@@ -69,32 +69,42 @@ same router, SSRF protection in the fetcher.
 
 ## 4. Checklist A
 
-| # | Item | Status |
-|---|---|---|
-| A1 | Capability layer, probe, bootstrap, diagnostics | Planned |
-| A2 | Codex live default, per-thread modes, domain filter | Planned |
-| A3 | Anthropic tool table, `allowed_callers`, organization fallback | Planned |
-| A4 | OpenAI limits, `queries`, citation ranges | Planned |
-| A5 | CONTRACTS scope, registry fields, contract sources | Planned |
-| A6 | Discovery providers (DuckDuckGo one of several) | Planned |
-| A7 | Content extractor, chunks, BM25 evidence | Planned |
-| A8 | Citation model and integrity check | Planned |
-| A9 | Job verification fields | Planned |
-| A10 | Local tools: evidence, provenance, query privacy | Planned |
-| A11 | Tests (§69–§80 automated) | Planned |
-| A12 | In-app E2E matrix | Planned |
-| A13 | Docs, commit, push, CI | Planned |
+Verified: automated tests pass and the item was exercised in the running app
+([validation §6](career-search/validation.md)). Numbers in the evidence
+column are rows of the in-app table (validation §6.2).
+
+| # | Item | Status | Evidence |
+|---|---|---|---|
+| A1 | Capability layer, probe, bootstrap, diagnostics | Verified | capability and bootstrap tests; rows 1, 2, 6, 16 |
+| A2 | Codex live default, per-thread modes, domain filter | Verified | Codex tests; rows 3, 4, 5, 12 (real Codex binary; the code-mode search found in row 3 is fixed) |
+| A3 | Anthropic tool table, `allowed_callers`, organization fallback | Verified | Anthropic and fallback tests; rows 5, 6, 8, 14 |
+| A4 | OpenAI limits, `queries`, citation ranges | Verified | Responses tests; row 7 |
+| A5 | CONTRACTS scope, registry fields, contract sources | Verified | registry and requirement tests (in-app contract searches need the blocked marketplaces) |
+| A6 | Discovery providers (DuckDuckGo one of several) | Verified | discovery tests; row 10 |
+| A7 | Content extractor, chunks, BM25 evidence | Verified | extractor and evidence tests; row 10 (banner and hidden text never reached the model) |
+| A8 | Citation model and integrity check | Verified | citation tests; rows 3–9 (every row links its posting) |
+| A9 | Job verification fields | Verified | `posting_facts_survive_the_merge_and_show_in_the_table`; rows 4, 12 |
+| A10 | Local tools: evidence, provenance, query privacy | Verified | tool tests; row 10 (a page ReMa did not find was refused) |
+| A11 | Tests (§69–§80 automated) | Verified | 684 Rust (3 ignored), 118 Vitest; mapping in validation §6.1 |
+| A12 | In-app E2E matrix | Verified | validation §6.2–§6.4 |
+| A13 | Docs, commit, push, CI | Done | this file, implementation §8, validation §6; CI runs on the push |
 
 ## 5. External blockers (need the user or a normal network)
 
-- No OpenAI API key or ChatGPT account is available here, and
-  `api.openai.com` and `chatgpt.com` are blocked: live OpenAI and Codex
-  searches (A §70, §71) cannot run. The Codex path is verified with the
-  real bundled Codex binary against a local Responses stand-in.
-- No Anthropic API key or Console login is available (the API host is
-  reachable): the live Claude test (A §72) needs a key.
-- Job boards, ATS APIs, Wikidata and DuckDuckGo are blocked here; ReMa's
-  own sources are exercised through local stand-ins in their documented
-  formats.
-- A clean-machine install (A §80) is simulated with a fresh data directory
-  and a fresh Codex home in this container.
+What this container cannot show, and what closes each gap:
+
+- **Live OpenAI and ChatGPT searches (A §70, §71).** No OpenAI API key or
+  ChatGPT account is available, and `api.openai.com`, `chatgpt.com` and
+  `auth.openai.com` are blocked. The Codex path ran with the real bundled
+  Codex 0.157.1 binary against a stand-in built from Codex's own source,
+  with a seeded test sign-in. Needs: one ChatGPT sign-in and one API key on
+  a normal network, then the §70 and §71 prompts.
+- **Live Claude search (A §72).** No Anthropic API key or Console login is
+  available. The Messages requests were checked against a stand-in. Needs:
+  a key, then the §72 prompt, once with an organization that has web search
+  turned off.
+- **Live sources.** Job boards, ATS APIs, Wikidata and DuckDuckGo are
+  blocked here; ReMa's own sources and discovery ran against local
+  stand-ins in their documented formats.
+- **Clean machine (A §80).** Simulated with fresh data directories and a
+  fresh Codex home in this container, not on a second computer.

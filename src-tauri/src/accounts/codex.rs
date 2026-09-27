@@ -20,6 +20,11 @@
 //! that searches gets the best mode the account may use, with the career
 //! sites and the place of the request (`tools.web_search`); ReMa's own
 //! extraction requests and answers about the user's mail get `disabled`.
+//! Older models search with OpenAI's hosted `web_search`; current models
+//! (`tool_mode: code_mode_only`) with Codex's own web tool `web.run`, which
+//! ReMa has Codex offer directly because code mode itself stays off. Both
+//! honour the thread's mode, sites and place, and both report `webSearch`
+//! items (`web.run` with its results).
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -86,6 +91,10 @@ const SETTINGS: &[&str] = &[
     "skills.bundled.enabled=false",
     "skills.include_instructions=false",
     "tools.experimental_request_user_input.enabled=false",
+    // Code mode stays off (ReMa ships no code-mode host). Current models
+    // (`tool_mode: code_mode_only`) offer their tools only inside code mode,
+    // so their web search (`web.run`) is offered to the model directly.
+    r#"features.code_mode={enabled=false,direct_only_tool_namespaces=["web"]}"#,
 ];
 
 /// Agent features turned off (as `-c features.<name>=false`).
@@ -101,7 +110,6 @@ const DISABLED_FEATURES: &[&str] = &[
     "in_app_browser",
     "multi_agent",
     "multi_agent_v2",
-    "code_mode",
     "code_mode_host",
     "apps",
     "plugins",
@@ -1739,6 +1747,23 @@ mod tests {
         assert!(!SETTINGS
             .iter()
             .any(|s| s.contains(r#"web_search="disabled""#)));
+    }
+
+    #[test]
+    fn code_mode_models_get_web_search_without_code_execution() {
+        // Code mode is off and has no host; its models' web tool is offered
+        // directly (Codex 0.157: `features.code_mode.direct_only_tool_namespaces`).
+        let code_mode: Vec<&&str> = SETTINGS
+            .iter()
+            .filter(|s| s.starts_with("features.code_mode"))
+            .collect();
+        assert_eq!(
+            code_mode,
+            [&r#"features.code_mode={enabled=false,direct_only_tool_namespaces=["web"]}"#]
+        );
+        assert!(DISABLED_FEATURES.contains(&"code_mode_host"));
+        // A later `features.code_mode=false` would replace the table.
+        assert!(!DISABLED_FEATURES.contains(&"code_mode"));
     }
 
     #[test]

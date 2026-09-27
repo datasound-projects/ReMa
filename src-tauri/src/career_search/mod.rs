@@ -93,6 +93,19 @@ pub struct RouteReport {
     pub results: u32,
 }
 
+/// The provider's own words from a refusal ("Anthropic web search:
+/// Anthropic returned an error (400): web search is not enabled for this
+/// organization" → "web search is not enabled for this organization").
+fn refusal_detail(reason: &str) -> String {
+    reason
+        .rsplit(": ")
+        .next()
+        .unwrap_or(reason)
+        .trim()
+        .trim_end_matches('.')
+        .to_string()
+}
+
 /// Search state shared by every feature: source health, what local
 /// servers can do, resolved companies, and recent route reports.
 #[derive(Default)]
@@ -183,7 +196,7 @@ impl CareerSearch {
                 refusals.remove(key);
             }
             Err(reason) if capabilities::is_refusal(reason) => {
-                refusals.insert(key.to_string(), (Instant::now(), reason.to_string()));
+                refusals.insert(key.to_string(), (Instant::now(), refusal_detail(reason)));
             }
             Err(_) => {}
         }

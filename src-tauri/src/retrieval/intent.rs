@@ -220,6 +220,16 @@ fn clean_role(raw: &str) -> (Option<String>, bool) {
         "newest",
         "latest",
         "recent",
+        // "newly posted AI jobs": when, not what.
+        "newly",
+        "recently",
+        "freshly",
+        "just",
+        "posted",
+        "published",
+        "listed",
+        "added",
+        "fresh",
         "open",
         "available",
         "good",
@@ -249,7 +259,16 @@ fn clean_role(raw: &str) -> (Option<String>, bool) {
                 remote = true;
                 return false;
             }
-            !FILLER.contains(&lower)
+            // "10 AI Engineer positions": how many, not what.
+            const COUNTS: &[&str] = &[
+                "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+                "twelve", "fifteen", "twenty", "dozen", "couple",
+            ];
+            let count = (!lower.is_empty()
+                && lower.len() <= 3
+                && lower.chars().all(|c| c.is_ascii_digit()))
+                || COUNTS.contains(&lower);
+            !FILLER.contains(&lower) && !count
         })
         .collect();
     let role = words.join(" ");
@@ -652,6 +671,35 @@ mod tests {
         assert_eq!(query.company.as_deref(), Some("Google"));
         assert_eq!(query.location.as_deref(), Some("Zurich"));
         assert_eq!(query.posted_within_days, Some(14));
+
+        // The prompts of §70 and §73: the count is not part of the role.
+        assert_eq!(
+            q("Find 10 currently open AI Engineer jobs in Vienna.")
+                .role
+                .as_deref(),
+            Some("AI Engineer")
+        );
+        assert_eq!(
+            q("Find 10 AI Engineer positions currently open in Vienna, posted recently, and cite the direct source for every role.")
+                .role
+                .as_deref(),
+            Some("AI Engineer")
+        );
+        assert_eq!(
+            q("Find five data engineer jobs").role.as_deref(),
+            Some("data engineer")
+        );
+
+        // The scheduled task of §76: "newly posted" is not part of the role.
+        let query = q("Find newly posted AI jobs in Vienna.");
+        assert_eq!(query.role.as_deref(), Some("AI"));
+        assert_eq!(query.location.as_deref(), Some("Vienna"));
+        assert_eq!(
+            q("Show me recently published data engineer positions")
+                .role
+                .as_deref(),
+            Some("data engineer")
+        );
 
         let query = q("Suche Stellenangebote als Data Engineer in Wien");
         assert_eq!(query.location.as_deref(), Some("Vienna"));

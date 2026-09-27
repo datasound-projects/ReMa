@@ -37,7 +37,7 @@ function describeCapabilities(c: RuntimeCapabilities): string {
   const parts = [RUNTIMES[c.runtime]];
   if (c.nativeSearchAvailable) {
     parts.push(c.nativeDetail ? `own web search (${c.nativeDetail})` : 'own web search');
-    if (c.nativeSearchLive) parts.push('live');
+    if (c.nativeSearchLive && c.nativeDetail !== 'live') parts.push('live');
     if (c.nativeDomainFiltering) parts.push('kept to career sites');
     if (c.nativeCitations) parts.push('reports its sources');
   } else {

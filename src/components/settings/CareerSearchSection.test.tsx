@@ -113,6 +113,30 @@ describe('Settings → Career Search', () => {
     expect(screen.queryByRole('checkbox')).toBeNull();
   });
 
+  it('says a ChatGPT account searches live, once', async () => {
+    mocks.careerSearchStatus.mockResolvedValue({
+      ...status,
+      model: 'GPT-6-Astra',
+      modelSearch: 'ChatGPT web search',
+      capabilities: {
+        ...status.capabilities!,
+        provider: 'OpenAI',
+        authMode: 'chatgpt_account',
+        runtime: 'codex_app_server',
+        nativeSearchAvailable: true,
+        nativeSearchLive: true,
+        nativeDomainFiltering: true,
+        nativeCitations: false,
+        nativeDetail: 'live',
+        note: null,
+      },
+    });
+    render(<CareerSearchSection />);
+    expect(
+      await screen.findByText('Codex (ChatGPT account) · own web search (live) · kept to career sites'),
+    ).toBeTruthy();
+  });
+
   it('checks the sources on demand and shows recent searches', async () => {
     mocks.checkCareerSearch.mockResolvedValue({
       ...status,

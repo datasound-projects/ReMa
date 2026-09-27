@@ -395,9 +395,11 @@ fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
-/// Counts the searches of a prompt task's model as they happen.
+/// Counts the searches of a task's model as they happen, in its own "web"
+/// stage (prompt tasks) or in the search stage that runs them.
 struct WebStage {
     recorder: Arc<RunRecorder>,
+    stage: &'static str,
     searches: AtomicU32,
 }
 
@@ -408,7 +410,7 @@ impl WebObserver for WebStage {
                 kind: WebKind::Search,
                 ..
             } if self.searches.load(Ordering::Relaxed) == 0 => {
-                self.recorder.running("web", "Searching the web");
+                self.recorder.running(self.stage, "Searching the web");
             }
             WebEvent::Finished {
                 kind: WebKind::Search,
@@ -417,7 +419,7 @@ impl WebObserver for WebStage {
             } => {
                 let n = self.searches.fetch_add(1, Ordering::Relaxed) + 1;
                 self.recorder.tick(
-                    "web",
+                    self.stage,
                     &format!(
                         "Searching the web · {}",
                         plural(n as usize, "search", "searches")
@@ -513,6 +515,7 @@ async fn business_task(
         recorder: recorder.clone(),
         searches: Arc::new(WebStage {
             recorder: recorder.clone(),
+            stage: "research",
             searches: AtomicU32::new(0),
         }),
         checking: AtomicU32::new(0),
@@ -755,6 +758,7 @@ async fn run_task(
                 recorder: recorder.clone(),
                 searches: Arc::new(WebStage {
                     recorder: recorder.clone(),
+                    stage: "research",
                     searches: AtomicU32::new(0),
                 }),
                 checking: AtomicU32::new(0),
@@ -912,6 +916,7 @@ async fn run_task(
                 recorder: recorder.clone(),
                 searches: Arc::new(WebStage {
                     recorder: recorder.clone(),
+                    stage: "search",
                     searches: AtomicU32::new(0),
                 }),
                 checking: AtomicU32::new(0),
@@ -1040,6 +1045,7 @@ async fn run_task(
                 recorder: recorder.clone(),
                 searches: Arc::new(WebStage {
                     recorder: recorder.clone(),
+                    stage: "search",
                     searches: AtomicU32::new(0),
                 }),
                 checking: AtomicU32::new(0),
@@ -1146,6 +1152,7 @@ async fn run_task(
             record_profile(recorder.as_ref(), profile);
             let observer = Arc::new(WebStage {
                 recorder: recorder.clone(),
+                stage: "web",
                 searches: AtomicU32::new(0),
             });
             // Models without a hosted search get ReMa's career search tools;

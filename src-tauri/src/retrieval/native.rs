@@ -417,8 +417,7 @@ pub async fn search(
             engine: engine.to_string(),
             searches,
             candidates: candidates(&text, &events),
-            // Codex reports only the queries and the pages its model opened.
-            lists_sources: endpoint.connection != ConnectionMethod::ChatgptAccount,
+            lists_sources: lists_sources(endpoint, &events),
         });
     }
     Err(format!("{engine}: no search ran"))
@@ -484,6 +483,18 @@ pub fn research_brief(plan: &SearchPlan, sites: &[String]) -> String {
         ));
     }
     lines.join("\n")
+}
+
+/// Whether the search engine reported its results. Every provider's does;
+/// Codex's hosted search reports only its queries and the pages its model
+/// opened (what it lists stays unchecked), while Codex's own web tool
+/// (`web.run`, current models) reports the results it returned.
+fn lists_sources(endpoint: &Endpoint, events: &[WebEvent]) -> bool {
+    endpoint.connection != ConnectionMethod::ChatgptAccount
+        || events.iter().any(|event| {
+            matches!(event, WebEvent::Finished { kind: WebKind::Search, sources, error: None, .. }
+                if !sources.is_empty())
+        })
 }
 
 /// The pages the search engine itself reported (results, pages it opened,
@@ -578,8 +589,8 @@ pub struct Structured {
     /// Canonical address → title of every page the engine reported.
     pub reported: HashMap<String, String>,
     pub searches: usize,
-    /// The engine reports its results; Codex reports only the pages its
-    /// model opened, so what it lists stays unchecked.
+    /// The engine reported its results ([`lists_sources`]); otherwise what
+    /// the model lists stays unchecked.
     pub lists_sources: bool,
 }
 
@@ -656,7 +667,7 @@ pub async fn structured(
             text,
             reported: reported_pages(&events),
             searches,
-            lists_sources: endpoint.connection != ConnectionMethod::ChatgptAccount,
+            lists_sources: lists_sources(endpoint, &events),
         });
     }
     Err(format!("{engine}: no search ran"))
@@ -722,7 +733,7 @@ pub async fn research(
                  could be verified"
             ));
         }
-        let lists_sources = endpoint.connection != ConnectionMethod::ChatgptAccount;
+        let lists_sources = lists_sources(endpoint, &events);
         let mut found = findings(&text, &events, company_domains, lists_sources);
         // Each source says which route found it (its citation's provider).
         for finding in &mut found {
@@ -865,5 +876,34 @@ mod tests {
         assert!(brief.contains("Companies: Bitpanda"));
         assert!(brief.contains("Search these sites first: bitpanda.com, linkedin.com"));
         assert!(research_prompt(1_790_380_800_000, false).contains("leave out contact details"));
+    }
+
+    #[test]
+    fn codex_web_tool_results_count_as_reported_sources() {
+        let endpoint = |connection| Endpoint {
+            kind: ProviderKind::Openai,
+            name: "OpenAI".into(),
+            connection,
+            base_url: String::new(),
+            credential: None,
+            server_web_search: false,
+        };
+        let search = |sources: Vec<WebSource>| WebEvent::Finished {
+            id: "s".into(),
+            kind: WebKind::Search,
+            target: "AI jobs Vienna".into(),
+            sources,
+            error: None,
+        };
+        let result = WebSource {
+            title: "LLM Engineer".into(),
+            url: "https://job-boards.greenhouse.io/wienrobotics/jobs/5550001".into(),
+        };
+        let codex = endpoint(ConnectionMethod::ChatgptAccount);
+        // Codex's hosted search reports its queries only.
+        assert!(!lists_sources(&codex, &[search(Vec::new())]));
+        // Its own web tool (`web.run`) reports what it returned.
+        assert!(lists_sources(&codex, &[search(vec![result.clone()])]));
+        assert!(lists_sources(&endpoint(ConnectionMethod::ApiKey), &[]));
     }
 }

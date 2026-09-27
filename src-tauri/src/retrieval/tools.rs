@@ -41,7 +41,8 @@ pub fn specs() -> Vec<ToolSpec> {
                 "type": "object",
                 "properties": {
                     "query": { "type": "string", "description": "What to find, e.g. \"AI Engineer jobs in Vienna\" or \"recruiters at Bitpanda\"." },
-                    "scope": { "type": "string", "enum": ["jobs", "company", "people", "market"], "description": "What kind of information (optional)." }
+                    "scope": { "type": "string", "enum": ["jobs", "company", "people", "market"], "description": "What kind of information (optional)." },
+                    "company": { "type": "string", "description": "The company the question is about, if there is one (optional)." }
                 },
                 "required": ["query"]
             }),
@@ -63,6 +64,46 @@ pub fn specs() -> Vec<ToolSpec> {
             }),
         },
     ]
+}
+
+/// The plan of a `rema_career_search` call: current information is
+/// required; the scope and the company the model names (§31) come first.
+fn search_plan(arguments: &Value, query: &str) -> plan::SearchPlan {
+    let mut plan = plan::plan(query);
+    plan.requirement = Requirement::Required;
+    match arguments.get("scope").and_then(Value::as_str) {
+        Some("jobs") => plan.scopes.jobs = true,
+        Some("company") => plan.scopes.company = true,
+        Some("people") => plan.scopes.people = true,
+        Some("market") => plan.scopes.market = true,
+        _ => {}
+    }
+    if let Some(company) = arguments
+        .get("company")
+        .and_then(Value::as_str)
+        .map(|c| normalize::clip(c.trim(), 80))
+        .filter(|c| !c.is_empty())
+    {
+        plan.companies.retain(|c| !c.eq_ignore_ascii_case(&company));
+        plan.companies.insert(0, company);
+        plan.companies.truncate(3);
+        if !plan.scopes.any() {
+            plan.scopes.company = true;
+        }
+    }
+    if !plan.scopes.any() {
+        // Tool queries are often keywords ("AI Engineer jobs Vienna").
+        static JOB_NOUNS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        let job_nouns = JOB_NOUNS.get_or_init(|| {
+            regex::Regex::new(
+                r"(?i)\b(?:jobs?|positions?|openings?|vacanc(?:y|ies)|internships?|stellen)\b",
+            )
+            .expect("valid pattern")
+        });
+        plan.scopes.jobs = super::detect(query).is_some() || job_nouns.is_match(query);
+        plan.scopes.company = !plan.scopes.jobs;
+    }
+    plan
 }
 
 /// Runs ReMa's career tools, and hands every other tool to `next` (MCP).
@@ -125,19 +166,7 @@ impl WebTools {
             return ToolOutput::error("Give a \"query\" to search for.");
         };
         let query = normalize::clip(query, 300);
-        let mut plan = plan::plan(&query);
-        plan.requirement = Requirement::Required;
-        match call.arguments.get("scope").and_then(Value::as_str) {
-            Some("jobs") => plan.scopes.jobs = true,
-            Some("company") => plan.scopes.company = true,
-            Some("people") => plan.scopes.people = true,
-            Some("market") => plan.scopes.market = true,
-            _ => {}
-        }
-        if !plan.scopes.any() {
-            plan.scopes.jobs = super::detect(&query).is_some();
-            plan.scopes.company = !plan.scopes.jobs;
-        }
+        let plan = search_plan(&call.arguments, &query);
         self.report(WebEvent::Started {
             id: call.id.clone(),
             kind: WebKind::Search,
@@ -315,6 +344,25 @@ impl WebTools {
             return ToolOutput::error("Give the page's http(s) \"url\".");
         };
         let Some(url) = self.resolve(&url) else {
+            // Shown with its host only: the rest of the address may carry data.
+            let host = reqwest::Url::parse(&url)
+                .ok()
+                .and_then(|u| u.host_str().map(str::to_string))
+                .unwrap_or_default();
+            self.report(WebEvent::Started {
+                id: call.id.clone(),
+                kind: WebKind::Page,
+                target: host.clone(),
+            });
+            self.report(WebEvent::Finished {
+                id: call.id.clone(),
+                kind: WebKind::Page,
+                target: host,
+                sources: Vec::new(),
+                error: Some(
+                    "not opened: ReMa reads only pages its search found or you gave".into(),
+                ),
+            });
             return ToolOutput::error(
                 "ReMa reads only pages that rema_career_search returned in this answer or that the \
                  user gave. Search with rema_career_search first, then read one of its results.",
@@ -460,6 +508,57 @@ mod tests {
             found: Arc::new(Mutex::new(found)),
             user_text: user_text.into(),
         }
+    }
+
+    #[test]
+    fn the_company_a_model_names_is_researched_by_name() {
+        let plan = search_plan(
+            &json!({ "query": "Wien AI Labs AI team in Vienna", "company": " Wien AI Labs " }),
+            "Wien AI Labs AI team in Vienna",
+        );
+        assert_eq!(plan.companies, ["Wien AI Labs"]);
+        assert!(plan.scopes.company && !plan.scopes.jobs);
+        assert_eq!(plan.requirement, Requirement::Required);
+        assert_eq!(
+            plan.place.map(|p| p.label()).as_deref(),
+            Some("Vienna, Austria")
+        );
+        // Without one, the query decides.
+        let jobs = search_plan(&json!({}), "AI Engineer jobs in Vienna");
+        assert!(jobs.scopes.jobs && jobs.companies.is_empty());
+        assert!(search_specs_offer_company());
+    }
+
+    fn search_specs_offer_company() -> bool {
+        specs()[0].input_schema["properties"]["company"]["type"] == "string"
+    }
+
+    #[derive(Default)]
+    struct Recorded(Mutex<Vec<WebEvent>>);
+
+    impl WebObserver for Recorded {
+        fn observe(&self, event: WebEvent) {
+            self.0.lock().unwrap().push(event);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_page_is_shown_by_its_host_only() {
+        let (state, _) = testing::state(Arc::new(FakeLanguageModel::replying(&[])));
+        let recorded = Arc::new(Recorded::default());
+        let mut web = tools(&state, &[], "");
+        web.observer = Some(recorded.clone());
+        let refused = web
+            .execute(&read("https://collector.example/upload?cv=Ana+Berger+CV"))
+            .await;
+        assert!(refused.is_error);
+        let events = recorded.0.lock().unwrap().clone();
+        assert!(
+            matches!(events.last(), Some(WebEvent::Finished { kind: WebKind::Page, target, error: Some(_), .. })
+                if target == "collector.example"),
+            "{events:?}"
+        );
+        assert!(!format!("{events:?}").contains("Ana+Berger"));
     }
 
     fn read(url: &str) -> ToolCall {
