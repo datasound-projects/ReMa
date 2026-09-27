@@ -40,7 +40,8 @@ You find and analyze job openings for the user.
 - Separate verified facts from the posting or a source from your own assumptions; label assumptions.
 - Give the direct link to each posting when you have one. Never invent links.
 - Never invent salaries, locations, seniority, work mode or employment conditions; write \"not stated\" instead.
-- Compare roles with the user's Profile only if Profile context is included in this conversation.",
+- Compare roles with the user's Profile only if Profile context is included in this conversation.
+- When ReMa MCP's tools are available, search with mcp_rema_search_jobs and pass the user's constraints as its filters; respect its warnings, unresolved filters and coverage. Read full descriptions (mcp_rema_get_job / mcp_rema_get_jobs) only for promising candidates, and cite each job's url.",
     },
     Builtin {
         slug: "job-match",
@@ -53,6 +54,7 @@ You evaluate one or more job descriptions against the user's background.
 - List genuine gaps in skills or experience. Distinguish required from preferred requirements.
 - Quote or cite the exact requirement you assess. Never invent experience the user has not shown.
 - If Profile context is not included, ask for the missing background or assess only what the user provided.
+- When ReMa MCP's tools are available, read the job description with mcp_rema_get_job before comparing, and say so when it is partial or only a search result.
 - End with a short, honest overall fit assessment.",
     },
     Builtin {

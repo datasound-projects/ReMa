@@ -1,7 +1,8 @@
 //! MCP tools for one chat answer.
 //!
-//! Only servers that are enabled in Settings *and* selected in this chat are
-//! offered, under request-unique names (`mcp_<server>_<tool>`). A tool the
+//! ReMa MCP (built in) is offered in every chat while it is enabled; other
+//! servers only when enabled in Settings *and* selected in this chat. Tools
+//! are offered under request-unique names (`mcp_<server>_<tool>`). A tool the
 //! server marks read-only runs at once (it still shows in the answer);
 //! every other call waits for the user's approval, with its arguments
 //! shown: Allow once, Allow for this chat, or Deny. Stopping the answer
@@ -97,11 +98,20 @@ impl Approvals {
 /// A tool as offered to the model.
 struct Offered {
     name: String,
+    /// ReMa MCP's own tool (checked against its switch before every call).
+    builtin: bool,
     server_id: i64,
     server: String,
     tool: String,
     read_only: bool,
     connection: Arc<Connection>,
+}
+
+/// Which kinds of tools an answer was offered.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Offer {
+    pub builtin: bool,
+    pub user: bool,
 }
 
 /// Runs one answer's tool calls.
@@ -169,13 +179,42 @@ impl ChatTools {
         conversation_id: i64,
         message_id: i64,
         server_ids: &[i64],
+        builtin: Option<Arc<Connection>>,
         cancel: CancellationToken,
-    ) -> AppResult<(Option<ToolBox>, Vec<ToolActivity>)> {
+    ) -> AppResult<(Option<ToolBox>, Vec<ToolActivity>, Offer)> {
         let servers = mcp::enabled_selection(state, server_ids)?;
         let mut notices = Vec::new();
         let mut offered: Vec<Offered> = Vec::new();
         let mut specs: Vec<ToolSpec> = Vec::new();
         let mut taken = HashSet::new();
+        let mut offer = Offer::default();
+        // ReMa MCP first: its names stay stable (`mcp_rema_search_jobs`).
+        if let Some(connection) = builtin {
+            for tool in &connection.tools {
+                let info = tool_info(tool);
+                let name = exposed_name(crate::rema_mcp::NAME, &info.name, &taken);
+                taken.insert(name.clone());
+                specs.push(ToolSpec {
+                    name: name.clone(),
+                    description: format!(
+                        "[{} built in] {}",
+                        crate::rema_mcp::NAME,
+                        info.description
+                    ),
+                    input_schema: Value::Object((*tool.input_schema).clone()),
+                });
+                offered.push(Offered {
+                    name,
+                    builtin: true,
+                    server_id: 0,
+                    server: crate::rema_mcp::NAME.into(),
+                    tool: info.name,
+                    read_only: info.read_only,
+                    connection: connection.clone(),
+                });
+                offer.builtin = true;
+            }
+        }
         for server in servers {
             let connection = match mcp::connect_server(state, server.id).await {
                 Ok(connection) => connection,
@@ -212,8 +251,10 @@ impl ChatTools {
                     description: format!("[{} MCP server] {about}", server.name),
                     input_schema: Value::Object((*tool.input_schema).clone()),
                 });
+                offer.user = true;
                 offered.push(Offered {
                     name,
+                    builtin: false,
                     server_id: server.id,
                     server: server.name.clone(),
                     tool: info.name,
@@ -223,7 +264,7 @@ impl ChatTools {
             }
         }
         if offered.is_empty() {
-            return Ok((None, notices));
+            return Ok((None, notices, offer));
         }
         let executor = Arc::new(ChatTools {
             state: state.clone(),
@@ -232,7 +273,7 @@ impl ChatTools {
             cancel,
             offered,
         });
-        Ok((Some(ToolBox { specs, executor }), notices))
+        Ok((Some(ToolBox { specs, executor }), notices, offer))
     }
 
     fn report(&self, activity: &ToolActivity) {
@@ -252,7 +293,7 @@ impl ChatTools {
         };
         let mut activity = ToolActivity {
             id: call.id.clone(),
-            server_id: Some(tool.server_id),
+            server_id: (!tool.builtin).then_some(tool.server_id),
             server: tool.server.clone(),
             tool: tool.tool.clone(),
             status: ToolStatus::Running,
@@ -268,6 +309,17 @@ impl ChatTools {
             self.report(&activity);
             return ToolOutput::error("The arguments were not a valid JSON object.");
         };
+
+        // Turned off during this answer: blocked here and in the server.
+        if tool.builtin && !crate::rema_mcp::is_enabled(&self.state) {
+            activity.status = ToolStatus::Failed;
+            activity.detail = Some("ReMa MCP was turned off in Settings.".into());
+            self.report(&activity);
+            return ToolOutput::error(
+                "ReMa MCP was turned off in Settings; its tools cannot be used. Do not call them \
+                 again; continue without them.",
+            );
+        }
 
         let approvals = &self.state.approvals;
         if !tool.read_only && !approvals.allowed(self.conversation_id, tool.server_id, &tool.tool) {

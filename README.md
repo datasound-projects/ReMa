@@ -213,6 +213,38 @@ In Chat, the **+** menu selects any number of agents (up to 8). Their instructio
 - **Turning a server off** closes its connection (and stops a local program). Chats that selected it drop it with a short note; turning it on again does not re-add it.
 - **Test**, **Connect/Reconnect**, **Disconnect**, **Sign in/Sign out**, **Edit** and **Remove** are on each server row; connection failures show the server's reason.
 
+## ReMa MCP (built in)
+
+**ReMa MCP** is ReMa's own job-search MCP server, compiled into the app (`src-tauri/src/rema_mcp/`). It is **on by default**: while on, its tools are offered in every chat automatically, with no installation, configuration or per-chat selection. It does nothing until a model calls one of its tools for your request; there is no background crawling. Details, source rules and test results: [docs/rema-mcp](docs/rema-mcp/implementation.md).
+
+| Tool | What it does |
+| --- | --- |
+| `search_jobs` | Finds vacancies with strict filters (title, skills, places, work mode, seniority, contract, working time, salary, posting age, language, sources) and returns compact, source-linked summaries with coverage, warnings and a cursor. |
+| `get_job` / `get_jobs` | Reads one or up to 10 jobs in detail: description sections, requirements vs. nice-to-haves, salary as stated, posting/update/check dates, availability and evidence. |
+| `search_similar_jobs` | Finds vacancies similar to a known job, excluding it and its duplicates. |
+| `source_status` | Reports which sources are usable now, how (API, feed, page, links only), and their last check. |
+
+- **How it runs.** Each chat answer opens an in-process MCP session (official Rust SDK `rmcp`, protocol 2026-07-28) between ReMa's MCP client and the ReMa MCP server over an in-memory stream. No process, port or file is involved.
+- **Discovery.** It uses the search service from **Settings → Web search** (Brave, Tavily, SearXNG) when one is set up. Otherwise it uses the chat model's hosted web search, through a narrow request with only the search terms; that request gets no tools, so ReMa MCP cannot call itself. Without either, `search_jobs` reports `SEARCH_BACKEND_UNAVAILABLE`, while known job URLs can still be read.
+- **Sources.**
+  - The documented public APIs and feeds of Greenhouse, Lever, Ashby and Personio.
+  - Employer career pages: one read of a public page, `JobPosting` markup preferred, `robots.txt` honored.
+  - LinkedIn, XING and regional job boards are **discovery-only**. Their links are shown and labeled, but never fetched; ReMa MCP looks for the employer's own posting instead.
+  - No logged-in scraping, cookies, CAPTCHA workarounds or private APIs.
+- **Facts.** Unknown values stay unknown. Strict filters treat an unknown required value as no match and list it separately. Salaries are compared only in the same currency and period, and only as stated lower bounds. An update or search-index date is never a posting date. HTTP 200 alone never makes a job "active".
+- **Safety.**
+  - Public addresses only, enforced at connection time (no local network, metadata or DNS rebinding).
+  - Every redirect is checked; sizes and times are bounded; no credentials leave the app.
+  - Page text is data: instructions in a job ad are never followed, and links in descriptions are never fetched.
+  - ReMa MCP never reads your Profile.
+- **Cache.** Normalized jobs and 10-minute search snapshots are kept in ReMa's database under stable ids (`rj_…`). Raw pages are not kept. **Clear cache** removes only these.
+- **Turning it off.** **Settings → MCP → Built-in** has a toggle. Turning it off takes two confirmations:
+  1. "Disable ReMa MCP? Its built-in job-search and job-description tools will become unavailable." Buttons: Cancel / Continue.
+  2. "Confirm disabling ReMa MCP? You can enable it again anytime in Settings." Buttons: Keep enabled / Disable ReMa MCP.
+
+  Closing either dialog or pressing Escape cancels. Once off, its tools leave every chat, and new, queued and running calls are stopped in the backend. Saved jobs and chats are kept, and the choice survives restarts and updates. Turning it on again takes one click. It cannot be edited or removed.
+- **Job-search messages.** Messages that ask for current listings still go through ReMa's enforced search-and-verify workflow (see [Web search](#web-search)). ReMa MCP serves every other chat: follow-ups ("what does #2 require?"), similar roles, and the Job Search and Job Match Agents.
+
 ## Bundled runtimes
 
 Release builds include the official **Codex** runtime (latest `@openai/codex` from npm) and Anthropic's **`ant`** CLI (from Anthropic's Homebrew tap), so the account sign-ins work without installing anything. `pnpm build:app` downloads the current versions for the target platform (checking their published SHA-512 / SHA-256), then builds the app with them as sidecars (`src-tauri/tauri.runtimes.conf.json`). At run time ReMa uses the newest of the bundled and any installed copy. `pnpm tauri dev` and `pnpm tauri build` work without them.
@@ -336,7 +368,7 @@ rema/
 │   │   ├── portfolio/            # Portfolio Studio: gallery, new CV, editor, section editor
 │   │   ├── pdf/                  # PDF.js page renderer (viewer and preview)
 │   │   ├── tasks/                # TaskDialog, TaskDetail, JobReport, TaskActions, TaskStatus
-│   │   ├── settings/             # Provider connections (account or key), endpoints, web search, MCP servers, Google
+│   │   ├── settings/             # Provider connections (account or key), endpoints, web search, MCP (built-in ReMa MCP + yours), Google
 │   │   └── ui/                   # Menu, Dialog, Switch, EmptyState, IconButton, StatusIndicator,
 │   │                             # BrandMark, BrandLogo
 │   ├── hooks/                    # useAsyncData, useChat, useTasks, useProfile, useAutofill, …
@@ -359,6 +391,8 @@ rema/
     │                             # profile, documents (storage + text extraction), profile_import, profile_context,
     │                             # portfolio, agents, mcp, chat_tools (MCP tools in chat, approvals), websearch
     ├── mcp/                      # MCP client: config validation, connections (stdio/HTTP), OAuth
+    ├── rema_mcp/                 # ReMa MCP: contracts, source registry, safe fetcher, ATS adapters,
+    │                             # job engine, cache, in-process MCP server and host
     ├── protocol.rs               # rema-doc:// document files for the main window
     ├── browser/                  # Built-in browser: webview, navigation policy, Linux embedding, autofill
     ├── analytics/                # Job analytics: table/list parsing, normalize, skills dictionary, ingest

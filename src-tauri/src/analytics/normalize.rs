@@ -830,7 +830,7 @@ impl Salary {
 /// amounts are too large to tell the period by size.
 const NO_PERIOD_GUESS: &[&str] = &["JPY", "HUF", "INR", "KRW", "CNY", "CZK", "IDR"];
 
-fn currency(lower: &str) -> Option<&'static str> {
+pub(crate) fn currency(lower: &str) -> Option<&'static str> {
     const CODES: &[(&str, &str)] = &[
         ("ca$", "CAD"),
         ("c$", "CAD"),
@@ -889,7 +889,7 @@ fn currency(lower: &str) -> Option<&'static str> {
     None
 }
 
-fn period(lower: &str) -> Option<SalaryPeriod> {
+pub(crate) fn period(lower: &str) -> Option<SalaryPeriod> {
     static RE: OnceLock<Regex> = OnceLock::new();
     let r = re(
         &RE,

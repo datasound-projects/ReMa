@@ -182,7 +182,21 @@ impl Service {
         self.key.as_deref().into_iter().collect()
     }
 
-    fn request(&self, query: &str, days: Option<u32>) -> reqwest::RequestBuilder {
+    fn request(
+        &self,
+        query: &str,
+        days: Option<u32>,
+        domain: Option<&str>,
+    ) -> reqwest::RequestBuilder {
+        // Brave and SearXNG take the `site:` operator; Tavily a domain list.
+        let scoped;
+        let query = match (self.kind, domain) {
+            (ServiceKind::Brave | ServiceKind::Searxng, Some(domain)) => {
+                scoped = format!("{query} site:{domain}");
+                scoped.as_str()
+            }
+            _ => query,
+        };
         let range = days.map(|d| match d {
             0..=1 => "day",
             2..=7 => "week",
@@ -216,6 +230,9 @@ impl Service {
                 });
                 if let Some(range) = range {
                     body["time_range"] = json!(range);
+                }
+                if let Some(domain) = domain {
+                    body["include_domains"] = json!([domain]);
                 }
                 self.http
                     .post(&self.endpoint)
@@ -301,10 +318,21 @@ impl Service {
         days: Option<u32>,
         cancel: &CancellationToken,
     ) -> Result<Vec<Hit>, String> {
+        self.search_in(query, days, None, cancel).await
+    }
+
+    /// A search limited to one site (`domain`), when given.
+    pub async fn search_in(
+        &self,
+        query: &str,
+        days: Option<u32>,
+        domain: Option<&str>,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<Hit>, String> {
         for attempt in 0..2 {
             let response = tokio::select! {
                 _ = cancel.cancelled() => return Err("the search was stopped".into()),
-                response = self.request(query, days).send() => response,
+                response = self.request(query, days, domain).send() => response,
             };
             // Callers name the service, so these messages don't.
             let response = response.map_err(|e| {

@@ -31,6 +31,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0004_job_analytics.sql"),
     include_str!("migrations/0005_provider_connections.sql"),
     include_str!("migrations/0006_profile_agents_mcp.sql"),
+    include_str!("migrations/0007_rema_mcp.sql"),
 ];
 
 #[derive(Clone)]

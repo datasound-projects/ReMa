@@ -14,6 +14,7 @@ pub mod mcp;
 pub mod portfolio;
 pub mod profile;
 pub mod providers;
+pub mod rema_mcp;
 pub mod system;
 pub mod tasks;
 pub mod websearch;

@@ -376,7 +376,7 @@ pub struct PageFacts {
     pub benefits: Vec<String>,
 }
 
-fn ld_blocks(html: &str) -> Vec<Value> {
+pub(crate) fn ld_blocks(html: &str) -> Vec<Value> {
     let lower = html.to_ascii_lowercase();
     let mut out = Vec::new();
     let mut from = 0;
@@ -398,7 +398,7 @@ fn ld_blocks(html: &str) -> Vec<Value> {
     out
 }
 
-fn postings(value: &Value, out: &mut Vec<Value>) {
+pub(crate) fn postings(value: &Value, out: &mut Vec<Value>) {
     match value {
         Value::Array(items) => items.iter().for_each(|v| postings(v, out)),
         Value::Object(map) => {
@@ -418,7 +418,7 @@ fn postings(value: &Value, out: &mut Vec<Value>) {
     }
 }
 
-fn text_of(value: Option<&Value>) -> Option<String> {
+pub(crate) fn text_of(value: Option<&Value>) -> Option<String> {
     match value? {
         Value::String(s) => Some(s.clone()),
         Value::Number(n) => Some(n.to_string()),
@@ -444,7 +444,7 @@ fn number(value: Option<&Value>) -> Option<f64> {
     .filter(|v| *v > 0.0)
 }
 
-fn salary_of(value: &Value) -> Option<(Salary, String)> {
+pub(crate) fn salary_of(value: &Value) -> Option<(Salary, String)> {
     let currency = text_of(value.get("currency"))?.to_uppercase();
     let amount = value.get("value")?;
     let (min, max, unit) = match amount {

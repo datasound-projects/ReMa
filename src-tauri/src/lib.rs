@@ -35,6 +35,7 @@ pub mod mcp;
 pub mod models;
 pub mod oauth_loopback;
 pub mod protocol;
+pub mod rema_mcp;
 pub mod retrieval;
 pub mod secrets;
 pub mod services;
@@ -101,6 +102,10 @@ pub fn run() {
             if let Ok(appearance) = services::system::appearance(&state.db) {
                 commands::system::apply_appearance(app.handle(), appearance);
             }
+            // ReMa MCP is enabled on first launch; a saved choice is kept.
+            if let Err(error) = rema_mcp::ensure_default(&state) {
+                eprintln!("ReMa MCP setting could not be read: {error}");
+            }
             scheduler::start(state.clone());
             analytics::enrich::start(state.clone());
             app.manage(state);
@@ -162,5 +167,6 @@ fn init_state(app: &App) -> Result<AppState, Box<dyn std::error::Error>> {
         analytics: Default::default(),
         mcp: Default::default(),
         approvals: Default::default(),
+        rema_mcp: rema_mcp::RemaMcp::new(),
     })
 }

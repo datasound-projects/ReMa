@@ -21,6 +21,7 @@ import { Menu, type MenuItem } from '../ui/Menu';
 import { StatusIndicator, type StatusTone } from '../ui/StatusIndicator';
 import { Switch } from '../ui/Switch';
 import { McpServerDialog } from './McpServerDialog';
+import { RemaMcpCard } from './RemaMcpCard';
 
 export const MCP_HELP = 'MCP lets ReMa connect to external tools and data sources that AI models can use when you allow them.';
 
@@ -87,12 +88,22 @@ export function McpSection({ focus = false }: { focus?: boolean }) {
         </div>
       </div>
 
+      <h3 className="mcp__group" id="mcp-builtin">
+        Built-in
+      </h3>
+      <div className="panel panel--list" aria-labelledby="mcp-builtin">
+        <RemaMcpCard />
+      </div>
+
+      <h3 className="mcp__group" id="mcp-mine">
+        Added by you
+      </h3>
       {servers.state.status === 'error' && (
         <p className="form-error" role="alert">
           {servers.state.error.message}
         </p>
       )}
-      <div className="panel panel--list">
+      <div className="panel panel--list" aria-labelledby="mcp-mine">
         {servers.state.status === 'success' && list.length === 0 && (
           <div className="mcp-empty">
             <PlugIcon aria-hidden="true" />

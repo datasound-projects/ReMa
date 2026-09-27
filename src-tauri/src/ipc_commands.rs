@@ -63,6 +63,10 @@ pub const APP_COMMANDS: &[&str] = &[
     "web_search_settings",
     "save_web_search_settings",
     "test_web_search",
+    // ReMa MCP (built in)
+    "rema_mcp_status",
+    "set_rema_mcp_enabled",
+    "clear_rema_mcp_cache",
     // MCP servers
     "list_mcp_servers",
     "save_mcp_server",

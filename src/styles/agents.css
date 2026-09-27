@@ -248,6 +248,22 @@
   color: var(--color-warning);
 }
 
+/* ReMa MCP: built in, nothing to pick. */
+.plus-menu__builtin {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+.plus-menu__builtin .plus-menu__state {
+  margin-left: auto;
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
+}
+
 .plus-menu__hint {
   padding: var(--space-1) var(--space-3) var(--space-2);
   font-size: var(--text-xs);
@@ -483,6 +499,87 @@
   display: inline-flex;
   align-items: center;
   gap: var(--space-1);
+}
+
+/* "Built-in" and "Added by you" above each list. */
+.mcp__group {
+  margin: var(--space-4) 0 var(--space-2);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-text-tertiary);
+}
+
+.rema-mcp__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-left: 36px;
+}
+
+.rema-mcp__message,
+.rema-mcp__hint,
+.rema-mcp__checked {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+.rema-mcp__hint {
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
+}
+
+.rema-mcp__checked {
+  color: var(--color-success);
+}
+
+.rema-mcp__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin-left: calc(-1 * var(--space-2));
+}
+
+.rema-mcp__sources {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.rema-mcp__sources li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+}
+
+.rema-mcp__source-name {
+  font-weight: var(--weight-medium);
+}
+
+.rema-mcp__source-access {
+  padding: 0 6px;
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-muted);
+  font-size: var(--text-xs);
+  color: var(--color-text-secondary);
+}
+
+.rema-mcp__source-off {
+  font-size: var(--text-xs);
+  color: var(--color-warning);
+}
+
+.rema-mcp__source-note {
+  flex-basis: 100%;
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
 }
 
 .mcp-empty {

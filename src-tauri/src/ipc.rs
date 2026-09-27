@@ -95,6 +95,9 @@ pub fn builder() -> Builder<tauri::Wry> {
             commands::websearch::web_search_settings,
             commands::websearch::save_web_search_settings,
             commands::websearch::test_web_search,
+            commands::rema_mcp::rema_mcp_status,
+            commands::rema_mcp::set_rema_mcp_enabled,
+            commands::rema_mcp::clear_rema_mcp_cache,
             // MCP servers
             commands::mcp::list_mcp_servers,
             commands::mcp::save_mcp_server,

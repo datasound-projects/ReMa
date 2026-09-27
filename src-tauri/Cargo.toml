@@ -53,6 +53,7 @@ regex = "1"
 # over stdio, remote servers over Streamable HTTP, and MCP OAuth.
 rmcp = { version = "3.4", default-features = false, features = [
     "client",
+    "server",
     "transport-child-process",
     "transport-streamable-http-client-reqwest",
     "auth",
@@ -60,6 +61,8 @@ rmcp = { version = "3.4", default-features = false, features = [
 # Local MCP servers run in their own process group (job object on Windows),
 # so stopping one also stops the programs it started (npx → node).
 process-wrap = { version = "10", features = ["tokio1"] }
+# JSON Schemas for ReMa MCP's tool inputs and outputs (rmcp's schemars).
+schemars = "1"
 # Implementing rmcp's OAuth credential store (keychain-backed).
 async-trait = "0.1"
 

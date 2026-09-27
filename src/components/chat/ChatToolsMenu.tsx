@@ -3,7 +3,7 @@ import { MAX_AGENTS, toggle, type ChatSelection } from '../../lib/chatSelection'
 import type { Agent } from '../../services/agentService';
 import type { McpServer } from '../../services/mcpService';
 import { AgentIcon } from '../agents/AgentIcon';
-import { CheckIcon, PlugIcon, PlusIcon } from '../icons';
+import { CheckIcon, PlugIcon, PlusIcon, SearchIcon } from '../icons';
 import { Menu } from '../ui/Menu';
 
 interface ChatToolsMenuProps {
@@ -12,6 +12,8 @@ interface ChatToolsMenuProps {
   servers: McpServer[];
   selection: ChatSelection;
   onChange: (selection: ChatSelection) => void;
+  /** ReMa MCP (built in) is on: it is in every chat, nothing to pick. */
+  builtinOn?: boolean;
 }
 
 const STATE_LABELS: Partial<Record<McpServer['status']['state'], string>> = {
@@ -22,7 +24,7 @@ const STATE_LABELS: Partial<Record<McpServer['status']['state'], string>> = {
 };
 
 /** The composer's + button: agents and MCP servers for this chat. */
-export function ChatToolsMenu({ agents, servers, selection, onChange }: ChatToolsMenuProps) {
+export function ChatToolsMenu({ agents, servers, selection, onChange, builtinOn = false }: ChatToolsMenuProps) {
   const { navigate } = useNavigation();
   const builtins = agents.filter((a) => a.builtin);
   const mine = agents.filter((a) => !a.builtin);
@@ -87,8 +89,19 @@ export function ChatToolsMenu({ agents, servers, selection, onChange }: ChatTool
           </div>
           <div className="plus-menu__group" role="group" aria-label="Invoke MCP">
             <div className="plus-menu__heading">Invoke MCP</div>
+            {builtinOn && (
+              <div className="plus-menu__builtin" role="note" title="Turn it off in Settings → MCP">
+                <SearchIcon className="plus-menu__icon" aria-hidden="true" />
+                <span className="plus-menu__label">ReMa MCP</span>
+                <span className="plus-menu__state">Built in · on in every chat</span>
+              </div>
+            )}
             {servers.length === 0 && (
-              <p className="plus-menu__hint">No MCP servers are turned on. Add or turn one on in Settings.</p>
+              <p className="plus-menu__hint">
+                {builtinOn
+                  ? 'Add your own MCP servers in Settings.'
+                  : 'No MCP servers are turned on. Add or turn one on in Settings.'}
+              </p>
             )}
             {servers.map((server) => {
               const checked = selection.mcpServerIds.includes(server.id);

@@ -444,6 +444,49 @@ pub async fn connect(
     }
 }
 
+/// Connects over an already-open byte stream (ReMa MCP, the built-in
+/// server, runs in-process on the other end) and lists the tools.
+pub async fn connect_stream<T>(io: T, client_version: &str) -> Result<Connection, ConnectError>
+where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
+{
+    let attempt = async {
+        let service = client_info(client_version)
+            .serve_with_lifecycle(io, lifecycle())
+            .await
+            .map_err(|e| {
+                ConnectError::Failed(format!("Could not connect: {}", short(&e.to_string())))
+            })?;
+        let tools = match service.list_all_tools().await {
+            Ok(tools) => tools,
+            Err(error) => {
+                let _ = service.cancel().await;
+                return Err(ConnectError::Failed(format!(
+                    "The server did not list its tools: {}",
+                    short(&error.to_string())
+                )));
+            }
+        };
+        let peer = service.peer_info();
+        Ok(Connection {
+            protocol_version: peer.as_ref().map(|p| p.protocol_version.to_string()),
+            server_info: peer.as_ref().and_then(|p| {
+                p.server_info
+                    .as_ref()
+                    .map(|i| format!("{} {}", i.name, i.version).trim().to_string())
+            }),
+            tools,
+            service,
+        })
+    };
+    match tokio::time::timeout(CONNECT_TIMEOUT, attempt).await {
+        Ok(result) => result,
+        Err(_) => Err(ConnectError::Failed(
+            "The server did not respond in time.".into(),
+        )),
+    }
+}
+
 /// `rmcp` takes a store by value; ours is shared.
 pub(crate) struct SharedStore(pub Arc<dyn CredentialStore>);
 

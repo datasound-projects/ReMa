@@ -72,6 +72,8 @@ pub async fn save(state: &AppState, input: WebSearchInput) -> AppResult<WebSearc
             settings::delete_setting(c, URL_KEY)
         })?;
         state.vault.delete_text(SECRET).await?;
+        // ReMa MCP's readiness depends on the search service.
+        state.events.mcp_changed();
         return settings(state).await;
     };
     let key = input
@@ -121,6 +123,7 @@ pub async fn save(state: &AppState, input: WebSearchInput) -> AppResult<WebSearc
             _ => settings::delete_setting(c, URL_KEY),
         }
     })?;
+    state.events.mcp_changed();
     settings(state).await
 }
 

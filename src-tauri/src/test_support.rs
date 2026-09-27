@@ -79,16 +79,30 @@ impl MockServer {
                         headers: head.to_ascii_lowercase(),
                         body: text[head_end..].into(),
                     };
-                    let (status, body) = handler(&recorded).unwrap_or((404, "{}".into()));
+                    // Handlers may block (e.g. to simulate a slow service);
+                    // keep that off the runtime's worker threads.
+                    let request = recorded.clone();
+                    let (status, body) = tokio::task::spawn_blocking(move || handler(&request))
+                        .await
+                        .unwrap()
+                        .unwrap_or((404, "{}".into()));
                     log.lock().unwrap().push(recorded);
-                    // Pages are HTML; everything else is JSON.
-                    let kind = if body.trim_start().starts_with('<') {
+                    // A redirect's body is its target.
+                    let (location, body) = if (300..400).contains(&status) {
+                        (format!("Location: {body}\r\n"), String::new())
+                    } else {
+                        (String::new(), body)
+                    };
+                    // XML feeds, HTML pages; everything else is JSON.
+                    let kind = if body.trim_start().starts_with("<?xml") {
+                        "application/xml; charset=utf-8"
+                    } else if body.trim_start().starts_with('<') {
                         "text/html; charset=utf-8"
                     } else {
                         "application/json"
                     };
                     let response = format!(
-                        "HTTP/1.1 {status} X\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        "HTTP/1.1 {status} X\r\n{location}Content-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len()
                     );
                     let _ = socket.write_all(response.as_bytes()).await;

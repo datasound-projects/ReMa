@@ -11,6 +11,7 @@ import { dataOr } from '../hooks/useAsyncData';
 import { useAgents } from '../hooks/useAgents';
 import { useChat } from '../hooks/useChat';
 import { useMcpServers } from '../hooks/useMcpServers';
+import { useRemaMcp } from '../hooks/useRemaMcp';
 import { useModelCatalog } from '../hooks/useModelCatalog';
 import { useSystemTimezone } from '../hooks/useTasks';
 import { pickableServers, reconcile, sameSelection, type ChatSelection } from '../lib/chatSelection';
@@ -73,6 +74,8 @@ export function ChatPage({ conversationId, initialAgentIds }: ChatPageProps) {
   // else what the conversation stored. Independent of Profile.
   const agentsState = useAgents().state;
   const serversState = useMcpServers().state;
+  const remaMcp = useRemaMcp().state;
+  const builtinOn = remaMcp.status === 'success' && remaMcp.data.enabled;
   const agents = agentsState.status === 'success' ? agentsState.data : null;
   const servers = serversState.status === 'success' ? serversState.data : null;
   const [selectionChoice, setSelectionChoice] = useState<{
@@ -172,6 +175,7 @@ export function ChatPage({ conversationId, initialAgentIds }: ChatPageProps) {
           servers={pickableServers(servers ?? [])}
           selection={selection}
           onChange={(next) => changeSelection(next)}
+          builtinOn={builtinOn}
         />
       }
       chips={

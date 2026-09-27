@@ -135,6 +135,18 @@ export const commands = {
 	saveWebSearchSettings: (input: WebSearchInput) => __TAURI_INVOKE<WebSearchSettings>("save_web_search_settings", { input }),
 	/**  Runs one real search with the saved service. */
 	testWebSearch: () => __TAURI_INVOKE<WebSearchTest>("test_web_search"),
+	/**
+	 *  ReMa MCP's card in Settings → MCP → Built-in. `check` also lists its
+	 *  tools over MCP (nothing is searched).
+	 */
+	remaMcpStatus: (check: boolean) => __TAURI_INVOKE<RemaMcpStatus>("rema_mcp_status", { check }),
+	/**
+	 *  Turns ReMa MCP on or off (the interface asks twice before turning it
+	 *  off). Off: its tools leave every chat and running calls stop.
+	 */
+	setRemaMcpEnabled: (enabled: boolean) => __TAURI_INVOKE<RemaMcpStatus>("set_rema_mcp_enabled", { enabled }),
+	/**  Clears ReMa MCP's cached jobs and searches (nothing else). */
+	clearRemaMcpCache: () => __TAURI_INVOKE<RemaMcpStatus>("clear_rema_mcp_cache"),
 	/**  Configured servers. Secret values never leave Rust (`hasSecret` only). */
 	listMcpServers: () => __TAURI_INVOKE<McpServer[]>("list_mcp_servers"),
 	/**
@@ -1350,10 +1362,37 @@ export type RankedJob = {
 	details: DetailsStatus,
 };
 
+export type Readiness = 
+/**  A search service is set up: full discovery. */
+"ready" | 
+/**  Discovery relies on the chat model's hosted web search. */
+"limited_coverage" | 
+/**  No search backend: only known job URLs can be read. */
+"search_setup_required" | 
+/**  Recent source requests failed to connect. */
+"offline" | 
+/**  The built-in server did not answer. */
+"error" | 
+/**  Turned off. */
+"disabled";
+
 /**  A file that could not be added, and why. */
 export type RejectedFile = {
 	name: string,
 	reason: string,
+};
+
+export type RemaMcpStatus = {
+	enabled: boolean,
+	readiness: Readiness,
+	message: string,
+	/**  The search backend new chats use by default. */
+	backend: string | null,
+	/**  Tool names listed over MCP (empty when not checked or disabled). */
+	tools: string[],
+	sources: SourceSummary[],
+	cachedJobs: number,
+	cachedSearches: number,
 };
 
 export type RequirementCategory = "technical_skills" | "programming_languages" | "frameworks" | "cloud_infrastructure" | "ai_ml" | "data_engineering" | "databases" | "professional_experience" | "industry_experience" | "education" | "certifications" | "languages" | "soft_skills" | "other";
@@ -1571,6 +1610,15 @@ export type SortKey =
 "prefer_role" | "prefer_company" | 
 /**  Jobs requiring the skill `value` first. */
 "prefer_skill";
+
+export type SourceSummary = {
+	name: string,
+	/**  "API", "Feed", "Page", "Links only". */
+	access: string,
+	usable: boolean,
+	note: string,
+	lastError: string | null,
+};
 
 /**  Share of all requirement mentions per Profile state. */
 export type StateShare = {

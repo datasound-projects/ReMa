@@ -56,6 +56,8 @@ pub struct AppState {
     pub mcp: McpContext,
     /// Tool calls waiting for the user's approval.
     pub approvals: Approvals,
+    /// ReMa MCP, the built-in job-search server.
+    pub rema_mcp: crate::rema_mcp::RemaMcp,
 }
 
 #[cfg(test)]
@@ -101,6 +103,10 @@ pub mod testing {
             analytics: Default::default(),
             mcp: Default::default(),
             approvals: Default::default(),
+            rema_mcp: crate::rema_mcp::RemaMcp::with(
+                crate::rema_mcp::adapters::Apis::official(),
+                false,
+            ),
         };
         (state, events)
     }
