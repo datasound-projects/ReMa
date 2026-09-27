@@ -136,7 +136,12 @@ fn listing_of(
                 .trim_end_matches('.')
                 .to_string()
         })
-        .filter(|n| !n.starts_with("Needs verification"))
+        // "May be the same vacancy as rj_…" names Jobs MCP ids, which mean
+        // something to a model calling the MCP, not to a reader; the
+        // merge below says "also listed on …" instead.
+        .filter(|n| {
+            !n.starts_with("Needs verification") && !n.starts_with("May be the same vacancy")
+        })
         .collect();
     if job.availability == Availability::Unknown
         && job.acquisition != AcquisitionMode::SearchDiscoveryOnly
@@ -239,7 +244,16 @@ async fn own_jobs(
         .first()
         .cloned()
         .or_else(|| query.role.clone())
-        .unwrap_or_else(|| extract::clip(&query.text, 80));
+        .unwrap_or_else(|| {
+            if query.company.is_some() {
+                // A company's openings, whatever the role: "jobs" is on
+                // topic for every posting, the company filter does the rest
+                // (the sentence itself would have to appear in job titles).
+                "jobs".to_string()
+            } else {
+                extract::clip(&query.text, 80)
+            }
+        });
     let locations = match (&plan.place, query.remote) {
         (Some(place), false) => vec![LocationFilter {
             city: place.city.clone(),

@@ -15,7 +15,9 @@ use tokio_util::sync::CancellationToken;
 use super::{
     capabilities::{self, RelationshipAccess},
     companies,
-    model::{Company, ConnectionsOutcome, NetworkResult, ResultStatus, Row, Stage, StageReport},
+    model::{
+        Company, ConnectionsOutcome, JobRef, NetworkResult, ResultStatus, Row, Stage, StageReport,
+    },
     people,
     planner::{self, NetworkIntent},
     policy::{self, DataClass, Operation, Purpose, POLICY_VERSION},
@@ -129,6 +131,18 @@ fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
+/// A request about one company: openings elsewhere are not what was asked,
+/// whichever search returned them (the model's own search does not take a
+/// company filter). Returns how many openings were left out.
+fn only_at(target: &str, jobs: &mut Vec<JobRef>, employers: &mut Vec<Company>) -> usize {
+    let key = resolve::company_key(target);
+    let at_target = |name: &str| resolve::company_key(name) == key;
+    let before = jobs.len();
+    jobs.retain(|j| j.company_name.as_deref().is_some_and(at_target));
+    employers.retain(|c| at_target(&c.name) || c.aliases.iter().any(|a| at_target(a)));
+    before - jobs.len()
+}
+
 /// Runs a research request.
 pub async fn research(
     state: &AppState,
@@ -184,7 +198,17 @@ pub async fn research(
         }
         records = jobs.records;
         result.jobs = jobs.jobs;
-        found_companies.extend(jobs.companies);
+        let mut employers = jobs.companies;
+        if let Some(target) = &intent.target_company {
+            let elsewhere = only_at(target, &mut result.jobs, &mut employers);
+            if elsewhere > 0 {
+                notes.push(format!(
+                    "{} at other companies left out: the request is about {target}.",
+                    plural(elsewhere, "opening", "openings")
+                ));
+            }
+        }
+        found_companies.extend(employers);
     }
 
     // Companies: the one named, Wikidata, the model's own search.
@@ -558,6 +582,39 @@ mod tests {
             retrieved_at: 1,
             policy_version: POLICY_VERSION.into(),
         }
+    }
+
+    #[test]
+    fn a_named_company_keeps_only_its_own_openings() {
+        let job = |company: &str, title: &str| JobRef {
+            id: format!("rj_{title}"),
+            title: title.into(),
+            company_id: Some(resolve::company_id(company)),
+            company_name: Some(company.into()),
+            location: Some("Vienna".into()),
+            work_mode: None,
+            posted_at: None,
+            url: format!("https://jobs.example/{title}"),
+            source: "OpenAI web search".into(),
+            status: "Found by search (not opened)".into(),
+            notes: vec![],
+        };
+        let mut jobs = vec![
+            job("Nordlicht AI GmbH", "ML Engineer"),
+            job("Prater AI", "Applied AI Engineer"),
+            job("Wien Robotics", "LLM Engineer"),
+        ];
+        let mut employers = vec![
+            companies::named("Nordlicht AI GmbH", 1),
+            companies::named("Prater AI", 1),
+            companies::named("Wien Robotics", 1),
+        ];
+        let left_out = only_at("Nordlicht AI", &mut jobs, &mut employers);
+        assert_eq!(left_out, 2);
+        assert_eq!(jobs.len(), 1, "a legal suffix is the same company");
+        assert_eq!(jobs[0].title, "ML Engineer");
+        let names: Vec<&str> = employers.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["Nordlicht AI GmbH"]);
     }
 
     #[test]

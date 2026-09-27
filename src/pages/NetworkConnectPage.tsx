@@ -289,6 +289,17 @@ function ProviderCard({ caps }: { caps: ProviderCapabilities }) {
             Reconnect
           </button>
         )}
+        {caps.access === 'connected' && caps.grantAvailable && (
+          <button
+            type="button"
+            className="button button--secondary button--small"
+            disabled={action.busy}
+            title="Sign in to LinkedIn again to let ReMa read your first-degree connections."
+            onClick={connect}
+          >
+            {action.busy ? 'Waiting for sign-in…' : 'Grant connection access'}
+          </button>
+        )}
       </div>
       <p className="nc-provider__summary">{caps.summary}</p>
       {caps.available.length > 0 && (
@@ -748,7 +759,7 @@ function DetailDialog({
       <div className="nc-detail">
         {person && (
           <section className="nc-detail__block" aria-label="Person">
-            <h3 className="nc-detail__title">{person.name}</h3>
+            {/* The dialog's title already names the person. */}
             <p className="nc-detail__meta">
               {[person.title, person.companyName, person.location].filter(Boolean).join(' · ')}
             </p>
@@ -767,7 +778,7 @@ function DetailDialog({
                 <span className="badge badge--brand">{person.relationship.label}</span> (from LinkedIn, this session only)
               </p>
             )}
-            <Links links={personLinks(person)} />
+            {personLinks(person).length > 0 && <Links links={personLinks(person)} />}
             <EvidenceList evidence={person.evidence} />
           </section>
         )}
@@ -784,7 +795,7 @@ function DetailDialog({
           </section>
         )}
         <section className="nc-detail__block" aria-label="Company">
-          <h3 className="nc-detail__title">{company.name}</h3>
+          {person && <h3 className="nc-detail__title">{company.name}</h3>}
           <dl className="nc-detail__facts">
             <dt>Location</dt>
             <dd>{company.locations.join(' / ') || 'Unknown'}</dd>
@@ -795,7 +806,7 @@ function DetailDialog({
             {company.relevantOpenings > 0 && (
               <>
                 <dt>Openings found</dt>
-                <dd>{company.relevantOpenings} relevant openings in this search</dd>
+                <dd>{plural(company.relevantOpenings, 'relevant opening', 'relevant openings')} in this search</dd>
               </>
             )}
           </dl>

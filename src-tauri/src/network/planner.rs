@@ -673,14 +673,24 @@ const NOT_COMPANIES: &[&str] = &[
 ];
 
 /// The company a request is about ("work at Company X", "anyone at
-/// Bitpanda").
+/// Bitpanda", "Is Nordlicht AI hiring …").
 fn target_company(text: &str) -> Option<String> {
     static CELL: OnceLock<Regex> = OnceLock::new();
+    static SUBJECT: OnceLock<Regex> = OnceLock::new();
     let pattern = re(
         &CELL,
         r"\b(?:(?i:work|working|job|apply|applying|interested|interview(?:ing)?|anyone|anybody|someone|people|contacts?|connections?|know\s+\w+|position|role|opening|team|leads?)\s+(?:(?i:at|for|with|in)\s+)?(?i:at))\s+(?P<name>(?:[A-Z][\w&.\-]*|[A-Z]{2,})(?:\s+(?:[A-Z][\w&.\-]*|[A-Z]{2,}|X)){0,3})",
     );
-    for caps in pattern.captures_iter(text) {
+    // The company as the question's subject: "Is Nordlicht AI hiring",
+    // "Does Bitpanda have open roles".
+    let subject = re(
+        &SUBJECT,
+        r"\b(?i:is|are|does|do|has|have)\s+(?P<name>(?:[A-Z][\w&.\-]*|[A-Z]{2,})(?:\s+(?:[A-Z][\w&.\-]*|[A-Z]{2,}|X)){0,3})\s+(?i:hiring|recruiting|looking\s+for|have|has|currently|still|building|growing|expanding)\b",
+    );
+    for caps in pattern
+        .captures_iter(text)
+        .chain(subject.captures_iter(text))
+    {
         let name = sentence_end(&caps["name"]);
         let lower = name.to_lowercase();
         let place = normalize::place(&name);
@@ -1005,6 +1015,30 @@ mod tests {
         assert!(warm.relationships);
         assert_eq!(warm.target_company.as_deref(), Some("Nordlicht AI"));
         assert_eq!(warm.stages(), [Stage::Companies, Stage::Connections]);
+
+        // The company as the question's subject stays the one company.
+        let subject = detect(
+            "Is Nordlicht AI hiring machine learning engineers, and who should I talk to there?",
+        )
+        .unwrap();
+        assert_eq!(subject.target_company.as_deref(), Some("Nordlicht AI"));
+        assert!(subject.hiring);
+        assert_eq!(
+            subject.stages(),
+            [Stage::Companies, Stage::Jobs, Stage::People]
+        );
+        assert_eq!(
+            intent("Does Bitpanda have open roles for data engineers?")
+                .target_company
+                .as_deref(),
+            Some("Bitpanda")
+        );
+        for text in [
+            "Is AI hiring slowing down in Vienna?",
+            "Are Vienna startups hiring data engineers?",
+        ] {
+            assert_eq!(intent(text).target_company, None, "{text}");
+        }
 
         let first = detect("Which of my permitted LinkedIn first-degree connections work at companies currently hiring for my target roles?")
             .unwrap();

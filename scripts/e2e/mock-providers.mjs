@@ -37,6 +37,14 @@
 // are served here (one on 127.0.0.1, one on localhost, so they are two
 // companies), and — after `POST /__e2e/contracts {on: true}` — contract
 // and freelance listings on the Arbeitnow stand-in.
+//
+// Network Connect runs add REMA_LINKEDIN_BASE_URL=http://127.0.0.1:8777 and
+// REMA_DEV_LINKEDIN_CLIENT_ID=e2e-linkedin: Sign In with LinkedIn (OpenID
+// Connect, PKCE) grants identity only. To play an app LinkedIn approved for
+// first-degree connections, also set
+// REMA_DEV_LINKEDIN_APPROVED_SCOPES=r_1st_connections and
+// `POST /__e2e/linkedin {connections: true}`; the Connections API then
+// returns two Nordlicht AI connections and one at a similarly named company.
 
 import http from 'node:http';
 
@@ -174,7 +182,7 @@ function modelReply(body) {
   }
   const whole = JSON.stringify(body);
   log({ model: 'chat', leaked, career_sources: whole.includes('<career_sources>'), contacts: CONTACTS.test(whole),
-    tools: (body.tools ?? []).map((t) => t.function?.name ?? t.type) });
+    linkedin_members: LINKEDIN_MEMBERS.test(whole), tools: (body.tools ?? []).map((t) => t.function?.name ?? t.type) });
   return 'Mock answer from the local model.';
 }
 
@@ -396,6 +404,8 @@ const researchAnswer = () => JSON.stringify({ findings: [
 const leakCheck = (text) => /sk-ant-|sk-e2e|Bearer /.test(text);
 // The team page's contact details: they must never reach a model.
 const CONTACTS = /anna@nordlicht|660 1234567/;
+// LinkedIn connection data (session only): it must never reach a model.
+const LINKEDIN_MEMBERS = /Jane Example|jane-example|Lena Andere|lena-andere/;
 /** Which step a model request is, from ReMa's instructions. */
 function modelStep(system) {
   if (!system.startsWith('You are the search step of ReMa')) return 'answer';
@@ -407,7 +417,8 @@ function logModel(provider, step, body, extra = {}) {
   const whole = JSON.stringify(body);
   log({ model: provider, step, tools, allowed_domains: (web?.allowed_domains ?? web?.filters?.allowed_domains ?? []).length,
     user_location: web?.user_location?.city ?? null, tool_choice: body.tool_choice ?? null, leaked: leakCheck(whole),
-    career_sources: whole.includes('<career_sources>'), contacts: CONTACTS.test(whole), ...extra });
+    career_sources: whole.includes('<career_sources>'), contacts: CONTACTS.test(whole),
+    linkedin_members: LINKEDIN_MEMBERS.test(whole), ...extra });
 }
 function modelText(step) {
   if (step === 'jobs') return searchAnswer();
@@ -485,6 +496,7 @@ function unslothCompletions(req, body, res) {
 // ── HTTP helpers ──────────────────────────────────────────────────────
 const idToken = (claims) => `h.${b64url(JSON.stringify(claims))}.s`;
 const codes = new Map();
+let linkedinConnections = false;
 const log = (entry) => process.stdout.write(`${JSON.stringify({ at: new Date().toISOString(), ...entry })}\n`);
 
 function send(res, status, body, headers = {}) {
@@ -601,6 +613,47 @@ function route(req, url, body, res) {
   }
   if (p === '/revoke') return send(res, 200, {});
 
+  // LinkedIn: Sign In with LinkedIn using OpenID Connect as a native PKCE
+  // client (no client secret, no refresh token). LinkedIn grants identity;
+  // r_1st_connections only when the app asked for it and the stand-in
+  // plays an approved app (POST /__e2e/linkedin {connections: true}).
+  if (p === '/linkedin/oauth/v2/authorization') {
+    const code = `li-code-${codes.size + 1}`;
+    const granted = (q.get('scope') ?? '').split(' ').filter((s) =>
+      ['openid', 'profile', 'email'].includes(s) || (s === 'r_1st_connections' && linkedinConnections));
+    codes.set(code, { scope: granted.join(','), challenge: q.get('code_challenge'), redirect: q.get('redirect_uri') });
+    res.writeHead(302, { location: `${q.get('redirect_uri')}/?code=${code}&state=${encodeURIComponent(q.get('state'))}` });
+    return res.end();
+  }
+  if (p === '/linkedin/oauth/v2/accessToken') {
+    const grant = codes.get(form.get('code'));
+    if (form.get('grant_type') !== 'authorization_code' || !grant || grant.redirect !== form.get('redirect_uri')
+      || !form.get('code_verifier') || form.get('client_secret')) {
+      return send(res, 400, { error: 'invalid_request' });
+    }
+    log({ linkedin: 'token', scope: grant.scope });
+    return send(res, 200, {
+      access_token: `li-at-${Date.now()}`, expires_in: 5183999, token_type: 'Bearer', scope: grant.scope,
+      id_token: idToken({ sub: '782bbtaQ', email: 'ana@example.com' }),
+    });
+  }
+  if (p === '/linkedin/v2/userinfo') {
+    return send(res, 200, { sub: '782bbtaQ', name: 'Ana Example', given_name: 'Ana', family_name: 'Example', email: 'ana@example.com', email_verified: true });
+  }
+  if (p === '/linkedin-api/v2/connections') {
+    log({ linkedin: 'connections', allowed: linkedinConnections, bearer: /^Bearer li-at-/.test(req.headers.authorization ?? '') });
+    if (!linkedinConnections) return send(res, 403, { status: 403, message: 'Not enough permissions to access: GET /connections' });
+    const member = (first, last, headline, vanity) => ({ to: `urn:li:person:${vanity}`, 'to~': { localizedFirstName: first, localizedLastName: last, localizedHeadline: headline, vanityName: vanity } });
+    return send(res, 200, {
+      elements: [
+        member('Max', 'Muster', 'CTO at Nordlicht AI', 'max-muster'),
+        member('Jane', 'Example', 'Senior ML Engineer at Nordlicht AI', 'jane-example'),
+        member('Lena', 'Andere', 'Product at Nordlichter Bank', 'lena-andere'),
+      ],
+      paging: { count: 50, start: 0, total: 3 },
+    });
+  }
+
   // Gmail
   if (p === '/gmail/v1/users/me/profile') return send(res, 200, { emailAddress: 'ana@gmail.com', historyId: String(historyId) });
   if (p === '/gmail/v1/users/me/messages') {
@@ -713,6 +766,10 @@ function route(req, url, body, res) {
   if (p === '/__e2e/sources' && req.method === 'POST') {
     sourcesDown = Boolean(JSON.parse(body).down);
     return send(res, 200, { ok: true, sourcesDown });
+  }
+  if (p === '/__e2e/linkedin' && req.method === 'POST') {
+    linkedinConnections = Boolean(JSON.parse(body).connections);
+    return send(res, 200, { ok: true, linkedinConnections });
   }
   if (p === '/__e2e/contracts' && req.method === 'POST') {
     contractsOn = Boolean(JSON.parse(body).on);

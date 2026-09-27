@@ -49,6 +49,23 @@ fn session_ttl() -> Duration {
     Duration::from_secs(u64::from(policy::SESSION_TTL_SECS))
 }
 
+/// Removes what a provider returned from a result, saying so where the
+/// connection check was shown (never an empty "Your connections").
+fn drop_connections(result: &mut model::NetworkResult, reason: &str) {
+    result.connections.clear();
+    for person in &mut result.people {
+        person.relationship = None;
+    }
+    if matches!(
+        result.connections_outcome,
+        model::ConnectionsOutcome::Checked { .. }
+    ) {
+        result.connections_outcome = model::ConnectionsOutcome::Unavailable {
+            reason: reason.to_string(),
+        };
+    }
+}
+
 impl NetworkSession {
     pub fn cached_connections(&self) -> Option<Vec<relationships::Member>> {
         let mut cached = self.connections.lock().unwrap();
@@ -71,10 +88,10 @@ impl NetworkSession {
     pub fn forget_provider_data(&self) {
         *self.connections.lock().unwrap() = None;
         if let Some((_, last)) = self.last.lock().unwrap().as_mut() {
-            last.connections.clear();
-            for person in &mut last.people {
-                person.relationship = None;
-            }
+            drop_connections(
+                last,
+                "LinkedIn was disconnected: the connection details it returned were removed.",
+            );
         }
     }
 
@@ -88,10 +105,10 @@ impl NetworkSession {
         let mut last = self.last.lock().unwrap();
         let (at, result) = last.as_mut()?;
         if at.elapsed() >= session_ttl() {
-            result.connections.clear();
-            for person in &mut result.people {
-                person.relationship = None;
-            }
+            drop_connections(
+                result,
+                "Connection details are kept for a limited time only; ask again to check them.",
+            );
         }
         Some(result.clone())
     }

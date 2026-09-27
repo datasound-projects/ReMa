@@ -64,9 +64,17 @@ pub fn job_query(intent: &NetworkIntent) -> Option<JobQuery> {
         .roles
         .first()
         .cloned()
-        .or_else(|| intent.technologies.first().cloned())?;
+        .or_else(|| intent.technologies.first().cloned());
+    // A named company's openings need no role ("track Nordlicht AI: its
+    // current open roles").
+    if role.is_none() && !(intent.hiring && intent.target_company.is_some()) {
+        return None;
+    }
     let place = intent.place.as_ref().map(plan::Place::label);
-    let mut text = format!("Find current {role} jobs");
+    let mut text = match &role {
+        Some(role) => format!("Find current {role} jobs"),
+        None => "Find current jobs".to_string(),
+    };
     if let Some(company) = &intent.target_company {
         text.push_str(&format!(" at {company}"));
     }
@@ -79,7 +87,7 @@ pub fn job_query(intent: &NetworkIntent) -> Option<JobQuery> {
     text.push('.');
     Some(JobQuery {
         text,
-        role: Some(match &intent.seniority {
+        role: role.map(|role| match &intent.seniority {
             Some(level) => format!("{level} {role}"),
             None => role,
         }),
@@ -148,9 +156,7 @@ pub fn group(jobs: &[JobRef], now: i64) -> Vec<Company> {
             for job in &group {
                 if let Some(l) = &job.location {
                     for part in l.split(" / ") {
-                        if !locations.iter().any(|x| x == part) {
-                            locations.push(part.to_string());
-                        }
+                        resolve::add_location(&mut locations, part);
                     }
                 }
             }
@@ -593,7 +599,7 @@ pub fn companies_from_sparql(value: &Value, intent: &NetworkIntent, now: i64) ->
         }
         if let Some(hq) = binding(&row, "hqLabel") {
             if !company.locations.contains(&hq) {
-                company.locations.push(hq.clone());
+                resolve::add_location(&mut company.locations, &hq);
                 company.evidence.push(evidence::new(
                     DataSource::Wikidata,
                     "Wikidata",
@@ -796,7 +802,7 @@ pub fn companies_from_search(found: &native::Structured, now: i64) -> Vec<Compan
                 continue;
             };
             match supports {
-                Supports::CompanyLocation => company.locations.push(value.clone()),
+                Supports::CompanyLocation => resolve::add_location(&mut company.locations, &value),
                 Supports::CompanyIndustry => company.industry = Some(value.clone()),
                 _ => {
                     company.employees = employees(&value);
@@ -958,7 +964,7 @@ pub async fn enrich(
         }
         for hq in fact("Headquarters") {
             if !company.locations.contains(&hq) {
-                company.locations.push(hq.clone());
+                resolve::add_location(&mut company.locations, &hq);
                 add(Supports::CompanyLocation, format!("Headquarters: {hq}"));
             }
         }

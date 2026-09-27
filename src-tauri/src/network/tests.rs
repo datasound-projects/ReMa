@@ -404,6 +404,59 @@ async fn a_job_leads_to_its_hiring_side() {
         .any(|p| p.name == "Jonas Berger" && p.relevance == RelevanceType::DepartmentLeader));
 }
 
+#[tokio::test]
+async fn a_question_about_one_company_stays_with_that_company() {
+    let site = sources().await;
+    let state = state_for(&site);
+    let result = research(
+        &state,
+        "Is Nordlicht AI hiring machine learning engineers, and who should I talk to there?",
+    )
+    .await;
+    assert_ne!(result.status, ResultStatus::Failed, "{result:#?}");
+    assert_eq!(
+        result.criteria.target_company.as_deref(),
+        Some("Nordlicht AI")
+    );
+    let companies: Vec<&str> = result.companies.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(companies, ["Nordlicht AI"], "{result:#?}");
+    assert!(!result.jobs.is_empty(), "{result:#?}");
+    assert!(result
+        .jobs
+        .iter()
+        .all(|j| j.company_name.as_deref() == Some("Nordlicht AI")));
+    // The posting names whom the role reports to.
+    assert!(result
+        .people
+        .iter()
+        .any(|p| p.name == "Jonas Berger" && p.relevance == RelevanceType::StatedManager));
+    assert!(result
+        .people
+        .iter()
+        .all(|p| p.company_id.as_deref() == Some(result.companies[0].id.as_str())));
+}
+
+#[tokio::test]
+async fn tracking_a_company_lists_its_openings_without_a_role() {
+    let site = sources().await;
+    let state = state_for(&site);
+    let result = research(
+        &state,
+        "Track Nordlicht AI: find its current open roles and the most relevant hiring-side \
+         contacts at Nordlicht AI.",
+    )
+    .await;
+    assert_eq!(
+        result.criteria.target_company.as_deref(),
+        Some("Nordlicht AI")
+    );
+    assert!(result.criteria.stages.contains(&Stage::Jobs), "{result:#?}");
+    let titles: Vec<&str> = result.jobs.iter().map(|j| j.title.as_str()).collect();
+    assert_eq!(titles, ["Machine Learning Engineer"], "{result:#?}");
+    let companies: Vec<&str> = result.companies.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(companies, ["Nordlicht AI"]);
+}
+
 async fn connect_linkedin(state: &AppState, scopes: &[&str]) {
     let now = now_ms();
     state
@@ -480,9 +533,18 @@ async fn permitted_first_degree_connections_are_matched_for_the_session_only() {
         .filter(|r| r.target.starts_with("/linkedin-api/"))
         .count();
     assert_eq!(calls, 1);
-    // Disconnecting drops it.
+    // Disconnecting drops it, and the page's last result says so instead of
+    // an empty connection check.
+    state.network.remember_result(again);
     state.network.forget_provider_data();
     assert!(state.network.cached_connections().is_none());
+    let shown = state.network.last_result().unwrap();
+    assert!(shown.connections.is_empty());
+    assert!(shown.people.iter().all(|p| p.relationship.is_none()));
+    assert!(matches!(
+        &shown.connections_outcome,
+        ConnectionsOutcome::Unavailable { reason } if reason.contains("disconnected")
+    ));
 }
 
 #[tokio::test]

@@ -2688,6 +2688,12 @@ export type ProviderCapabilities = {
 	summary: string,
 	/**  The scopes behind it (for "Advanced details"). */
 	grantedScopes: string[],
+	/**
+	 *  ReMa's app is approved for more than this sign-in granted (the
+	 *  sign-in predates the approval or the permission was declined):
+	 *  signing in again can grant it.
+	 */
+	grantAvailable: boolean,
 };
 
 /**  The account provider behind a connector. */

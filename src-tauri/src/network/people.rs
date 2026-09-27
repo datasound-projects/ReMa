@@ -595,37 +595,59 @@ pub fn assess(
         .find(|t| title.to_lowercase().contains(&t.to_lowercase()));
     let function_matches =
         technology.is_some() || has.iter().any(|f| wanted.contains(f)) || wanted.is_empty();
-    let job_part = candidate
+    let job = candidate
         .job
         .as_ref()
-        .map(|j| format!("the {} opening", j.title))
-        .unwrap_or_else(|| "this request".into());
-    let (relevance, reason) = match kind {
-        TitleKind::Recruiter => (
+        .map(|j| format!("the {} opening", j.title));
+    // Without one opening, the reason speaks of the area asked about.
+    let (relevance, reason) = match (kind, &job) {
+        (TitleKind::Recruiter, Some(job)) => (
             RelevanceType::Recruiter,
-            format!("Listed as {title} at {company}; recruiting at the company, not tied to {job_part} by a source"),
+            format!("Listed as {title} at {company}; recruiting at the company, not tied to {job} by a source"),
         ),
-        TitleKind::Leader if function_matches => (
+        (TitleKind::Recruiter, None) => (
+            RelevanceType::Recruiter,
+            format!("Listed as {title} at {company}; recruiting at the company"),
+        ),
+        (TitleKind::Leader, Some(job)) if function_matches => (
             RelevanceType::DepartmentLeader,
-            format!("{job_part} belongs to their area; listed as {title} at {company}"),
+            format!("{job} belongs to their area; listed as {title} at {company}"),
         ),
-        TitleKind::TeamLead if function_matches => (
+        (TitleKind::Leader, None) if function_matches => (
+            RelevanceType::DepartmentLeader,
+            format!("Leads the area asked about; listed as {title} at {company}"),
+        ),
+        (TitleKind::TeamLead, Some(job)) if function_matches => (
             RelevanceType::TeamLead,
-            format!("Leads in the area of {job_part}; listed as {title} at {company}"),
+            format!("Leads in the area of {job}; listed as {title} at {company}"),
         ),
-        TitleKind::Executive => (
+        (TitleKind::TeamLead, None) if function_matches => (
+            RelevanceType::TeamLead,
+            format!("Leads a team in the area asked about; listed as {title} at {company}"),
+        ),
+        (TitleKind::Executive, Some(job)) => (
             RelevanceType::Executive,
-            format!("Company leadership ({title}); not tied to {job_part} by a source"),
+            format!("Company leadership ({title}); not tied to {job} by a source"),
         ),
-        TitleKind::Leader | TitleKind::TeamLead => (
+        (TitleKind::Executive, None) => (
+            RelevanceType::Executive,
+            format!("Company leadership ({title} at {company})"),
+        ),
+        (TitleKind::Leader | TitleKind::TeamLead, _) => (
             RelevanceType::RelevantContact,
-            format!("Listed as {title} at {company}; another area than {job_part}"),
+            format!(
+                "Listed as {title} at {company}; another area than {}",
+                job.as_deref().unwrap_or("the one asked about")
+            ),
         ),
-        TitleKind::Other if function_matches && !wanted.is_empty() => (
+        (TitleKind::Other, _) if function_matches && !wanted.is_empty() => (
             RelevanceType::RelevantContact,
-            format!("Works in the area of {job_part} ({title})"),
+            format!(
+                "Works in the area of {} ({title})",
+                job.as_deref().unwrap_or("the request")
+            ),
         ),
-        TitleKind::Other => return None,
+        (TitleKind::Other, _) => return None,
     };
     Some((relevance, reason, function_matches))
 }

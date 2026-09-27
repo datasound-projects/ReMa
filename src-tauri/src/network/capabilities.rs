@@ -95,6 +95,10 @@ pub struct ProviderCapabilities {
     pub summary: String,
     /// The scopes behind it (for "Advanced details").
     pub granted_scopes: Vec<String>,
+    /// ReMa's app is approved for more than this sign-in granted (the
+    /// sign-in predates the approval or the permission was declined):
+    /// signing in again can grant it.
+    pub grant_available: bool,
 }
 
 impl ProviderCapabilities {
@@ -117,6 +121,7 @@ pub fn of(
     account: Option<&AccountRecord>,
     has_token: bool,
     sign_in_available: bool,
+    approved_scopes: &[String],
 ) -> ProviderCapabilities {
     let name = provider.name().to_string();
     let access = if !sign_in_available {
@@ -137,9 +142,13 @@ pub fn of(
     let allows = |c: Capability| connectors::allows(provider, c, &granted);
     let mut available = Vec::new();
     let mut unavailable = Vec::new();
+    let mut grant_available = false;
     match provider {
         ProviderId::Linkedin => {
             let connected = access == ProviderAccess::Connected;
+            let approved = approved_scopes
+                .iter()
+                .any(|s| s == connectors::linkedin::SCOPE_FIRST_DEGREE);
             let not_connected = "Connect LinkedIn to use it.";
             for (capability, granted, missing) in [
                 (
@@ -166,14 +175,24 @@ pub fn of(
                      connections only.",
                 ));
             } else {
+                grant_available = connected && approved;
                 unavailable.push(item(
                     NetworkCapability::ReadFirstDegreeConnections,
-                    if connected {
-                        "LinkedIn has not granted ReMa access to connection lists (a \
-                         partner-approved permission)."
-                    } else {
-                        "Needs LinkedIn sign-in and a partner-approved permission ReMa does \
-                         not have."
+                    match (connected, approved) {
+                        (true, true) => {
+                            "ReMa's LinkedIn app is approved to read your first-degree \
+                             connections, but your current sign-in did not grant it. Sign in \
+                             again to grant it."
+                        }
+                        (true, false) => {
+                            "LinkedIn has not granted ReMa access to connection lists (a \
+                             partner-approved permission)."
+                        }
+                        (false, true) => "Connect LinkedIn and grant it to use it.",
+                        (false, false) => {
+                            "Needs LinkedIn sign-in and a partner-approved permission ReMa \
+                             does not have."
+                        }
                     },
                 ));
             }
@@ -209,7 +228,7 @@ pub fn of(
             }
         }
     }
-    let summary = summary(provider, access, &available);
+    let summary = summary(provider, access, &available, grant_available);
     ProviderCapabilities {
         provider,
         name,
@@ -221,10 +240,16 @@ pub fn of(
         unavailable,
         summary,
         granted_scopes: granted,
+        grant_available,
     }
 }
 
-fn summary(provider: ProviderId, access: ProviderAccess, available: &[CapabilityItem]) -> String {
+fn summary(
+    provider: ProviderId,
+    access: ProviderAccess,
+    available: &[CapabilityItem],
+    grant_available: bool,
+) -> String {
     let name = provider.name();
     let connections = available
         .iter()
@@ -246,6 +271,11 @@ fn summary(provider: ProviderId, access: ProviderAccess, available: &[Capability
         ProviderAccess::Connected if connections => format!(
             "{name} is connected: identity, your profile and your first-degree connection list."
         ),
+        ProviderAccess::Connected if grant_available => format!(
+            "{name} is connected for identity. ReMa's {name} app may read your first-degree \
+             connection list, but your current sign-in did not grant it: sign in again to grant \
+             it."
+        ),
         ProviderAccess::Connected => format!(
             "{name} is connected for identity, but ReMa does not currently have permission to \
              read your connection list."
@@ -259,11 +289,16 @@ pub async fn all(state: &AppState) -> AppResult<Vec<ProviderCapabilities>> {
     for provider in [ProviderId::Linkedin, ProviderId::Xing] {
         let account = state.db.call(move |c| repo::account(c, provider))?;
         let has_token = tokens::usable(state, provider).await?;
+        let approved = match provider {
+            ProviderId::Linkedin => connectors::linkedin::approved_scopes(),
+            _ => Vec::new(),
+        };
         out.push(of(
             provider,
             account.as_ref(),
             has_token,
             state.connectors.app(provider).is_some(),
+            &approved,
         ));
     }
     Ok(out)
@@ -289,6 +324,12 @@ pub fn relationship_access(providers: &[ProviderCapabilities]) -> RelationshipAc
         .iter()
         .find(|p| p.provider == ProviderId::Linkedin);
     RelationshipAccess::Unavailable(match linkedin.map(|p| p.access) {
+        Some(ProviderAccess::Connected) if linkedin.is_some_and(|p| p.grant_available) => {
+            "LinkedIn is connected, but your current sign-in did not grant ReMa your connection \
+             list, so ReMa cannot tell whom you know. Sign in to LinkedIn again in Network \
+             Connect to grant it."
+                .into()
+        }
         Some(ProviderAccess::Connected) => "LinkedIn is connected for identity, but ReMa does \
             not currently have permission to read your connection list, so ReMa cannot tell \
             whom you know."
@@ -324,8 +365,9 @@ mod tests {
     #[test]
     fn linkedin_identity_only_is_not_search_or_network_access() {
         let a = account(&["openid", "profile", "email"], AccountStatus::Connected);
-        let caps = of(ProviderId::Linkedin, Some(&a), true, true);
+        let caps = of(ProviderId::Linkedin, Some(&a), true, true, &[]);
         assert_eq!(caps.access, ProviderAccess::Connected);
+        assert!(!caps.grant_available);
         assert!(caps.has(NetworkCapability::AuthenticateIdentity));
         assert!(caps.has(NetworkCapability::ReadSelfProfile));
         for missing in [
@@ -356,8 +398,10 @@ mod tests {
             &["openid", "profile", "email", "r_1st_connections"],
             AccountStatus::Connected,
         );
-        let caps = of(ProviderId::Linkedin, Some(&a), true, true);
+        let approved = vec!["r_1st_connections".to_string()];
+        let caps = of(ProviderId::Linkedin, Some(&a), true, true, &approved);
         assert!(caps.has(NetworkCapability::ReadFirstDegreeConnections));
+        assert!(!caps.grant_available);
         assert!(!caps.has(NetworkCapability::ReadSecondDegreeConnections));
         assert_eq!(
             relationship_access(&[caps]),
@@ -368,23 +412,37 @@ mod tests {
             &["openid", "r_1st_connections"],
             AccountStatus::ReauthRequired,
         );
-        let caps = of(ProviderId::Linkedin, Some(&expired), true, true);
+        let caps = of(ProviderId::Linkedin, Some(&expired), true, true, &approved);
         assert_eq!(caps.access, ProviderAccess::ReconnectNeeded);
         assert!(caps.available.is_empty());
     }
 
     #[test]
     fn disconnected_and_xing_have_no_capabilities() {
-        let caps = of(ProviderId::Linkedin, None, false, true);
+        let caps = of(ProviderId::Linkedin, None, false, true, &[]);
         assert_eq!(caps.access, ProviderAccess::NotConnected);
         assert!(caps.available.is_empty());
-        let xing = of(ProviderId::Xing, None, false, false);
+        let xing = of(ProviderId::Xing, None, false, false, &[]);
         assert_eq!(xing.access, ProviderAccess::NotAvailable);
         assert!(xing.available.is_empty());
         assert!(xing.summary.contains("no sign-in for desktop apps"));
         assert!(matches!(
             relationship_access(&[caps, xing]),
             RelationshipAccess::Unavailable(reason) if reason.contains("cannot tell whom you know")
+        ));
+    }
+
+    #[test]
+    fn an_approved_app_with_an_older_sign_in_asks_to_sign_in_again() {
+        let a = account(&["openid", "profile", "email"], AccountStatus::Connected);
+        let approved = vec!["r_1st_connections".to_string()];
+        let caps = of(ProviderId::Linkedin, Some(&a), true, true, &approved);
+        assert!(caps.grant_available);
+        assert!(!caps.has(NetworkCapability::ReadFirstDegreeConnections));
+        assert!(caps.summary.contains("sign in again"), "{}", caps.summary);
+        assert!(matches!(
+            relationship_access(&[caps]),
+            RelationshipAccess::Unavailable(reason) if reason.contains("did not grant")
         ));
     }
 }

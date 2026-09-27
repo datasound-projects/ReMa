@@ -55,6 +55,7 @@ const linkedin: ProviderCapabilities = {
   summary:
     'LinkedIn is connected for identity, but ReMa does not currently have permission to read your connection list.',
   grantedScopes: ['openid', 'profile', 'email'],
+  grantAvailable: false,
 };
 
 const xing: ProviderCapabilities = {
@@ -66,6 +67,7 @@ const xing: ProviderCapabilities = {
   unavailable: [],
   summary: 'XING offers no sign-in for desktop apps and no API access for ReMa.',
   grantedScopes: [],
+  grantAvailable: false,
 };
 
 const result: NetworkResult = {
@@ -208,6 +210,17 @@ describe('NetworkConnectPage', () => {
     const xingCard = screen.getByRole('region', { name: 'XING' });
     expect(within(xingCard).getByText('Not available')).toBeTruthy();
     expect(within(xingCard).queryByRole('button', { name: 'Connect' })).toBeNull();
+    // Nothing more to grant: no sign-in button on a connected card.
+    expect(within(card).queryByRole('button', { name: 'Grant connection access' })).toBeNull();
+  });
+
+  it('offers to sign in again when the app may read connections but the sign-in did not grant it', async () => {
+    mocks.getNetworkCapabilities.mockResolvedValue([{ ...linkedin, grantAvailable: true }, xing]);
+    mocks.connectConnector.mockResolvedValue(null);
+    renderPage();
+    const card = await screen.findByRole('region', { name: 'LinkedIn' });
+    fireEvent.click(within(card).getByRole('button', { name: 'Grant connection access' }));
+    await waitFor(() => expect(mocks.connectConnector).toHaveBeenCalledWith('linkedin'));
   });
 
   it('runs a request and shows the unified table, never "no connections"', async () => {

@@ -107,6 +107,32 @@ fn fill<T: Clone>(into: &mut Option<T>, from: &Option<T>) {
     }
 }
 
+/// Adds a location unless one already listed names the same place: a bare
+/// city and the same city with its country ("Vienna", "Vienna, Austria")
+/// are one place, and the more specific name is kept. "Vienna, Austria"
+/// and "Vienna, Virginia" stay two.
+pub fn add_location(into: &mut Vec<String>, location: &str) {
+    let location = location.trim();
+    if location.is_empty() {
+        return;
+    }
+    let lower = location.to_lowercase();
+    let same_place = |kept: &str| {
+        let kept = kept.to_lowercase();
+        kept == lower
+            || kept.starts_with(&format!("{lower},"))
+            || lower.starts_with(&format!("{kept},"))
+    };
+    match into.iter().position(|kept| same_place(kept)) {
+        Some(i) => {
+            if location.len() > into[i].len() {
+                into[i] = location.to_string();
+            }
+        }
+        None => into.push(location.to_string()),
+    }
+}
+
 /// Companies merged by name or own domain. Two companies with one name but
 /// different own domains stay apart, each marked ambiguous.
 pub fn merge_companies(companies: Vec<Company>) -> Vec<Company> {
@@ -141,10 +167,8 @@ pub fn merge_companies(companies: Vec<Company>) -> Vec<Company> {
                 fill(&mut kept.employees, &company.employees);
                 fill(&mut kept.linkedin_url, &company.linkedin_url);
                 fill(&mut kept.xing_url, &company.xing_url);
-                for l in company.locations {
-                    if !kept.locations.contains(&l) {
-                        kept.locations.push(l);
-                    }
+                for l in &company.locations {
+                    add_location(&mut kept.locations, l);
                 }
                 for u in company.other_urls {
                     if !kept.other_urls.contains(&u) {
@@ -348,6 +372,29 @@ mod tests {
         assert_eq!(
             own_domain("https://careers.atlas-bank.example/x").as_deref(),
             Some("atlas-bank.example")
+        );
+    }
+
+    #[test]
+    fn a_city_and_the_same_city_with_its_country_are_one_location() {
+        let mut locations = Vec::new();
+        for l in [
+            "Vienna",
+            "Vienna, Austria",
+            "vienna",
+            "Graz",
+            "Vienna, Virginia",
+        ] {
+            add_location(&mut locations, l);
+        }
+        assert_eq!(locations, ["Vienna, Austria", "Graz", "Vienna, Virginia"]);
+        let mut a = company("Nordlicht AI", None);
+        a.locations = vec!["Vienna, Austria".into()];
+        let mut b = company("Nordlicht AI", None);
+        b.locations = vec!["Vienna".into()];
+        assert_eq!(
+            merge_companies(vec![a, b])[0].locations,
+            ["Vienna, Austria"]
         );
     }
 
