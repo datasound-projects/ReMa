@@ -3,6 +3,9 @@ import { createContext, useContext } from 'react';
 /** The two parts of the Profile page. */
 export type ProfileSection = 'documents' | 'custom';
 
+/** The four views inside Business. */
+export type BusinessTab = 'clients' | 'contracts' | 'gtm' | 'pipeline';
+
 /** What the main area shows. */
 export type View =
   | { page: 'chat'; conversationId: number | null; agentIds?: string[] }
@@ -15,6 +18,8 @@ export type View =
   /** `applicationId`: the application whose details are open. */
   | { page: 'applications'; applicationId?: number | null }
   | { page: 'network' }
+  /** `opportunityId`: the Pipeline opportunity whose details are open. */
+  | { page: 'business'; tab?: BusinessTab; opportunityId?: string | null }
   /** `focus` scrolls to a section (e.g. MCP from the chat's + menu). */
   | { page: 'settings'; focus?: 'mcp' | 'connectors' };
 

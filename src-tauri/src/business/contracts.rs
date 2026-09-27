@@ -1120,6 +1120,9 @@ pub async fn find(
     cancel: &CancellationToken,
 ) -> ContractResults {
     let now = now_ms();
+    let mut criteria = criteria;
+    let (places, place_notes) = locations::normalize(&criteria.locations);
+    criteria.locations = places;
     let mut results = ContractResults {
         run_id: run_id.to_string(),
         status: RunStatus::Running,
@@ -1133,11 +1136,7 @@ pub async fn find(
         failures: Vec::new(),
         retrieved_at: now,
     };
-    if criteria.locations.radius_km.is_some() {
-        results
-            .notes
-            .push("A radius is not applied: ReMa has no reliable coordinates for it.".into());
-    }
+    results.notes.extend(place_notes);
     progress.status("Finding contract work…");
     // The job layer matches every word of a role: "Python/AI" is searched
     // as Python and as AI (the model's web search once, with the whole

@@ -82,6 +82,7 @@ pub fn builder() -> Builder<tauri::Wry> {
             commands::business::business_delete_offer,
             commands::business::business_offer_version,
             commands::business::business_describe_offer,
+            commands::business::business_describe_offer_document,
             commands::business::business_find_clients,
             commands::business::business_find_contracts,
             commands::business::business_cancel,

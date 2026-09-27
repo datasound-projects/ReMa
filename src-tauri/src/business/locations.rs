@@ -375,6 +375,22 @@ pub fn union(mut l: Locations) -> Locations {
     l
 }
 
+/// Places typed into criteria fields, resolved like places in a request
+/// ("DACH", "Wien", "Österreich"); a radius is kept (and reported).
+pub fn normalize(l: &Locations) -> (Locations, Vec<String>) {
+    let text = l
+        .countries
+        .iter()
+        .chain(&l.regions)
+        .chain(&l.cities)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let (mut parsed, notes) = parse(&text);
+    parsed.radius_km = l.radius_km;
+    (parsed, notes)
+}
+
 /// The criteria as ReMa applies them ("Germany, Austria or Switzerland").
 pub fn label(l: &Locations) -> String {
     let mut parts: Vec<String> = Vec::new();

@@ -4,7 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 use specta::Type;
-use tauri::State;
+use tauri::{AppHandle, State};
+use tauri_plugin_dialog::DialogExt;
 
 use crate::{
     business::{
@@ -147,15 +148,48 @@ pub fn business_offer_version(
     offers::reviewed(&state, &offer_id, Some(version)).map(|(_, c)| c)
 }
 
-/// A product URL, description or document → a draft offer (or a refresh
-/// proposal for an existing one).
+/// A product URL or description → a draft offer (or a refresh proposal
+/// for an existing one). A document is only read through
+/// [`business_describe_offer_document`]: the page never passes file paths.
 #[tauri::command]
 #[specta::specta]
 pub async fn business_describe_offer(
     state: State<'_, AppState>,
     input: DescribeInput,
 ) -> AppResult<DescribeResult> {
-    let state: AppState = (*state).clone();
+    let mut input = input;
+    input.document_path = None;
+    describe(&state, input).await
+}
+
+/// Lets the user pick a document (PDF, Word, text or Markdown) with the
+/// system file dialog and reads it into a draft offer. `None` if the user
+/// cancelled.
+#[tauri::command]
+#[specta::specta]
+pub async fn business_describe_offer_document(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: DescribeInput,
+) -> AppResult<Option<DescribeResult>> {
+    let picked = app
+        .dialog()
+        .file()
+        .set_title("Choose a document about your product or service")
+        .add_filter("Documents", &["pdf", "docx", "txt", "md", "markdown"])
+        .blocking_pick_file()
+        .and_then(|picked| picked.into_path().ok());
+    let Some(path) = picked else {
+        return Ok(None);
+    };
+    let mut input = input;
+    input.url = None;
+    input.document_path = Some(path.to_string_lossy().into_owned());
+    describe(&state, input).await.map(Some)
+}
+
+async fn describe(state: &AppState, input: DescribeInput) -> AppResult<DescribeResult> {
+    let state: AppState = state.clone();
     let cancel = state.business.begin(&input.run_id);
     let progress = progress(&state, &input.run_id);
     let model = service::default_model(&state).await;

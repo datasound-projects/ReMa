@@ -461,6 +461,8 @@ pub async fn find_contracts(
     let mut results =
         contracts::find(state, &input.run_id, criteria, model, progress, cancel).await;
     results.notes.splice(0..0, notes);
+    let mut seen = std::collections::HashSet::new();
+    results.notes.retain(|n| seen.insert(n.clone()));
     if results.status == RunStatus::Failed && offline(&results.failures) {
         results.status = RunStatus::Offline;
     }

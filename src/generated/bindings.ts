@@ -74,10 +74,26 @@ export const commands = {
 	businessDeleteOffer: (offerId: string) => __TAURI_INVOKE<null>("business_delete_offer", { offerId }),
 	businessOfferVersion: (offerId: string, version: number) => __TAURI_INVOKE<OfferContent>("business_offer_version", { offerId, version }),
 	/**
-	 *  A product URL, description or document → a draft offer (or a refresh
-	 *  proposal for an existing one).
+	 *  A product URL or description → a draft offer (or a refresh proposal
+	 *  for an existing one). A document is only read through
+	 *  [`business_describe_offer_document`]: the page never passes file paths.
 	 */
 	businessDescribeOffer: (input: DescribeInput) => __TAURI_INVOKE<DescribeResult>("business_describe_offer", { input }),
+	/**
+	 *  Lets the user pick a document (PDF, Word, text or Markdown) with the
+	 *  system file dialog and reads it into a draft offer. `None` if the user
+	 *  cancelled.
+	 */
+	businessDescribeOfferDocument: (input: DescribeInput) => __TAURI_INVOKE<{
+	runId: string,
+	status: RunStatus,
+	offer: Offer,
+	pages: IngestPage[],
+	/**  Required or useful information still missing. */
+	missing: string[],
+	notes: string[],
+	diff: OfferDiff | null,
+} | null>("business_describe_offer_document", { input }),
 	businessFindClients: (input: ClientSearchInput) => __TAURI_INVOKE<ClientResults>("business_find_clients", { input }),
 	businessFindContracts: (input: ContractSearchInput) => __TAURI_INVOKE<ContractResults>("business_find_contracts", { input }),
 	businessCancel: (runId: string) => __TAURI_INVOKE<boolean>("business_cancel", { runId }),

@@ -9,7 +9,7 @@ import { FOOTER_NAV, MAIN_NAV } from './pages';
 import { SettingsPage } from '../pages/SettingsPage';
 
 describe('navigation', () => {
-  it('lists the pages in the product order, Network Connect after Applications', () => {
+  it('lists the pages in the product order, Business below Network Connect', () => {
     expect(MAIN_NAV.map((i) => i.label)).toEqual([
       'Chat',
       'Agents',
@@ -18,6 +18,7 @@ describe('navigation', () => {
       'Portfolio Studio',
       'Applications',
       'Network Connect',
+      'Business',
     ]);
     expect(MAIN_NAV.map((i) => i.id)).toEqual([
       'chat',
@@ -27,6 +28,7 @@ describe('navigation', () => {
       'portfolio',
       'applications',
       'network',
+      'business',
     ]);
     expect(FOOTER_NAV.map((i) => i.label)).toEqual(['Settings']);
   });

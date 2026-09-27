@@ -114,7 +114,9 @@ pub fn resolve_criteria(
             }
         }
     } else {
-        criteria.locations = locations::union(criteria.locations.clone());
+        let (normalized, place_notes) = locations::normalize(&criteria.locations);
+        criteria.locations = normalized;
+        notes.extend(place_notes);
     }
     if criteria.industries.is_empty() {
         criteria.industries = parsed.industries.clone();

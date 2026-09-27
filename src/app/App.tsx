@@ -12,6 +12,7 @@ import { useConversations } from '../hooks/useConversations';
 import { useSidebar } from '../hooks/useSidebar';
 import { AgentsPage } from '../pages/AgentsPage';
 import { ApplicationsPage } from '../pages/ApplicationsPage';
+import { BusinessPage } from '../pages/BusinessPage';
 import { ChatPage } from '../pages/ChatPage';
 import { NetworkConnectPage } from '../pages/NetworkConnectPage';
 import { PortfolioStudioPage } from '../pages/PortfolioStudioPage';
@@ -37,6 +38,12 @@ export function App() {
     page: 'portfolio',
     portfolioId: null,
   });
+  // "Business" returns to the view that was open last (Find Clients first).
+  const [lastBusiness, setLastBusiness] = useState<View & { page: 'business' }>({
+    page: 'business',
+    tab: 'clients',
+    opportunityId: null,
+  });
   const conversations = dataOr(useConversations().state, []);
   const sidebar = useSidebar();
 
@@ -45,6 +52,7 @@ export function App() {
     if (next.page === 'chat') setLastConversationId(next.conversationId);
     if (next.page === 'profile') setLastProfile(next);
     if (next.page === 'portfolio') setLastPortfolio(next);
+    if (next.page === 'business') setLastBusiness({ ...next, opportunityId: null });
   }, []);
   const navigation = useMemo(() => ({ view, navigate }), [view, navigate]);
 
@@ -52,6 +60,7 @@ export function App() {
     if (page === 'chat') navigate({ page: 'chat', conversationId: lastConversationId });
     else if (page === 'profile') navigate(lastProfile);
     else if (page === 'portfolio') navigate(lastPortfolio);
+    else if (page === 'business') navigate(lastBusiness);
     else navigate({ page });
   };
 
@@ -111,6 +120,9 @@ export function App() {
         {view.page === 'portfolio' && <PortfolioStudioPage portfolioId={view.portfolioId ?? null} />}
         {view.page === 'applications' && <ApplicationsPage applicationId={view.applicationId ?? null} />}
         {view.page === 'network' && <NetworkConnectPage />}
+        {view.page === 'business' && (
+          <BusinessPage tab={view.tab ?? 'clients'} opportunityId={view.opportunityId ?? null} />
+        )}
         {view.page === 'settings' && <SettingsPage focus={view.focus} />}
       </AppShell>
       {/* Above the app, which loads underneath; plays once per launch. */}

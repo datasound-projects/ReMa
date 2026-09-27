@@ -47,6 +47,7 @@ pub const APP_COMMANDS: &[&str] = &[
     "business_delete_offer",
     "business_offer_version",
     "business_describe_offer",
+    "business_describe_offer_document",
     "business_find_clients",
     "business_find_contracts",
     "business_cancel",

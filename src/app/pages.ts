@@ -7,6 +7,7 @@ import {
   NetworkIcon,
   ProfileIcon,
   SettingsIcon,
+  StoreIcon,
 } from '../components/icons';
 import type { SidebarItem } from '../components/layout/Sidebar';
 import type { PageId } from './navigation';
@@ -20,6 +21,7 @@ export const MAIN_NAV: readonly SidebarItem<PageId>[] = [
   { id: 'portfolio', label: 'Portfolio Studio', icon: LayoutIcon },
   { id: 'applications', label: 'Applications', icon: BriefcaseIcon },
   { id: 'network', label: 'Network Connect', icon: NetworkIcon },
+  { id: 'business', label: 'Business', icon: StoreIcon },
 ];
 
 /** Pinned to the bottom of the sidebar. */

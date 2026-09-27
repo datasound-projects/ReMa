@@ -2916,8 +2916,17 @@ mod tests {
         let (state, _, _) = setup(llm).await;
         let sent = send_message(&state, send(None, "long")).await.unwrap();
 
-        tokio::time::sleep(Duration::from_millis(120)).await;
-        let live = get_conversation(&state, sent.conversation.id).unwrap();
+        // Wait for the first streamed text (the first request in a process
+        // also compiles the intent detectors, so no fixed delay).
+        let mut live = get_conversation(&state, sent.conversation.id).unwrap();
+        for _ in 0..200 {
+            if !live.messages[1].content.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            live = get_conversation(&state, sent.conversation.id).unwrap();
+        }
+        assert_eq!(live.messages[1].status, MessageStatus::Streaming);
         assert!(
             !live.messages[1].content.is_empty(),
             "partial text is visible while streaming"

@@ -634,3 +634,14 @@ export function NetworkIcon(props: IconProps) {
     </Icon>
   );
 }
+
+/** A storefront: what the user sells (Business). */
+export function StoreIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M4 9.2V16a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V9.2" />
+      <path d="M3 5.6 4.3 3h11.4L17 5.6v1.1a2.1 2.1 0 0 1-3.5 1.6 2.3 2.3 0 0 1-3.5 0 2.3 2.3 0 0 1-3.5 0A2.1 2.1 0 0 1 3 6.7Z" />
+      <path d="M8.2 17v-4.2h3.6V17" />
+    </Icon>
+  );
+}
