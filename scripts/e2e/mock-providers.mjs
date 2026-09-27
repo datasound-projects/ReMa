@@ -1033,7 +1033,10 @@ function route(req, url, body, res) {
       .filter((m) => (token === null ? m.at >= from : m.token > Number(token)))
       .map((m) => graphMessage(m, false));
     deltaToken = Math.max(deltaToken, ...outlook.map((m) => m.token));
-    return send(res, 200, { value, '@odata.deltaLink': `${base}/graph/v1.0/me/mailFolders/inbox/messages/delta?$deltatoken=${deltaToken}` });
+    // Like Graph, the link stays on the host that was called (ReMa never
+    // follows a link to another site).
+    const graph = (req.headers.host ?? '').startsWith('graph.microsoft.com') ? 'https://graph.microsoft.com' : `${base}/graph`;
+    return send(res, 200, { value, '@odata.deltaLink': `${graph}/v1.0/me/mailFolders/inbox/messages/delta?$deltatoken=${deltaToken}` });
   }
   if (p === '/graph/v1.0/me/mailFolders/inbox/messages') {
     const { from, to } = received(q.get('$filter'));

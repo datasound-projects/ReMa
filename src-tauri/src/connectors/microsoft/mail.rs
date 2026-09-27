@@ -237,8 +237,12 @@ impl MailProvider for OutlookMail {
     ) -> BoxFuture<'a, AppResult<SyncBatch>> {
         Box::pin(async move {
             if let Some(link) = cursor {
-                if let Some(batch) = self.delta(link).await? {
-                    return Ok(batch);
+                // A stored link that is not Graph's (another site) is never
+                // followed; like an expired token, it restarts the sync.
+                if self.api.url(link).is_ok() {
+                    if let Some(batch) = self.delta(link).await? {
+                        return Ok(batch);
+                    }
                 }
                 // Invalid or expired delta token: a bounded full round.
                 let mut batch = self.delta(&self.initial_url(since)).await?.ok_or_else(|| {
@@ -536,16 +540,43 @@ mod tests {
 
     #[tokio::test]
     async fn links_to_other_hosts_are_never_followed() {
-        let server = MockServer::start(|_| None).await;
-        let mail = outlook(&server);
-        let error = mail
+        // A page link to another site ends the round without a request.
+        let server = graph(|t, _| {
+            t.contains("changeType=created").then(|| {
+                (200, json!({
+                    "value": [],
+                    "@odata.nextLink": "https://evil.example.com/graph/v1.0/me/messages/delta?$skiptoken=x"
+                }).to_string())
+            })
+        })
+        .await;
+        let error = outlook(&server).sync_changes(None, 0).await.unwrap_err();
+        assert!(error.to_string().contains("another site"), "{error}");
+        assert_eq!(server.requests().len(), 1, "the token never left");
+
+        // A stored cursor to another site is not followed either: like an
+        // expired token, it restarts a bounded round at Graph.
+        let server = graph(|t, base| {
+            assert!(!t.contains("evil"), "{t}");
+            t.contains("changeType=created").then(|| {
+                (200, json!({
+                    "value": [],
+                    "@odata.deltaLink": format!("{base}/graph/v1.0/me/mailFolders/inbox/messages/delta?$deltatoken=fresh")
+                }).to_string())
+            })
+        })
+        .await;
+        let batch = outlook(&server)
             .sync_changes(
-                Some("https://evil.example.com/graph/v1.0/me/messages/delta"),
-                0,
+                Some("https://evil.example.com/graph/v1.0/me/messages/delta?$deltatoken=x"),
+                1_790_300_000_000,
             )
             .await
-            .unwrap_err();
-        assert!(error.to_string().contains("another site"), "{error}");
-        assert!(server.requests().is_empty(), "the token never left");
+            .unwrap();
+        assert!(batch.resynced);
+        assert!(batch.cursor.ends_with("fresh"));
+        let requests = server.requests();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].target.contains("receivedDateTime+ge+2026-09-"));
     }
 }

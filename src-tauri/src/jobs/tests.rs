@@ -518,6 +518,7 @@ impl World {
             now,
         )
         .await
+        .map(|outcome| outcome.report)
     }
 
     async fn run(&self, now: i64) -> JobRunReport {
@@ -1769,6 +1770,7 @@ impl World {
         )
         .await
         .unwrap()
+        .report
     }
 
     /// An email in a mailbox, relevant, and the model's answer for it.

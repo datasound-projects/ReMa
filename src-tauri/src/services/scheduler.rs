@@ -2332,4 +2332,133 @@ mod tests {
             .await
             .is_none());
     }
+
+    #[tokio::test]
+    async fn a_mailbox_the_run_cannot_read_keeps_its_last_success_and_says_so() {
+        // Found in the packaged-release run: Outlook could not be read while
+        // Gmail could, yet Outlook Mail was marked "Synced" (and a later
+        // recovery would have started after the mail it never read).
+        use crate::{
+            connectors::{
+                google::GoogleEndpoints, microsoft::MicrosoftEndpoints, oauth::OAuthApp, Apps,
+            },
+            db::connectors::{self as connector_repo, AccountRecord, AccountStatus},
+            models::connectors::{ConnectorId, ConnectorState, ProviderId},
+            secrets::Credential,
+            test_support::MockServer,
+        };
+        let server = MockServer::start(|req| {
+            let t = req.target.as_str();
+            if t.starts_with("/gmail/v1/users/me/profile") {
+                return Some((
+                    200,
+                    r#"{"emailAddress":"ana@gmail.com","historyId":"100"}"#.into(),
+                ));
+            }
+            if t.starts_with("/gmail/v1/users/me/messages") {
+                return Some((200, r#"{"resultSizeEstimate":0}"#.into()));
+            }
+            t.starts_with("/graph/v1.0/me/mailFolders/inbox/messages/delta")
+                .then(|| (500, r#"{"error":{"code":"InternalServerError"}}"#.into()))
+        })
+        .await;
+        let mut state = state(FakeLanguageModel::replying(&[])).await;
+        let base = server.base_url.clone();
+        state.connectors = crate::connectors::ConnectorsContext::new(
+            GoogleEndpoints::at(&base),
+            MicrosoftEndpoints::at(&base, &format!("{base}/graph/v1.0")),
+            Apps {
+                google: Some(OAuthApp {
+                    client_id: "client".into(),
+                    client_secret: Some("client-secret-value".into()),
+                }),
+                microsoft: Some(OAuthApp {
+                    client_id: "ms-client".into(),
+                    client_secret: None,
+                }),
+                linkedin: None,
+            },
+        );
+        let now = now_ms();
+        for (provider, account, connector) in [
+            (ProviderId::Google, "g-1", ConnectorId::Gmail),
+            (ProviderId::Microsoft, "m-1", ConnectorId::OutlookMail),
+        ] {
+            state
+                .vault
+                .set(
+                    &crate::connectors::tokens::legacy_key(provider),
+                    Credential::OAuth {
+                        access_token: format!("{account}-access"),
+                        refresh_token: Some(format!("{account}-refresh")),
+                        expires_at: Some(now + 3_600_000),
+                    },
+                )
+                .await
+                .unwrap();
+            state
+                .db
+                .call(|c| {
+                    connector_repo::save_account(
+                        c,
+                        &AccountRecord {
+                            provider,
+                            account_id: Some(account.into()),
+                            email: Some(format!("{account}@example.com")),
+                            display_name: None,
+                            granted_scopes: match provider {
+                                ProviderId::Google => {
+                                    crate::connectors::google::scopes(&[connector])
+                                }
+                                _ => crate::connectors::microsoft::scopes(&[connector]),
+                            },
+                            status: AccountStatus::Connected,
+                            status_reason: None,
+                            connected_at: now,
+                            updated_at: now,
+                        },
+                    )?;
+                    connector_repo::set_enabled(c, connector, true, now)
+                })
+                .unwrap();
+        }
+        let task = tasks::create(
+            &state,
+            TaskInput {
+                kind: TaskKind::JobApplications {
+                    lookback_days: 30,
+                    sync_calendar: false,
+                },
+                prompt: String::new(),
+                ..every_4_hours(None)
+            },
+        )
+        .await
+        .unwrap();
+        let id = tasks::run_now(&state, task.id).unwrap();
+        wait_idle(&state, task.id).await;
+        let run = runs::get(&state, id).unwrap();
+        assert_eq!(run.status, ExecutionStatus::Succeeded, "{:?}", run.error);
+
+        let (gmail, outlook) = state
+            .db
+            .call(|c| {
+                Ok((
+                    connector_repo::connector(c, ConnectorId::Gmail)?,
+                    connector_repo::connector(c, ConnectorId::OutlookMail)?,
+                ))
+            })
+            .unwrap();
+        assert!(gmail.last_success_at.is_some() && gmail.last_error.is_none());
+        assert_eq!(outlook.last_success_at, None, "never read");
+        assert!(outlook.last_error.is_some());
+        let card = crate::connectors::overview(&state)
+            .await
+            .unwrap()
+            .connectors
+            .into_iter()
+            .find(|c| c.id == ConnectorId::OutlookMail)
+            .unwrap();
+        assert_eq!(card.state, ConnectorState::Error);
+    }
 }

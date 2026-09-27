@@ -179,21 +179,29 @@ pub async fn run_task(
     let finished = now_ms();
     let error = result.as_ref().err().map(describe);
     for (id, ..) in &mailboxes {
+        // A mailbox the run could not read keeps its last success (where
+        // reading resumes) and shows why, even when the others were read.
+        let own = result
+            .as_ref()
+            .ok()
+            .and_then(|outcome| outcome.unread.iter().find(|(unread, _)| unread == id))
+            .map(|(_, e)| describe(e));
+        let failed = error.as_ref().or(own.as_ref());
         state.db.call(|c| {
             repo::sync_finished(
                 c,
                 *id,
                 finished,
-                error.as_ref().map(|(m, d)| (m.as_str(), d.as_str())),
+                failed.map(|(m, d)| (m.as_str(), d.as_str())),
             )
         })?;
     }
     drop(guards);
-    if let Ok(report) = &result {
-        calendars_checked(state, &calendars, report);
+    if let Ok(outcome) = &result {
+        calendars_checked(state, &calendars, &outcome.report);
     }
     state.events.connectors_changed();
-    let mut report = result?;
+    let mut report = result?.report;
     for id in busy {
         report.issues.push(format!(
             "{} was already syncing; its new mail is handled by that run.",

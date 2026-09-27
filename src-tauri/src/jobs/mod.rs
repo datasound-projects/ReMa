@@ -107,6 +107,14 @@ pub struct Sources<'a> {
     pub calendars: Vec<&'a dyn CalendarProvider>,
 }
 
+/// What a run did, and the mailboxes it could not read (with why): a run
+/// that read one mailbox succeeds, but the others' failures are theirs.
+#[derive(Debug)]
+pub struct RunOutcome {
+    pub report: JobRunReport,
+    pub unread: Vec<(ConnectorId, AppError)>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RunConfig {
     /// The user's instructions (scheduled tasks); interpretation only.
@@ -828,7 +836,7 @@ pub async fn run(
     config: RunConfig,
     cancel: &CancellationToken,
     now: i64,
-) -> AppResult<JobRunReport> {
+) -> AppResult<RunOutcome> {
     let window_start = sources
         .mail
         .iter()
@@ -862,6 +870,7 @@ pub async fn run(
         ),
     );
     let mut synced = Vec::new();
+    let mut unread = Vec::new();
     for source in &sources.mail {
         if cancel.is_cancelled() {
             return Err(cancelled());
@@ -879,11 +888,14 @@ pub async fn run(
                 );
                 return Err(error);
             }
-            Err(error) => report.issues.push(format!(
-                "{} could not be synchronized: {}",
-                source.connector.name(),
-                short_error(&error)
-            )),
+            Err(error) => {
+                report.issues.push(format!(
+                    "{} could not be synchronized: {}",
+                    source.connector.name(),
+                    short_error(&error)
+                ));
+                unread.push((source.connector, error));
+            }
         }
     }
     if synced.is_empty() && !sources.mail.is_empty() {
@@ -1002,7 +1014,7 @@ pub async fn run(
     report.applications = state.db.call(|c| report::overview(c, window_start, now))?;
     report::count(&mut report);
     state.events.applications_changed();
-    Ok(report)
+    Ok(RunOutcome { report, unread })
 }
 
 /// "Calendar checked · 1 interview added, 1 conflict".

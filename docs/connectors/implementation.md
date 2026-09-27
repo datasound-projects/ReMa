@@ -306,13 +306,27 @@ addresses, account ids, mail content.
   Microsoft." ReMa never claims mail stays on the device when it does not.
 - Settings reads the keychain only for connected accounts (a fresh install
   reads none) and waits at most 10 s for it.
-- Chat: a question about the user's own mail, calendar or applications
-  ("Which job emails did I get?") is answered with the connector tools and
-  without the web, even when it also reads like a job search; a message
-  that names listings ("Find jobs like my applications") is still a search
-  (found in the packaged run, validation §4.2).
 
-### 5.9 Not done by design
+### 5.9 Found in the packaged-release run (validation §4.2)
+
+- **Chat asked the web about the user's own mail.** "Which job emails did I
+  get?" reads like a job search, so ReMa ran a public listing search. A
+  question about the user's own mail, calendar or applications is now
+  answered with the connector tools and without the web, unless it names
+  listings ("Find jobs like my applications" is still a search).
+- **A mailbox that failed inside a run was marked synced.** With Gmail and
+  Outlook connected, a run that read only Gmail recorded both as
+  successful: Outlook's error was cleared, its card said "Synced", and its
+  last success moved forward — the point where a recovery after an expired
+  cursor starts reading, so mail from the failed period could be skipped.
+  `jobs::run` now returns the mailboxes it could not read; each keeps its
+  last success and shows its own error.
+- **An unusable Outlook cursor stopped Outlook sync for good.** A stored
+  delta link that is not Graph's is still never followed (the token never
+  leaves), but it now restarts a bounded synchronization like an expired
+  one, instead of failing every run.
+
+### 5.10 Not done by design
 
 - **No MSAL.** Microsoft has no supported MSAL for Rust; ReMa implements the
   documented authorization-code + PKCE flow for public clients (no secret,

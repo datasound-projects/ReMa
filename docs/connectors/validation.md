@@ -108,7 +108,7 @@ cause, gap analysis and checklist: [../production-plan.md §6–§8](../producti
 | Check | Result |
 |---|---|
 | `cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings` | clean |
-| `cargo test --locked` | 713 passed, 3 ignored (explicit-only) |
+| `cargo test --locked` | 714 passed, 3 ignored (explicit-only) |
 | `pnpm lint`, `pnpm typecheck` | clean |
 | `pnpm test` | 121 passed (23 files) |
 | `pnpm build` | built |
@@ -140,6 +140,7 @@ cause, gap analysis and checklist: [../production-plan.md §6–§8](../producti
 | §51, §80 packaging | `the_opener_plugin_is_registered_and_no_webview_can_open_addresses`, `the_tauri_npm_packages_match_the_rust_crate` |
 | §41–§42 states | `a_card_opening_the_browser_says_so_before_it_asks_to_finish_there`, `a_sign_in_shows_connecting_and_can_be_cancelled`, `builds_without_an_app_registration_offer_no_sign_in`, Vitest `ConnectorsSection` (Retry, capabilities, Sync now, where job mail goes) |
 | Keychain resilience | `settings_never_wait_on_the_keychain_for_cards_that_were_never_connected` |
+| §66, §67 per-mailbox outcome, unusable cursors | `a_mailbox_the_run_cannot_read_keeps_its_last_success_and_says_so`, `links_to_other_hosts_are_never_followed`, `delta_links_continue_and_expired_tokens_resync` (found in the packaged run, §4.2) |
 | §92 connectors usable from chat | `questions_about_applications_get_connector_tools_and_no_web`, `questions_about_job_mail_read_the_connectors_not_job_listings` (found in the packaged run, §4.2) |
 ### 4.2 Packaged release, clean install (B §74–§79, §92)
 
@@ -178,6 +179,8 @@ Setup, standing in for a clean machine:
 | 12 | §64 | Where job mail goes | "Job-related email is read by mock-classifier on this computer: mail leaves it only between ReMa and Google or Microsoft. Sign-in tokens never reach the interface or a model." |
 | 13 | §92 | Chat: "Which job emails did I get recently, and is tomorrow at 09:00 free for a call?" | **Failed**: ReMa ran a public job-listing search ("ReMa could not retrieve live career sources…") instead of the mail and calendar tools. Fixed (`listing_search` in `services/chat.rs`, test `questions_about_job_mail_read_the_connectors_not_job_listings`, red before the fix); re-run on a rebuilt package below |
 
-Still running on the rebuilt package: the chat re-run, §76 (window closed with
-background mode on), §77 (providers unreachable), §78 (revoked grant),
-reconnect and disconnect.
+| 14 | §76 | "Run ReMa in background" on; quit and start again (nothing in memory); close the window as a window manager does (`WM_DELETE_WINDOW`) | Window hidden, process alive, no provider request until the schedule. The 20:15 run with no window: Google and Microsoft grants refreshed (`phase=token_refreshed`), Gmail history read, both calendars checked. A second launch showed the running window (single instance) and exited |
+| 15 | §66 | Outlook in the 20:00 and 20:15 runs | **Failed**: no Outlook request. The stand-in had answered the first round with a delta link on its debug address; ReMa refused to follow it (correct: the token never leaves Graph), which surfaced two defects: the run marked Outlook Mail "Synced" and moved its last success, and the unusable cursor stopped Outlook sync for good. Both fixed ([implementation.md §5.9](implementation.md), tests in §4.1); the stand-in now keeps its links on the host that was called |
+
+Still running on the rebuilt package: the chat re-run, Outlook recovery,
+§77 (providers unreachable), §78 (revoked grant), reconnect and disconnect.
