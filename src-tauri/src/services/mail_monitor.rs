@@ -63,6 +63,10 @@ fn describe(error: &AppError) -> (String, String) {
         AppError::Provider(text) if text.contains("rate limit") => {
             "The provider is rate limiting ReMa. The next run tries again.".to_string()
         }
+        AppError::Network(_) => {
+            "The provider could not be reached. Check your connection; the next run tries again."
+                .to_string()
+        }
         AppError::Provider(text) if text.contains("could not be reached") => {
             "The provider could not be reached. Check your connection; the next run tries again."
                 .to_string()
@@ -197,11 +201,23 @@ pub async fn run_task(
         })?;
     }
     drop(guards);
+    // Calendars count as checked only when every request to them worked.
     if let Ok(outcome) = &result {
-        calendars_checked(state, &calendars, &outcome.report);
+        if !outcome.calendar_failed && outcome.unread.len() < mailboxes.len() {
+            calendars_checked(state, &calendars, &outcome.report);
+        }
     }
     state.events.connectors_changed();
-    let mut report = result?.report;
+    let jobs::RunOutcome {
+        mut report, unread, ..
+    } = result?;
+    // A run that could read none of its mailboxes failed (each mailbox keeps
+    // its own error); with one read, the others' failures are notes.
+    if !mailboxes.is_empty() && unread.len() == mailboxes.len() {
+        if let Some((_, error)) = unread.into_iter().next() {
+            return Err(error);
+        }
+    }
     for id in busy {
         report.issues.push(format!(
             "{} was already syncing; its new mail is handled by that run.",

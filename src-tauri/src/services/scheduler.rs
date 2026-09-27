@@ -2333,40 +2333,25 @@ mod tests {
             .is_none());
     }
 
-    #[tokio::test]
-    async fn a_mailbox_the_run_cannot_read_keeps_its_last_success_and_says_so() {
-        // Found in the packaged-release run: Outlook could not be read while
-        // Gmail could, yet Outlook Mail was marked "Synced" (and a later
-        // recovery would have started after the mail it never read).
+    /// ReMa signed in to Google and Microsoft, both served at `base`, with
+    /// the given connectors turned on; each account holds a valid access
+    /// token.
+    async fn with_connectors(
+        base: &str,
+        on: &[crate::models::connectors::ConnectorId],
+    ) -> AppState {
         use crate::{
             connectors::{
                 google::GoogleEndpoints, microsoft::MicrosoftEndpoints, oauth::OAuthApp, Apps,
             },
             db::connectors::{self as connector_repo, AccountRecord, AccountStatus},
-            models::connectors::{ConnectorId, ConnectorState, ProviderId},
+            models::connectors::ProviderId,
             secrets::Credential,
-            test_support::MockServer,
         };
-        let server = MockServer::start(|req| {
-            let t = req.target.as_str();
-            if t.starts_with("/gmail/v1/users/me/profile") {
-                return Some((
-                    200,
-                    r#"{"emailAddress":"ana@gmail.com","historyId":"100"}"#.into(),
-                ));
-            }
-            if t.starts_with("/gmail/v1/users/me/messages") {
-                return Some((200, r#"{"resultSizeEstimate":0}"#.into()));
-            }
-            t.starts_with("/graph/v1.0/me/mailFolders/inbox/messages/delta")
-                .then(|| (500, r#"{"error":{"code":"InternalServerError"}}"#.into()))
-        })
-        .await;
         let mut state = state(FakeLanguageModel::replying(&[])).await;
-        let base = server.base_url.clone();
         state.connectors = crate::connectors::ConnectorsContext::new(
-            GoogleEndpoints::at(&base),
-            MicrosoftEndpoints::at(&base, &format!("{base}/graph/v1.0")),
+            GoogleEndpoints::at(base),
+            MicrosoftEndpoints::at(base, &format!("{base}/graph/v1.0")),
             Apps {
                 google: Some(OAuthApp {
                     client_id: "client".into(),
@@ -2380,10 +2365,15 @@ mod tests {
             },
         );
         let now = now_ms();
-        for (provider, account, connector) in [
-            (ProviderId::Google, "g-1", ConnectorId::Gmail),
-            (ProviderId::Microsoft, "m-1", ConnectorId::OutlookMail),
-        ] {
+        for (provider, account) in [(ProviderId::Google, "g-1"), (ProviderId::Microsoft, "m-1")] {
+            let connectors: Vec<_> = on
+                .iter()
+                .copied()
+                .filter(|c| c.provider() == provider)
+                .collect();
+            if connectors.is_empty() {
+                continue;
+            }
             state
                 .vault
                 .set(
@@ -2408,9 +2398,9 @@ mod tests {
                             display_name: None,
                             granted_scopes: match provider {
                                 ProviderId::Google => {
-                                    crate::connectors::google::scopes(&[connector])
+                                    crate::connectors::google::scopes(&connectors)
                                 }
-                                _ => crate::connectors::microsoft::scopes(&[connector]),
+                                _ => crate::connectors::microsoft::scopes(&connectors),
                             },
                             status: AccountStatus::Connected,
                             status_reason: None,
@@ -2418,16 +2408,26 @@ mod tests {
                             updated_at: now,
                         },
                     )?;
-                    connector_repo::set_enabled(c, connector, true, now)
+                    for connector in &connectors {
+                        connector_repo::set_enabled(c, *connector, true, now)?;
+                    }
+                    Ok(())
                 })
                 .unwrap();
         }
+        state
+    }
+
+    async fn run_job_mail_sync(
+        state: &AppState,
+        sync_calendar: bool,
+    ) -> crate::models::task::TaskRun {
         let task = tasks::create(
-            &state,
+            state,
             TaskInput {
                 kind: TaskKind::JobApplications {
                     lookback_days: 30,
-                    sync_calendar: false,
+                    sync_calendar,
                 },
                 prompt: String::new(),
                 ..every_4_hours(None)
@@ -2435,9 +2435,42 @@ mod tests {
         )
         .await
         .unwrap();
-        let id = tasks::run_now(&state, task.id).unwrap();
-        wait_idle(&state, task.id).await;
-        let run = runs::get(&state, id).unwrap();
+        let id = tasks::run_now(state, task.id).unwrap();
+        wait_idle(state, task.id).await;
+        runs::get(state, id).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_mailbox_the_run_cannot_read_keeps_its_last_success_and_says_so() {
+        // Found in the packaged-release run: Outlook could not be read while
+        // Gmail could, yet Outlook Mail was marked "Synced" (and a later
+        // recovery would have started after the mail it never read).
+        use crate::{
+            db::connectors as connector_repo,
+            models::connectors::{ConnectorId, ConnectorState},
+            test_support::MockServer,
+        };
+        let server = MockServer::start(|req| {
+            let t = req.target.as_str();
+            if t.starts_with("/gmail/v1/users/me/profile") {
+                return Some((
+                    200,
+                    r#"{"emailAddress":"ana@gmail.com","historyId":"100"}"#.into(),
+                ));
+            }
+            if t.starts_with("/gmail/v1/users/me/messages") {
+                return Some((200, r#"{"resultSizeEstimate":0}"#.into()));
+            }
+            t.starts_with("/graph/v1.0/me/mailFolders/inbox/messages/delta")
+                .then(|| (500, r#"{"error":{"code":"InternalServerError"}}"#.into()))
+        })
+        .await;
+        let state = with_connectors(
+            &server.base_url,
+            &[ConnectorId::Gmail, ConnectorId::OutlookMail],
+        )
+        .await;
+        let run = run_job_mail_sync(&state, false).await;
         assert_eq!(run.status, ExecutionStatus::Succeeded, "{:?}", run.error);
 
         let (gmail, outlook) = state
@@ -2460,5 +2493,60 @@ mod tests {
             .find(|c| c.id == ConnectorId::OutlookMail)
             .unwrap();
         assert_eq!(card.state, ConnectorState::Error);
+    }
+
+    #[tokio::test]
+    async fn a_run_that_reads_no_mailbox_fails_and_claims_no_sync() {
+        // Found offline in the packaged-release run: with every provider out
+        // of reach the run said "Succeeded" and the calendars "Synced".
+        use crate::{
+            db::connectors as connector_repo,
+            models::connectors::{ConnectorId, ProviderId},
+        };
+        // Nothing listens here: every request fails to connect.
+        let state = with_connectors(
+            "http://127.0.0.1:9",
+            &[
+                ConnectorId::Gmail,
+                ConnectorId::GoogleCalendar,
+                ConnectorId::OutlookMail,
+            ],
+        )
+        .await;
+        let run = run_job_mail_sync(&state, true).await;
+        assert_eq!(run.status, ExecutionStatus::Failed);
+        assert!(
+            run.error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("could not be reached"),
+            "{:?}",
+            run.error
+        );
+
+        let (gmail, outlook, calendar) = state
+            .db
+            .call(|c| {
+                Ok((
+                    connector_repo::connector(c, ConnectorId::Gmail)?,
+                    connector_repo::connector(c, ConnectorId::OutlookMail)?,
+                    connector_repo::connector(c, ConnectorId::GoogleCalendar)?,
+                ))
+            })
+            .unwrap();
+        for mailbox in [gmail, outlook] {
+            assert_eq!(mailbox.last_success_at, None);
+            assert_eq!(
+                mailbox.last_error.as_deref(),
+                Some("The provider could not be reached. Check your connection; the next run tries again.")
+            );
+        }
+        assert_eq!(calendar.last_sync_completed_at, None, "never checked");
+        // Still connected (§77): nothing to reconnect, the grants stay.
+        for provider in [ProviderId::Google, ProviderId::Microsoft] {
+            assert!(crate::connectors::tokens::grant(&state, provider)
+                .await
+                .is_some());
+        }
     }
 }

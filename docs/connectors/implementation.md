@@ -325,6 +325,14 @@ addresses, account ids, mail content.
   delta link that is not Graph's is still never followed (the token never
   leaves), but it now restarts a bounded synchronization like an expired
   one, instead of failing every run.
+- **A run that read no mailbox said "Succeeded".** With every provider out
+  of reach, Job Mail & Interview Sync reported success, and the calendar
+  step marked the calendars "Synced" although no request to them worked. A
+  run that reads none of its mailboxes now fails with the first mailbox's
+  error (each mailbox keeps its own), calendars count as checked only when
+  every request to them worked, and an unreachable provider reads "The
+  provider could not be reached. Check your connection; the next run tries
+  again." The grants stay (B §77).
 
 ### 5.10 Not done by design
 

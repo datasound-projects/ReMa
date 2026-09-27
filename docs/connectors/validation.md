@@ -108,7 +108,7 @@ cause, gap analysis and checklist: [../production-plan.md §6–§8](../producti
 | Check | Result |
 |---|---|
 | `cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings` | clean |
-| `cargo test --locked` | 714 passed, 3 ignored (explicit-only) |
+| `cargo test --locked` | 715 passed, 3 ignored (explicit-only) |
 | `pnpm lint`, `pnpm typecheck` | clean |
 | `pnpm test` | 121 passed (23 files) |
 | `pnpm build` | built |
@@ -140,7 +140,7 @@ cause, gap analysis and checklist: [../production-plan.md §6–§8](../producti
 | §51, §80 packaging | `the_opener_plugin_is_registered_and_no_webview_can_open_addresses`, `the_tauri_npm_packages_match_the_rust_crate` |
 | §41–§42 states | `a_card_opening_the_browser_says_so_before_it_asks_to_finish_there`, `a_sign_in_shows_connecting_and_can_be_cancelled`, `builds_without_an_app_registration_offer_no_sign_in`, Vitest `ConnectorsSection` (Retry, capabilities, Sync now, where job mail goes) |
 | Keychain resilience | `settings_never_wait_on_the_keychain_for_cards_that_were_never_connected` |
-| §66, §67 per-mailbox outcome, unusable cursors | `a_mailbox_the_run_cannot_read_keeps_its_last_success_and_says_so`, `links_to_other_hosts_are_never_followed`, `delta_links_continue_and_expired_tokens_resync` (found in the packaged run, §4.2) |
+| §66, §67, §77 per-mailbox outcome, unusable cursors, nothing read | `a_mailbox_the_run_cannot_read_keeps_its_last_success_and_says_so`, `a_run_that_reads_no_mailbox_fails_and_claims_no_sync`, `links_to_other_hosts_are_never_followed`, `delta_links_continue_and_expired_tokens_resync` (found in the packaged run, §4.2) |
 | §92 connectors usable from chat | `questions_about_applications_get_connector_tools_and_no_web`, `questions_about_job_mail_read_the_connectors_not_job_listings` (found in the packaged run, §4.2) |
 ### 4.2 Packaged release, clean install (B §74–§79, §92)
 
@@ -182,5 +182,23 @@ Setup, standing in for a clean machine:
 | 14 | §76 | "Run ReMa in background" on; quit and start again (nothing in memory); close the window as a window manager does (`WM_DELETE_WINDOW`) | Window hidden, process alive, no provider request until the schedule. The 20:15 run with no window: Google and Microsoft grants refreshed (`phase=token_refreshed`), Gmail history read, both calendars checked. A second launch showed the running window (single instance) and exited |
 | 15 | §66 | Outlook in the 20:00 and 20:15 runs | **Failed**: no Outlook request. The stand-in had answered the first round with a delta link on its debug address; ReMa refused to follow it (correct: the token never leaves Graph), which surfaced two defects: the run marked Outlook Mail "Synced" and moved its last success, and the unusable cursor stopped Outlook sync for good. Both fixed ([implementation.md §5.9](implementation.md), tests in §4.1); the stand-in now keeps its links on the host that was called |
 
-Still running on the rebuilt package: the chat re-run, Outlook recovery,
-§77 (providers unreachable), §78 (revoked grant), reconnect and disconnect.
+Rows 16–25 ran on the package built from `964ca1a`, installed over the
+previous one (same home, keychain and database):
+
+| # | Spec | Scenario | Result |
+|---|---|---|---|
+| 16 | — | Package upgrade | After `dpkg -i` of the new package and a start, all four connectors ✓ with no sign-in and no provider request |
+| 17 | §66 | Outlook with the unusable stored link, Run now | The link was not followed; a bounded resync went to `graph.microsoft.com` (`changeType=created&$filter=receivedDateTime ge …`). Progress "Synchronized Gmail and Outlook Mail"; note "Outlook Mail: the sync position had expired; ReMa resynchronized recent mail." |
+| 18 | §66 | Next scheduled run (20:45) | Outlook read incrementally from `https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages/delta?$deltatoken=1`; Gmail from `history?startHistoryId=…` |
+| 19 | §92 | Chat re-run: "Which job emails did I get recently, and is tomorrow at 09:00 free for a call?" | `mail_search` (Gmail search and metadata, Graph `$search`) and `calendar_check_availability` (both calendars); answer: "You have 10 job emails; the newest: Offer letter - Cloud Engineer; Interview confirmed - ML Engineer; Update on your application - Site Reliability Engineer. Tomorrow 09:00–09:30 is taken by "Weekly sync"." Model context: `personal_mail: false`, `sign_in_tokens: false`; no web or career-search tools |
+| 20 | §77 | Quit; providers unreachable (stand-in stopped); start; calendar panel | "Google Calendar could not be read: Network error: Google could not be reached. Check your internet connection and try again." (same for Outlook); tracked interviews still shown. Log `phase=refresh_failed category=NETWORK_ERROR` for both; both keychain items kept |
+| 21 | §77 | Job Mail & Interview Sync while unreachable | **Failed**: the run said "Succeeded" (progress "No mailbox could be read"), the mail cards "The last run failed", the calendar cards "Synced just now". Fixed in the final package (row 26) |
+| 22 | §77 | Providers back; calendar panel; Run now | Both grants refreshed, events from both calendars; the run succeeded and all four cards show "Synced just now" |
+| 23 | §78 | Quit; revoke both grants at the providers (`invalid_grant`); start; calendar panel | One refresh attempt per provider, `phase=refresh_rejected category=REAUTH_REQUIRED`; both keychain items deleted; no browser opened. Panel: "Google Calendar needs to be reconnected in Settings → Connectors." Cards: "Reconnect required: Google access was revoked or has expired." with Reconnect |
+| 24 | §58 | Reconnect on Gmail, then on Outlook Mail | One sign-in per provider for all its connectors (Google asked for the union again); every capability checked; new keychain items; the cards keep their real last sync |
+| 25 | §57 | Disconnect Google Calendar, Gmail, Outlook Calendar, Outlook Mail (confirmation each) | Google Calendar first: grant kept (Gmail uses it). Gmail: `POST https://oauth2.googleapis.com/revoke` and the Google item deleted. Microsoft: local items deleted, no request (the dialog says so and points to account.microsoft.com). Applications, the task and its run history stay |
+
+Across all sign-ins (6) and refreshes (10, including refused and failed
+ones), no issued token value appears in the home directory (database and
+WAL, webview storage) or any app log; the Google Desktop client secret is in
+the binary (public configuration) and in no log.

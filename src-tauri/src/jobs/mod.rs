@@ -113,6 +113,8 @@ pub struct Sources<'a> {
 pub struct RunOutcome {
     pub report: JobRunReport,
     pub unread: Vec<(ConnectorId, AppError)>,
+    /// A calendar request failed: the calendars were not fully checked.
+    pub calendar_failed: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -871,6 +873,7 @@ pub async fn run(
     );
     let mut synced = Vec::new();
     let mut unread = Vec::new();
+    let mut calendar_failed = false;
     for source in &sources.mail {
         if cancel.is_cancelled() {
             return Err(cancelled());
@@ -993,7 +996,7 @@ pub async fn run(
                 "calendar",
                 &format!("Checking {}", join_names(names.iter().copied())),
             );
-            let calendar = sync_calendars(
+            let (calendar, failed) = sync_calendars(
                 state,
                 &sources.calendars,
                 config.policy,
@@ -1002,6 +1005,7 @@ pub async fn run(
                 &mut report.issues,
             )
             .await?;
+            calendar_failed = failed > 0;
             for name in &names {
                 activity.used_connector(name);
             }
@@ -1014,7 +1018,11 @@ pub async fn run(
     report.applications = state.db.call(|c| report::overview(c, window_start, now))?;
     report::count(&mut report);
     state.events.applications_changed();
-    Ok(RunOutcome { report, unread })
+    Ok(RunOutcome {
+        report,
+        unread,
+        calendar_failed,
+    })
 }
 
 /// "Calendar checked · 1 interview added, 1 conflict".
@@ -1050,8 +1058,9 @@ pub async fn sync_calendars(
     window_start: i64,
     now: i64,
     issues: &mut Vec<String>,
-) -> AppResult<CalendarReport> {
+) -> AppResult<(CalendarReport, u32)> {
     let mut calendar = CalendarReport::default();
+    let mut failed = 0;
     let to_sync = state.db.call(|c| repo::interviews_to_sync(c, now))?;
     let by_provider: HashMap<ProviderId, &dyn CalendarProvider> =
         calendars.iter().map(|c| (c.provider(), *c)).collect();
@@ -1075,6 +1084,7 @@ pub async fn sync_calendars(
             Ok(item) => item,
             Err(error @ AppError::Authentication(_)) => return Err(error),
             Err(error) => {
+                failed += 1;
                 issues.push(format!(
                     "Calendar: {} — {}",
                     app.company,
@@ -1117,7 +1127,7 @@ pub async fn sync_calendars(
             .items
             .push(calendar_sync::review_item(&app, &interview));
     }
-    Ok(calendar)
+    Ok((calendar, failed))
 }
 
 #[cfg(test)]
