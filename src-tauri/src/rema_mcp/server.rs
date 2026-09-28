@@ -38,16 +38,82 @@ fn tool<I: schemars::JsonSchema + 'static, O: schemars::JsonSchema + 'static>(
     title: &str,
     description: &'static str,
 ) -> Tool {
-    Tool::new(name, description, schema_for_type::<I>())
-        .with_title(title)
-        .with_raw_output_schema(schema_for_output::<O>())
-        .with_annotations(
-            ToolAnnotations::with_title(title)
-                .read_only(true)
-                .destructive(false)
-                .idempotent(true)
-                .open_world(true),
-        )
+    Tool::new(
+        name,
+        description,
+        portable(&schema_for_type::<I>(), Side::Input),
+    )
+    .with_title(title)
+    .with_raw_output_schema(portable(&schema_for_output::<O>(), Side::Output))
+    .with_annotations(
+        ToolAnnotations::with_title(title)
+            .read_only(true)
+            .destructive(false)
+            .idempotent(true)
+            .open_world(true),
+    )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Side {
+    Input,
+    Output,
+}
+
+/// The schema without `"type": [T, "null"]`, which clients that map tool
+/// schemas onto a single-type dialect (Gemini's function declarations, for
+/// one) reject: an optional input keeps just `T` (absent and `null` both
+/// mean "not given" here), a nullable output says so with `anyOf`.
+fn portable(
+    schema: &rmcp::model::JsonObject,
+    side: Side,
+) -> std::sync::Arc<rmcp::model::JsonObject> {
+    fn walk(value: &mut Value, side: Side) {
+        match value {
+            Value::Object(map) => {
+                let single = match map.get("type") {
+                    Some(Value::Array(types))
+                        if types.len() == 2 && types.contains(&json!("null")) =>
+                    {
+                        types.iter().find(|t| *t != &json!("null")).cloned()
+                    }
+                    _ => None,
+                };
+                if let Some(single) = single {
+                    if side == Side::Input {
+                        map.insert("type".into(), single);
+                    } else {
+                        // The constraints belong to the typed branch; the
+                        // words about the value stay on the property.
+                        const ABOUT: [&str; 4] = ["description", "title", "default", "examples"];
+                        let mut typed = serde_json::Map::new();
+                        typed.insert("type".into(), single);
+                        for key in map.keys().cloned().collect::<Vec<_>>() {
+                            if key != "type" && !ABOUT.contains(&key.as_str()) {
+                                typed.insert(key.clone(), map.remove(&key).unwrap_or_default());
+                            }
+                        }
+                        map.remove("type");
+                        map.insert(
+                            "anyOf".into(),
+                            json!([Value::Object(typed), { "type": "null" }]),
+                        );
+                    }
+                }
+                for child in map.values_mut() {
+                    walk(child, side);
+                }
+            }
+            Value::Array(items) => items.iter_mut().for_each(|v| walk(v, side)),
+            _ => {}
+        }
+    }
+    let mut value = Value::Object(schema.clone());
+    walk(&mut value, side);
+    match value {
+        Value::Object(map) => std::sync::Arc::new(map),
+        _ => std::sync::Arc::new(schema.clone()),
+    }
 }
 
 /// The five tools, as listed to clients.
@@ -104,8 +170,15 @@ impl RemaMcpServer {
         }
     }
 
+    /// A tool error: `isError` with the error as JSON text. Not as
+    /// `structuredContent`: clients validate that against the tool's output
+    /// schema (the official TypeScript SDK does even for errors), which an
+    /// error body does not match, and the client would see a schema failure
+    /// instead of the reason.
     fn error(e: &ToolError) -> CallToolResult {
-        CallToolResult::structured_error(json!({ "error": e.body() }))
+        let mut result = CallToolResult::structured_error(json!({ "error": e.body() }));
+        result.structured_content = None;
+        result
     }
 
     fn parse<T: DeserializeOwned>(
@@ -210,5 +283,67 @@ impl ServerHandler for RemaMcpServer {
             .dispatch(&request.name, request.arguments, context.ct)
             .await
             .into())
+    }
+}
+
+#[cfg(test)]
+mod portability {
+    use super::*;
+
+    /// Every `type` in the schemas is a single type (no `[T, "null"]`), so
+    /// clients with a single-type schema dialect accept the tools.
+    #[test]
+    fn tool_schemas_use_one_type_per_value() {
+        fn arrays(value: &Value, path: String, found: &mut Vec<String>) {
+            match value {
+                Value::Object(map) => {
+                    if matches!(map.get("type"), Some(Value::Array(_))) {
+                        found.push(path.clone());
+                    }
+                    for (key, child) in map {
+                        arrays(child, format!("{path}.{key}"), found);
+                    }
+                }
+                Value::Array(items) => {
+                    for (i, child) in items.iter().enumerate() {
+                        arrays(child, format!("{path}[{i}]"), found);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        for tool in tools() {
+            arrays(
+                &Value::Object((*tool.input_schema).clone()),
+                format!("{}.input", tool.name),
+                &mut found,
+            );
+            if let Some(output) = &tool.output_schema {
+                arrays(
+                    &Value::Object((**output).clone()),
+                    format!("{}.output", tool.name),
+                    &mut found,
+                );
+            }
+        }
+        assert!(found.is_empty(), "{found:?}");
+        // A nullable output stays nullable, with its constraints on the
+        // typed branch.
+        let get_job = tools().into_iter().find(|t| t.name == GET_JOB).unwrap();
+        let output = serde_json::to_string(get_job.output_schema.as_deref().unwrap()).unwrap();
+        assert!(output.contains(r#"{"type":"null"}"#), "{output}");
+        // An error is text only: no structured content that a client would
+        // check against the output schema.
+        let error = RemaMcpServer::error(&ToolError::invalid("bad cursor"));
+        assert_eq!(error.is_error, Some(true));
+        assert!(error.structured_content.is_none());
+        assert!(serde_json::to_string(&error.content)
+            .unwrap()
+            .contains("INVALID_INPUT"));
+        // An optional input is still optional.
+        let search = tools().into_iter().find(|t| t.name == SEARCH_JOBS).unwrap();
+        let required = search.input_schema["required"].as_array().unwrap();
+        assert_eq!(required, &vec![json!("query")]);
     }
 }

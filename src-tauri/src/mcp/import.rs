@@ -422,18 +422,15 @@ pub fn to_input(
     let Some(url) = text_of(config.get("url")).or_else(|| text_of(config.get("serverUrl"))) else {
         return Err("It has no program or address.".into());
     };
-    match kind.as_str() {
-        "sse" => {
-            return Err(
-                "It uses the older HTTP+SSE transport, which ReMa does not support. Most servers \
-                 also offer Streamable HTTP (often at /mcp); add that address by hand."
-                    .into(),
-            )
-        }
-        "ws" | "websocket" => {
-            return Err("It uses WebSocket, which ReMa does not support.".into());
-        }
-        _ => {}
+    // An HTTP+SSE server ("sse") is added like any remote server: ReMa
+    // tries Streamable HTTP first and then the older transport, as the MCP
+    // specification says (see `legacy_sse`).
+    if matches!(kind.as_str(), "ws" | "websocket") {
+        return Err(
+            "It uses WebSocket, which is not an MCP transport ReMa (or the MCP specification) \
+             supports; ask its provider for a Streamable HTTP address."
+                .into(),
+        );
     }
     input.transport = McpTransport::Http;
     input.url = expand(url, lookup)?;
@@ -658,9 +655,12 @@ mod tests {
         assert!(to_input("two", &get("two"), &env)
             .unwrap_err()
             .contains("several headers"));
-        assert!(to_input("legacy", &get("legacy"), &env)
-            .unwrap_err()
-            .contains("SSE"));
+        // The older HTTP+SSE transport is added as a remote server.
+        let (legacy, _) = to_input("legacy", &get("legacy"), &env).unwrap();
+        assert_eq!(
+            (legacy.transport, legacy.url.as_str()),
+            (McpTransport::Http, "https://old.example/sse")
+        );
         assert!(to_input("asks", &get("asks"), &env)
             .unwrap_err()
             .contains("by hand"));

@@ -190,7 +190,7 @@ export function CareerSearchSection() {
                 {checking ? 'Checking…' : 'Check now'}
               </button>
               {!checking && checked === null && (
-                <span className="career-search__hint">Nothing to set up; the check only confirms sources answer.</span>
+                <span className="career-search__hint">Nothing to set up. The check asks the sources and runs one real search with your default model, judged by the pages its provider returns.</span>
               )}
             </div>
             {status.checked.length > 0 && (

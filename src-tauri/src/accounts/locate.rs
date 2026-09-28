@@ -94,6 +94,31 @@ pub async fn which(name: &str) -> Option<Located> {
     login_shell_lookup(name).await.map(Located::at)
 }
 
+/// Where the user's shell would find `name` (an MCP server's program): the
+/// login shell's `PATH` first, so the version a version manager such as nvm
+/// selects wins over a system or Homebrew copy, as in a terminal; then
+/// ReMa's own `PATH` and the usual install folders.
+pub async fn which_as_shell(name: &str) -> Option<Located> {
+    let login = login_environment().await;
+    let dirs = shell_search_dirs(login.get(OsStr::new("PATH")).map(|p| p.as_os_str()));
+    if let Some(path) = search(name, dirs) {
+        return Some(Located::at(path));
+    }
+    login_shell_lookup(name).await.map(Located::at)
+}
+
+/// The folders a login shell searches, then ReMa's own and the usual install
+/// folders.
+fn shell_search_dirs(login_path: Option<&OsStr>) -> Vec<PathBuf> {
+    login_path
+        .map(|p| env::split_paths(p).collect::<Vec<_>>())
+        .unwrap_or_default()
+        .into_iter()
+        .chain(path_dirs())
+        .chain(install_dirs())
+        .collect()
+}
+
 /// The inherited `PATH` plus the usual install folders, for programs that
 /// start other programs (`npx` starts `node`).
 pub fn extended_path(first: &[PathBuf]) -> std::ffi::OsString {
@@ -150,19 +175,16 @@ async fn read_login_environment() -> HashMap<OsString, OsString> {
     if cfg!(windows) {
         return HashMap::new();
     }
-    let Some(shell) = env::var_os("SHELL")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-    else {
+    let Some(shell) = user_shell().await else {
         return HashMap::new();
     };
-    // Interactive and login, so both kinds of profile files are read; the
-    // markers keep what the profiles print out of the result.
-    let script = format!("printf '%s' {START}; command env -0; printf '%s' {END}");
+    let Some(args) = shell_arguments(&shell, START, END) else {
+        return HashMap::new();
+    };
     let output = tokio::time::timeout(
         Duration::from_secs(10),
         tokio::process::Command::new(shell)
-            .args(["-i", "-l", "-c", &script])
+            .args(&args)
             .stdin(Stdio::null())
             .stderr(Stdio::null())
             .kill_on_drop(true)
@@ -172,6 +194,96 @@ async fn read_login_environment() -> HashMap<OsString, OsString> {
     match output {
         Ok(Ok(output)) => parse_env_block(&output.stdout, START, END),
         _ => HashMap::new(),
+    }
+}
+
+/// The user's shell: `SHELL`, or (for an app started without it, as at
+/// login) the shell in the user's account record.
+async fn user_shell() -> Option<PathBuf> {
+    if let Some(shell) = env::var_os("SHELL")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+    {
+        return Some(shell);
+    }
+    let run = |program: &'static str, args: Vec<String>| async move {
+        let output = tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::process::Command::new(program)
+                .args(args)
+                .stdin(Stdio::null())
+                .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .ok()?
+        .ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+    };
+    let user = match env::var("USER").or_else(|_| env::var("LOGNAME")) {
+        Ok(user) if !user.is_empty() => user,
+        _ => run("/usr/bin/id", vec!["-un".into()]).await?,
+    };
+    let shell = if cfg!(target_os = "macos") {
+        let record = run(
+            "/usr/bin/dscl",
+            vec![
+                ".".into(),
+                "-read".into(),
+                format!("/Users/{user}"),
+                "UserShell".into(),
+            ],
+        )
+        .await;
+        // macOS's default since Catalina, if the record cannot be read.
+        record
+            .as_deref()
+            .and_then(shell_from_dscl)
+            .unwrap_or_else(|| PathBuf::from("/bin/zsh"))
+    } else {
+        shell_from_passwd(&run("getent", vec!["passwd".into(), user]).await?)?
+    };
+    Some(shell).filter(|p| p.is_absolute())
+}
+
+/// `UserShell: /bin/zsh` from `dscl . -read /Users/<name> UserShell`.
+fn shell_from_dscl(record: &str) -> Option<PathBuf> {
+    record
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("UserShell:"))
+        .map(|s| PathBuf::from(s.trim()))
+        .filter(|p| p.is_absolute())
+}
+
+/// The last field of a `passwd` entry.
+fn shell_from_passwd(entry: &str) -> Option<PathBuf> {
+    let shell = entry.lines().next()?.rsplit(':').next()?.trim();
+    Some(PathBuf::from(shell)).filter(|p| p.is_absolute())
+}
+
+/// How to ask `shell` for its environment between two markers, as a login
+/// and interactive shell so both kinds of profile files are read (csh and
+/// tcsh take `-l` only on its own, so they read `.cshrc`). `None` for
+/// shells with another command syntax.
+fn shell_arguments(shell: &Path, start: &str, end: &str) -> Option<Vec<String>> {
+    let name = shell.file_name()?.to_string_lossy().to_string();
+    match name.as_str() {
+        "bash" | "zsh" | "sh" | "dash" | "ksh" | "mksh" | "fish" => Some(vec![
+            "-i".into(),
+            "-l".into(),
+            "-c".into(),
+            format!("printf '%s' {start}; command env -0; printf '%s' {end}"),
+        ]),
+        "csh" | "tcsh" => Some(vec![
+            "-i".into(),
+            "-c".into(),
+            format!("printf '%s' {start}; /usr/bin/env -0; printf '%s' {end}"),
+        ]),
+        _ => None,
     }
 }
 
@@ -423,6 +535,52 @@ mod tests {
         assert!(!env.contains_key(OsStr::new("PWD")));
         assert!(!env.contains_key(OsStr::new("SHLVL")));
         assert!(parse_env_block(b"no markers", "__S__", "__E__").is_empty());
+    }
+
+    #[test]
+    fn a_program_is_found_where_the_users_shell_finds_it() {
+        let nvm = temp_dir();
+        let system = temp_dir();
+        for dir in [&nvm, &system] {
+            let node = dir.join("node");
+            std::fs::write(&node, "#!/bin/sh\n").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        let login = env::join_paths([&nvm, &system]).unwrap();
+        let dirs = shell_search_dirs(Some(&login));
+        assert_eq!(&dirs[..2], [nvm.clone(), system.clone()]);
+        assert_eq!(search("node", dirs), Some(nvm.join("node")));
+        // Without a login shell, ReMa's own PATH and install folders remain.
+        assert!(shell_search_dirs(None).len() >= install_dirs().len());
+    }
+
+    #[test]
+    fn finds_the_users_shell_without_a_shell_variable() {
+        assert_eq!(
+            shell_from_dscl("UserShell: /opt/homebrew/bin/fish\n"),
+            Some(PathBuf::from("/opt/homebrew/bin/fish"))
+        );
+        assert_eq!(shell_from_dscl("No such key: UserShell"), None);
+        assert_eq!(
+            shell_from_passwd("ana:x:501:20:Ana:/home/ana:/usr/bin/zsh\n"),
+            Some(PathBuf::from("/usr/bin/zsh"))
+        );
+        assert_eq!(shell_from_passwd("ana:x:501:20:Ana:/home/ana:"), None);
+    }
+
+    #[test]
+    fn each_shell_is_asked_in_its_own_syntax() {
+        let zsh = shell_arguments(Path::new("/bin/zsh"), "S", "E").unwrap();
+        assert_eq!(&zsh[..3], ["-i", "-l", "-c"]);
+        assert!(zsh[3].contains("command env -0"));
+        let tcsh = shell_arguments(Path::new("/bin/tcsh"), "S", "E").unwrap();
+        assert_eq!(&tcsh[..2], ["-i", "-c"]);
+        assert!(tcsh[2].contains("/usr/bin/env -0"));
+        assert_eq!(shell_arguments(Path::new("/usr/bin/nu"), "S", "E"), None);
     }
 
     #[test]

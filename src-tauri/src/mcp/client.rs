@@ -29,6 +29,7 @@ use rmcp::{
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio_util::sync::CancellationToken;
 
+use super::legacy_sse;
 use crate::{
     accounts::locate,
     models::mcp::{McpAuth, McpToolInfo, McpTransport},
@@ -226,7 +227,7 @@ async fn spawn_local(
     let located = if config.command.contains('/') || config.command.contains('\\') {
         Some(locate::Located::at(PathBuf::from(&config.command)))
     } else {
-        locate::which(&config.command).await
+        locate::which_as_shell(&config.command).await
     };
     let Some(located) = located else {
         return Err(ConnectError::Failed(format!(
@@ -324,13 +325,38 @@ fn http_config(config: &ServerConfig) -> Result<StreamableHttpClientTransportCon
     Ok(transport)
 }
 
-fn describe_failure(error: &str, auth: McpAuth) -> ConnectError {
+/// The token headers of a server without OAuth, for the HTTP+SSE session
+/// (Streamable HTTP takes them through its own configuration).
+fn auth_headers(config: &ServerConfig) -> Result<reqwest::header::HeaderMap, ConnectError> {
+    let mut headers = reqwest::header::HeaderMap::new();
+    let (name, value) = match (config.auth, &config.secret) {
+        (McpAuth::Bearer, Some(token)) => {
+            (reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
+        }
+        (McpAuth::Header, Some(value)) => (
+            reqwest::header::HeaderName::from_bytes(config.header_name.as_bytes())
+                .map_err(|_| ConnectError::Failed("The header name is not valid.".into()))?,
+            value.clone(),
+        ),
+        _ => return Ok(headers),
+    };
+    let mut value = reqwest::header::HeaderValue::from_str(&value)
+        .map_err(|_| ConnectError::Failed("The header value is not valid.".into()))?;
+    value.set_sensitive(true);
+    headers.insert(name, value);
+    Ok(headers)
+}
+
+fn is_unauthorized(error: &str) -> bool {
     let lower = error.to_lowercase();
-    let unauthorized = lower.contains("auth required")
+    lower.contains("auth required")
         || lower.contains("authorization required")
         || lower.contains("401")
-        || lower.contains("unauthorized");
-    if unauthorized {
+        || lower.contains("unauthorized")
+}
+
+fn describe_failure(error: &str, auth: McpAuth) -> ConnectError {
+    if is_unauthorized(error) {
         return match auth {
             McpAuth::Oauth => ConnectError::NeedsSignIn("Sign in to connect.".into()),
             McpAuth::None => ConnectError::Failed(
@@ -386,10 +412,29 @@ pub async fn connect(
                 } else {
                     let transport =
                         StreamableHttpClientTransport::with_client(http_client(), transport_config);
-                    client_info(client_version)
+                    match client_info(client_version)
                         .serve_with_lifecycle(transport, lifecycle())
                         .await
-                        .map_err(|e| e.to_string())
+                    {
+                        Ok(service) => Ok(service),
+                        // Not Streamable HTTP: perhaps a server on the older
+                        // HTTP+SSE transport, which the specification says
+                        // to try next (see `legacy_sse`).
+                        Err(error) if !is_unauthorized(&error.to_string()) => {
+                            let headers = auth_headers(config)?;
+                            match legacy_sse::open(&http_client(), &config.url, &headers).await {
+                                legacy_sse::Probe::Legacy(session) => client_info(client_version)
+                                    .serve_with_lifecycle(session, lifecycle())
+                                    .await
+                                    .map_err(|e| e.to_string()),
+                                legacy_sse::Probe::Refused(why) => {
+                                    return Err(ConnectError::Failed(why))
+                                }
+                                legacy_sse::Probe::NotLegacy => Err(error.to_string()),
+                            }
+                        }
+                        Err(error) => Err(error.to_string()),
+                    }
                 }
             }
         };

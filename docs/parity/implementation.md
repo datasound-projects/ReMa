@@ -6,7 +6,8 @@ LinkedIn and XING where the user has an account; make ReMa MCP and other
 MCP servers work the way Claude Code and other harnesses run them; and let
 OpenAI and Anthropic models answer with their own web search, so the
 result in ReMa matches ChatGPT and Claude. Validation:
-[validation.md](validation.md).
+[validation.md](validation.md); second pass with evidence levels:
+[verification.md](verification.md).
 
 ## Sources (read September 2026)
 
@@ -19,6 +20,8 @@ result in ReMa matches ChatGPT and Claude. Validation:
 | Web search next to private data (exfiltration) | [Web search tool](https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-search-tool), [Web fetch tool](https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-fetch-tool) |
 | Server tools held next to client tools; tools that must stay declared | [Server tools](https://platform.claude.com/docs/en/agents-and-tools/tool-use/server-tools) |
 | Thinking bound to the tools it was written with (`drop_block`) | Anthropic model migration guide, "preserved thinking" (Claude Opus 5.5, Claude Fable 5.1) |
+| HTTP+SSE backwards compatibility for clients | [MCP Transports](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports) ("Backwards Compatibility"); rmcp 0.11 changelog ("remove SSE transport support") |
+| Structured results checked against `outputSchema` | MCP specification, Tools → Output schema; MCP Inspector CLI (official TypeScript SDK) |
 | OpenAI web search | [Web search](https://platform.openai.com/docs/guides/tools-web-search) |
 | Gemini Google Search with function calling | [Grounding with Google Search](https://ai.google.dev/gemini-api/docs/google-search) |
 | MCP protocol revisions | [Versioning](https://modelcontextprotocol.io/specification/versioning) |
