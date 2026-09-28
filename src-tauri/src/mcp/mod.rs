@@ -11,17 +11,24 @@
 //! Connections are opened when first needed (a chat request, Connect or
 //! Test in Settings) and kept while the server stays enabled. Disabling or
 //! removing a server closes its connection; a local server's whole process
-//! group stops with it. Nothing reconnects on its own after that.
+//! group stops with it. Nothing reconnects on its own after that. A
+//! connection the server itself ended (its process exited, its event
+//! stream closed) fails the calls that were waiting and is reopened on
+//! the next use, with a short bounded backoff; the failed call is not
+//! repeated.
 
 pub mod client;
 pub mod config;
 pub mod import;
 pub mod legacy_sse;
 pub mod oauth;
+#[cfg(test)]
+mod schema_checks;
 
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use tokio_util::sync::CancellationToken;
@@ -30,7 +37,15 @@ use crate::models::mcp::{McpState, McpStatus};
 use client::{ConnectError, Connection, ServerConfig};
 use rmcp::transport::auth::CredentialStore;
 
-#[derive(Default)]
+/// The waits before each attempt to reopen a connection the server ended
+/// (a first connection gets one immediate attempt). Stopped by
+/// `disconnect` (disabling or removing the server) and at exit.
+const RECONNECT_BACKOFF: [Duration; 3] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+];
+
 struct Inner {
     live: Mutex<HashMap<i64, Arc<Connection>>>,
     status: Mutex<HashMap<i64, McpStatus>>,
@@ -38,15 +53,47 @@ struct Inner {
     locks: Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>,
     /// Browser sign-ins in progress.
     sign_ins: Mutex<HashMap<i64, CancellationToken>>,
+    /// Reconnections in progress (cancelled to stop their waits).
+    reconnects: Mutex<HashMap<i64, CancellationToken>>,
+    backoff: [Duration; 3],
+}
+
+impl Inner {
+    fn new(backoff: [Duration; 3]) -> Self {
+        Self {
+            live: Mutex::default(),
+            status: Mutex::default(),
+            locks: Mutex::default(),
+            sign_ins: Mutex::default(),
+            reconnects: Mutex::default(),
+            backoff,
+        }
+    }
 }
 
 /// Live MCP connections and their status. Cheap to clone.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct McpContext {
     inner: Arc<Inner>,
 }
 
+impl Default for McpContext {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(Inner::new(RECONNECT_BACKOFF)),
+        }
+    }
+}
+
 impl McpContext {
+    /// A context whose reconnections wait `backoff` (tests).
+    #[cfg(test)]
+    pub fn with_backoff(backoff: [Duration; 3]) -> Self {
+        Self {
+            inner: Arc::new(Inner::new(backoff)),
+        }
+    }
+
     /// The status shown for a server (`enabled` comes from its settings).
     pub fn status(&self, id: i64, enabled: bool) -> McpStatus {
         if !enabled {
@@ -100,10 +147,41 @@ impl McpContext {
         if let Some(conn) = self.live(config.id) {
             return Ok(conn);
         }
-        self.drop_connection(config.id);
+        // A connection the server ended is reopened with patience; a
+        // first connection (or Connect in Settings) gets one attempt.
+        let lost = self.drop_connection(config.id);
         self.set_status(config.id, McpStatus::of(McpState::Connecting));
         on_change();
-        let result = client::connect(config, client_version, oauth_store).await;
+        let waits: &[Duration] = if lost {
+            &self.inner.backoff
+        } else {
+            &[Duration::ZERO]
+        };
+        let cancel = CancellationToken::new();
+        self.inner
+            .reconnects
+            .lock()
+            .unwrap()
+            .insert(config.id, cancel.clone());
+        let mut result = Err(ConnectError::Failed("The server was not connected.".into()));
+        for wait in waits {
+            let stopped = tokio::select! {
+                _ = cancel.cancelled() => true,
+                _ = tokio::time::sleep(*wait) => false,
+            };
+            if stopped {
+                // Disconnected (disabled, removed) meanwhile: its status
+                // was cleared, and stays so.
+                return Err(ConnectError::Failed("Reconnecting was stopped.".into()));
+            }
+            result = client::connect(config, client_version, oauth_store.clone()).await;
+            match &result {
+                // Signing in is up to the user; waiting does not help.
+                Ok(_) | Err(ConnectError::NeedsSignIn(_)) => break,
+                Err(ConnectError::Failed(_)) => {}
+            }
+        }
+        self.inner.reconnects.lock().unwrap().remove(&config.id);
         match result {
             Ok(conn) => {
                 let conn = Arc::new(conn);
@@ -161,6 +239,9 @@ impl McpContext {
         if let Some(cancel) = self.inner.sign_ins.lock().unwrap().remove(&id) {
             cancel.cancel();
         }
+        if let Some(cancel) = self.inner.reconnects.lock().unwrap().remove(&id) {
+            cancel.cancel();
+        }
     }
 
     /// Starts tracking a browser sign-in, cancelling an earlier one.
@@ -202,6 +283,9 @@ impl McpContext {
             conn.close();
         }
         for (_, cancel) in self.inner.sign_ins.lock().unwrap().drain() {
+            cancel.cancel();
+        }
+        for (_, cancel) in self.inner.reconnects.lock().unwrap().drain() {
             cancel.cancel();
         }
     }

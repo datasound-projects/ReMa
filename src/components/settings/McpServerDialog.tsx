@@ -114,7 +114,11 @@ export function McpServerDialog({ server, onClose }: { server: McpServer | null;
     });
 
   const storedSecret = server?.hasSecret === true && server.auth === form.auth;
-  const needsSecret = form.transport === 'http' && (form.auth === 'bearer' || form.auth === 'header');
+  const remote = form.transport !== 'stdio';
+  const needsSecret = remote && (form.auth === 'bearer' || form.auth === 'header');
+  // The older HTTP+SSE transport has no OAuth sign-in in ReMa: a token is
+  // sent with every request instead.
+  const auths = form.transport === 'sse' ? AUTHS.filter((a) => a.id !== 'oauth') : AUTHS;
 
   const run = async (kind: 'save' | 'test') => {
     setBusy(kind);
@@ -177,6 +181,7 @@ export function McpServerDialog({ server, onClose }: { server: McpServer | null;
             [
               ['stdio', 'Local program'],
               ['http', 'Remote server (HTTP)'],
+              ['sse', 'Remote server (HTTP+SSE, older)'],
             ] as const
           ).map(([id, label]) => (
             <button
@@ -185,7 +190,7 @@ export function McpServerDialog({ server, onClose }: { server: McpServer | null;
               role="radio"
               aria-checked={form.transport === id}
               className={form.transport === id ? 'segmented__option segmented__option--active' : 'segmented__option'}
-              onClick={() => set({ transport: id })}
+              onClick={() => set({ transport: id, ...(id === 'sse' && form.auth === 'oauth' ? { auth: 'none' as const } : {}) })}
             >
               {label}
             </button>
@@ -275,14 +280,21 @@ export function McpServerDialog({ server, onClose }: { server: McpServer | null;
         </>
       ) : (
         <>
-          <FormField label="Server URL" hint="HTTPS (plain HTTP only for this computer).">
+          <FormField
+            label="Server URL"
+            hint={
+              form.transport === 'sse'
+                ? 'The server’s event-stream address (usually ending in /sse). HTTPS (plain HTTP only for this computer).'
+                : 'HTTPS (plain HTTP only for this computer).'
+            }
+          >
             {(control) => (
               <input
                 {...control}
                 className="input input--mono"
                 type="url"
                 spellCheck={false}
-                placeholder="https://example.com/mcp"
+                placeholder={form.transport === 'sse' ? 'https://example.com/sse' : 'https://example.com/mcp'}
                 value={form.url}
                 onChange={(e) => set({ url: e.target.value })}
               />
@@ -299,7 +311,7 @@ export function McpServerDialog({ server, onClose }: { server: McpServer | null;
                 value={form.auth}
                 onChange={(e) => set({ auth: e.target.value as McpAuth, secret: '' })}
               >
-                {AUTHS.map((a) => (
+                {auths.map((a) => (
                   <option key={a.id} value={a.id}>
                     {a.label}
                   </option>

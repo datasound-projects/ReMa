@@ -18,10 +18,10 @@ use rmcp::{
         CallToolRequestParams, CallToolResult, ClientCapabilities, ContentBlock, Implementation,
         InitializeRequestParams, ProtocolVersion, Tool,
     },
-    service::RunningService,
+    service::{ClientInitializeError, RunningService, ServiceError},
     transport::{
         auth::{AuthClient, AuthorizationManager, CredentialStore},
-        streamable_http_client::StreamableHttpClientTransportConfig,
+        streamable_http_client::{StreamableHttpClientTransportConfig, StreamableHttpError},
         StreamableHttpClientTransport, TokioChildProcess,
     },
     ClientLifecycleMode, ClientServiceExt, RoleClient,
@@ -29,7 +29,7 @@ use rmcp::{
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio_util::sync::CancellationToken;
 
-use super::legacy_sse;
+use super::{config::LEGACY_NO_OAUTH, legacy_sse};
 use crate::{
     accounts::locate,
     models::mcp::{McpAuth, McpToolInfo, McpTransport},
@@ -43,6 +43,11 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(90);
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// Largest tool result given to a model (characters).
 const MAX_RESULT_CHARS: usize = 40_000;
+/// What a call gets once the server went away (its event stream ended,
+/// its process exited): nothing is sent, and `McpContext::connect` opens
+/// a new connection for the next request.
+pub const CONNECTION_LOST: &str =
+    "The connection to the server was lost; the next request opens a new one.";
 
 /// Everything needed to connect, secrets included (never logged).
 #[derive(Clone)]
@@ -103,11 +108,17 @@ impl Connection {
         arguments: serde_json::Map<String, serde_json::Value>,
         cancel: &CancellationToken,
     ) -> Result<(String, bool), String> {
+        if self.is_closed() {
+            return Err(CONNECTION_LOST.into());
+        }
         let params = CallToolRequestParams::new(tool.to_string()).with_arguments(arguments);
         tokio::select! {
             _ = cancel.cancelled() => Err("The request was stopped.".into()),
             result = tokio::time::timeout(CALL_TIMEOUT, self.service.call_tool(params)) => match result {
                 Err(_) => Err(format!("The tool did not answer within {} seconds.", CALL_TIMEOUT.as_secs())),
+                // rmcp fails every waiting call this way when the transport
+                // ends (`receive` yielding `None`).
+                Ok(Err(ServiceError::TransportClosed)) => Err(CONNECTION_LOST.into()),
                 Ok(Err(error)) => Err(format!("The tool call failed: {}", short(&error.to_string()))),
                 Ok(Ok(result)) => Ok(flatten(&result)),
             },
@@ -353,6 +364,99 @@ fn is_unauthorized(error: &str) -> bool {
         || lower.contains("authorization required")
         || lower.contains("401")
         || lower.contains("unauthorized")
+        // A 403 with a challenge (rmcp's words).
+        || lower.contains("insufficient scope")
+}
+
+/// The HTTP status of the answer that ended Streamable HTTP's handshake,
+/// when it ended on one: rmcp keeps it in the transport error's text
+/// ("HTTP 405 Method Not Allowed: …"). Connection failures, timeouts,
+/// authentication challenges (401/403 with `WWW-Authenticate`) and answers
+/// that were JSON-RPC messages have none.
+pub fn handshake_status(error: &ClientInitializeError) -> Option<u16> {
+    match error {
+        // Discover was refused, then the legacy `initialize`: the latter
+        // is the POST the specification's fallback rule is about.
+        ClientInitializeError::LegacyFallbackFailed { fallback, .. } => handshake_status(fallback),
+        ClientInitializeError::TransportError { error, .. } => {
+            let mut source: Option<&(dyn std::error::Error + 'static)> = Some(error.error.as_ref());
+            while let Some(current) = source {
+                if let Some(StreamableHttpError::UnexpectedServerResponse(text)) =
+                    current.downcast_ref::<StreamableHttpError<reqwest::Error>>()
+                {
+                    return status_in(text);
+                }
+                source = current.source();
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// The status in "HTTP 405 Method Not Allowed: …".
+fn status_in(text: &str) -> Option<u16> {
+    text.strip_prefix("HTTP ")?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// Whether Streamable HTTP failed the way a server on the older HTTP+SSE
+/// transport fails it: a plain 400, 404 or 405 to the POST (the
+/// specification's backwards-compatibility rule), so the event stream is
+/// worth a GET. Not when the server could not be reached or timed out,
+/// answered with a server error, asked for authentication, or answered
+/// with a JSON-RPC error (a server that reads JSON-RPC POSTs is not on the
+/// older transport).
+pub fn legacy_candidate(error: &ClientInitializeError) -> bool {
+    matches!(handshake_status(error), Some(400 | 404 | 405))
+}
+
+/// What went wrong, in rmcp's words: the transport's own message rather
+/// than the wrapper's ("discover and legacy initialize both failed").
+pub fn init_error_message(error: &ClientInitializeError) -> String {
+    match error {
+        ClientInitializeError::LegacyFallbackFailed { fallback, .. } => {
+            init_error_message(fallback)
+        }
+        ClientInitializeError::TransportError { error, .. } => error.error.to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Opens an HTTP+SSE session and its handshake. `streamable` is the
+/// Streamable HTTP failure that led here, the one to explain when the
+/// server turns out not to be on the older transport either.
+async fn open_legacy(
+    config: &ServerConfig,
+    client_version: &str,
+    streamable: Option<ClientInitializeError>,
+) -> Result<Service, ConnectError> {
+    let headers = auth_headers(config)?;
+    match legacy_sse::open(&http_client(), &config.url, &headers).await {
+        legacy_sse::Probe::Legacy(session) => client_info(client_version)
+            .serve_with_lifecycle(session, lifecycle())
+            .await
+            .map_err(|e| describe_failure(&init_error_message(&e), config.auth)),
+        legacy_sse::Probe::Refused(why) => Err(ConnectError::Failed(why)),
+        // The Streamable HTTP answer (a 400/404/405 moments ago) is the one
+        // to explain when there is one.
+        legacy_sse::Probe::Unreachable(why) => Err(match streamable {
+            Some(error) => describe_failure(&init_error_message(&error), config.auth),
+            None => ConnectError::Failed(format!("Could not connect: {}", short(&why))),
+        }),
+        legacy_sse::Probe::NotLegacy => Err(match streamable {
+            Some(error) => describe_failure(&init_error_message(&error), config.auth),
+            None => ConnectError::Failed(format!(
+                "No HTTP+SSE event stream naming a message address was found at {}. Check the \
+                 address (usually the server's /sse address), or choose Remote server (HTTP) for \
+                 a Streamable HTTP server.",
+                config.url
+            )),
+        }),
+    }
 }
 
 fn describe_failure(error: &str, auth: McpAuth) -> ConnectError {
@@ -384,11 +488,14 @@ pub async fn connect(
                 client_info(client_version)
                     .serve_with_lifecycle(transport, lifecycle())
                     .await
-                    .map_err(|e| e.to_string())
+                    .map_err(|e| init_error_message(&e))
             }
-            McpTransport::Http => {
+            McpTransport::Http | McpTransport::Sse => {
                 let transport_config = http_config(config)?;
                 if config.auth == McpAuth::Oauth {
+                    if config.transport == McpTransport::Sse {
+                        return Err(ConnectError::Failed(LEGACY_NO_OAUTH.into()));
+                    }
                     let store = oauth_store
                         .ok_or_else(|| ConnectError::NeedsSignIn("Sign in to connect.".into()))?;
                     let mut manager = AuthorizationManager::new(config.url.as_str())
@@ -408,7 +515,10 @@ pub async fn connect(
                     client_info(client_version)
                         .serve_with_lifecycle(transport, lifecycle())
                         .await
-                        .map_err(|e| e.to_string())
+                        .map_err(|e| init_error_message(&e))
+                } else if config.transport == McpTransport::Sse {
+                    // Known to be on the older transport: no probing.
+                    Ok(open_legacy(config, client_version, None).await?)
                 } else {
                     let transport =
                         StreamableHttpClientTransport::with_client(http_client(), transport_config);
@@ -417,23 +527,13 @@ pub async fn connect(
                         .await
                     {
                         Ok(service) => Ok(service),
-                        // Not Streamable HTTP: perhaps a server on the older
-                        // HTTP+SSE transport, which the specification says
-                        // to try next (see `legacy_sse`).
-                        Err(error) if !is_unauthorized(&error.to_string()) => {
-                            let headers = auth_headers(config)?;
-                            match legacy_sse::open(&http_client(), &config.url, &headers).await {
-                                legacy_sse::Probe::Legacy(session) => client_info(client_version)
-                                    .serve_with_lifecycle(session, lifecycle())
-                                    .await
-                                    .map_err(|e| e.to_string()),
-                                legacy_sse::Probe::Refused(why) => {
-                                    return Err(ConnectError::Failed(why))
-                                }
-                                legacy_sse::Probe::NotLegacy => Err(error.to_string()),
-                            }
+                        // Refused the way a server on the older HTTP+SSE
+                        // transport refuses a POST: the specification says
+                        // to try its event stream next (see `legacy_sse`).
+                        Err(error) if legacy_candidate(&error) => {
+                            Ok(open_legacy(config, client_version, Some(error)).await?)
                         }
-                        Err(error) => Err(error.to_string()),
+                        Err(error) => Err(init_error_message(&error)),
                     }
                 }
             }
@@ -447,7 +547,9 @@ pub async fn connect(
                 (McpTransport::Stdio, None) => {
                     ConnectError::Failed(format!("The server did not start: {}", short(&error)))
                 }
-                (McpTransport::Http, _) => describe_failure(&error, config.auth),
+                (McpTransport::Http | McpTransport::Sse, _) => {
+                    describe_failure(&error, config.auth)
+                }
             }
         })?;
         let tools = match service.list_all_tools().await {
@@ -545,5 +647,112 @@ impl CredentialStore for SharedStore {
 
     async fn clear(&self) -> Result<(), rmcp::transport::auth::AuthError> {
         self.0.clear().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rmcp::transport::DynamicTransportError;
+
+    use super::*;
+
+    fn transport_error(
+        error: StreamableHttpError<reqwest::Error>,
+        context: &'static str,
+    ) -> ClientInitializeError {
+        ClientInitializeError::TransportError {
+            error: DynamicTransportError::from_parts(
+                "streamable http",
+                std::any::TypeId::of::<()>(),
+                Box::new(error),
+            ),
+            context: context.into(),
+        }
+    }
+
+    /// The error rmcp gives when Streamable HTTP's POST was answered with
+    /// `status` and a plain body (what its reqwest client produces).
+    fn answered(status: &str) -> ClientInitializeError {
+        transport_error(
+            StreamableHttpError::UnexpectedServerResponse(format!("HTTP {status}: nope").into()),
+            "send initialize request",
+        )
+    }
+
+    /// The same after discover was refused first (rmcp's Auto mode).
+    fn wrapped(fallback: ClientInitializeError) -> ClientInitializeError {
+        ClientInitializeError::LegacyFallbackFailed {
+            discover: Box::new(ClientInitializeError::JsonRpcError(
+                rmcp::model::ErrorData::invalid_request(
+                    "server/discover rejected with HTTP 405 Method Not Allowed: nope",
+                    None,
+                ),
+            )),
+            fallback: Box::new(fallback),
+        }
+    }
+
+    #[tokio::test]
+    async fn only_a_plain_400_404_or_405_makes_a_legacy_candidate() {
+        for status in ["400 Bad Request", "404 Not Found", "405 Method Not Allowed"] {
+            assert!(legacy_candidate(&answered(status)), "{status}");
+            assert!(legacy_candidate(&wrapped(answered(status))), "{status}");
+        }
+        for status in [
+            "401 Unauthorized",
+            "403 Forbidden",
+            "408 Request Timeout",
+            "429 Too Many Requests",
+            "500 Internal Server Error",
+            "502 Bad Gateway",
+            "503 Service Unavailable",
+        ] {
+            assert!(!legacy_candidate(&answered(status)), "{status}");
+            assert!(!legacy_candidate(&wrapped(answered(status))), "{status}");
+            assert_eq!(
+                handshake_status(&answered(status)),
+                status.split(' ').next().unwrap().parse().ok()
+            );
+        }
+
+        // A 401/403 with a challenge, a JSON-RPC error, a closed stream
+        // and rmcp's other failures: no status, no fallback.
+        let challenge = transport_error(
+            StreamableHttpError::AuthRequired(
+                rmcp::transport::streamable_http_client::AuthRequiredError::new(
+                    "Bearer realm=\"mcp\"".into(),
+                ),
+            ),
+            "send initialize request",
+        );
+        assert!(!legacy_candidate(&challenge));
+        assert!(!legacy_candidate(&wrapped(challenge)));
+        let json_rpc = ClientInitializeError::JsonRpcError(
+            rmcp::model::ErrorData::invalid_request("bad initialize", None),
+        );
+        assert!(!legacy_candidate(&json_rpc));
+        assert!(!legacy_candidate(&wrapped(json_rpc)));
+        assert!(!legacy_candidate(&ClientInitializeError::ConnectionClosed(
+            "discover response".into()
+        )));
+        assert!(!legacy_candidate(&ClientInitializeError::Cancelled));
+
+        // A request that never reached a server (here: an address reqwest
+        // cannot use; a refused connection or a timeout is the same kind).
+        let unreachable = reqwest::Client::new()
+            .get("http://")
+            .send()
+            .await
+            .unwrap_err();
+        let unreachable = transport_error(
+            StreamableHttpError::Client(unreachable),
+            "send discover request",
+        );
+        assert_eq!(handshake_status(&unreachable), None);
+        assert!(!legacy_candidate(&unreachable));
+
+        // The message keeps the transport's words, not the wrapper's.
+        let message = init_error_message(&wrapped(answered("405 Method Not Allowed")));
+        assert!(message.contains("HTTP 405 Method Not Allowed"), "{message}");
     }
 }

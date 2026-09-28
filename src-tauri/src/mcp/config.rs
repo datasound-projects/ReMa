@@ -23,6 +23,12 @@ const MAX_ENV_VALUE: usize = 16_384;
 const MAX_SECRET: usize = 8_192;
 const MAX_URL: usize = 2_000;
 
+/// Why OAuth cannot be chosen for a server on the older HTTP+SSE transport
+/// (the same words the client uses when such a server asks for it).
+pub const LEGACY_NO_OAUTH: &str = "ReMa does not support OAuth sign-in on the older HTTP+SSE \
+                                   transport. Configure a bearer token or an API-key header for \
+                                   this server instead.";
+
 /// Programs that run command strings: using one as the server command would
 /// reintroduce shell parsing.
 const SHELLS: &[&str] = &[
@@ -286,8 +292,13 @@ pub fn validate(input: &McpServerInput) -> AppResult<ValidConfig> {
             header_name: String::new(),
             secret: None,
         }),
-        McpTransport::Http => {
+        McpTransport::Http | McpTransport::Sse => {
             let url = validate_url(&input.url)?;
+            // The older transport has no place for a browser sign-in in
+            // ReMa (see `legacy_sse`); a token is sent with every request.
+            if input.transport == McpTransport::Sse && input.auth == McpAuth::Oauth {
+                return Err(AppError::validation(LEGACY_NO_OAUTH));
+            }
             let header_name = match input.auth {
                 McpAuth::Header => validate_header_name(&input.header_name)?,
                 _ => String::new(),
@@ -298,7 +309,7 @@ pub fn validate(input: &McpServerInput) -> AppResult<ValidConfig> {
             };
             Ok(ValidConfig {
                 name,
-                transport: McpTransport::Http,
+                transport: input.transport,
                 command: String::new(),
                 args: Vec::new(),
                 env: Vec::new(),
@@ -449,5 +460,23 @@ mod tests {
         let mut bearer = http("https://mcp.example.com/mcp", McpAuth::Bearer);
         bearer.secret = Some("token\r\nX-Evil: 1".into());
         assert!(validate(&bearer).is_err(), "no header injection");
+    }
+
+    #[test]
+    fn older_http_sse_servers_follow_the_same_url_rules_without_oauth() {
+        let sse = |url: &str, auth: McpAuth| McpServerInput {
+            transport: McpTransport::Sse,
+            ..http(url, auth)
+        };
+        let ok = validate(&sse("https://old.example.com/sse", McpAuth::None)).unwrap();
+        assert_eq!(ok.transport, McpTransport::Sse);
+        assert_eq!(ok.url, "https://old.example.com/sse");
+        assert!(validate(&sse("http://127.0.0.1:8080/sse", McpAuth::None)).is_ok());
+        assert!(validate(&sse("http://example.com/sse", McpAuth::None)).is_err());
+        let mut bearer = sse("https://old.example.com/sse", McpAuth::Bearer);
+        bearer.secret = Some("t".into());
+        assert_eq!(validate(&bearer).unwrap().secret.as_deref(), Some("t"));
+        let error = validate(&sse("https://old.example.com/sse", McpAuth::Oauth)).unwrap_err();
+        assert_eq!(error.to_string(), LEGACY_NO_OAUTH);
     }
 }

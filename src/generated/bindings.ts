@@ -1256,9 +1256,9 @@ export type ConnectorStatus = {
 	 */
 	errorCode: ConnectorErrorCode | null,
 	/**
-	 *  When Google will end this sign-in (ms since the epoch): set while
-	 *  ReMa's Google app is in Testing, where Google ends every sign-in 7
-	 *  days after it was made.
+	 *  When Google is expected to end this sign-in (ms since the epoch),
+	 *  an estimate of about 7 days after it was made: set only while the
+	 *  build says ReMa's Google app is in Testing.
 	 */
 	signInEndsAt: number | null,
 };
@@ -2357,8 +2357,17 @@ export type McpToolInfo = {
 export type McpTransport = 
 /**  A local program ReMa starts; messages over its standard streams. */
 "stdio" | 
-/**  A remote server at an HTTPS URL (Streamable HTTP). */
-"http";
+/**
+ *  A remote server at an HTTPS URL (Streamable HTTP; a server still on
+ *  the older HTTP+SSE transport is found by falling back to it).
+ */
+"http" | 
+/**
+ *  A remote server known to speak only the older HTTP+SSE transport
+ *  (protocol 2024-11-05): ReMa opens its event stream directly, without
+ *  trying Streamable HTTP first.
+ */
+"sse";
 
 export type Message = {
 	id: number,

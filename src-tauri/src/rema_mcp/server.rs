@@ -60,10 +60,22 @@ enum Side {
     Output,
 }
 
+/// The `format` values schemars writes for Rust's number widths. They are
+/// not JSON Schema's formats, and clients that validate tool schemas
+/// against the standard's list (or map them onto their own dialect)
+/// refuse them; the `minimum`/`maximum` bounds say what matters.
+const RUST_NUMBER_FORMATS: [&str; 12] = [
+    "uint32", "uint64", "int32", "int64", "uint", "int", "uint8", "uint16", "int8", "int16",
+    "float", "double",
+];
+
 /// The schema without `"type": [T, "null"]`, which clients that map tool
 /// schemas onto a single-type dialect (Gemini's function declarations, for
 /// one) reject: an optional input keeps just `T` (absent and `null` both
-/// mean "not given" here), a nullable output says so with `anyOf`.
+/// mean "not given" here), a nullable output says so with `anyOf`. Also
+/// without Rust's number `format`s (see [`RUST_NUMBER_FORMATS`]), wherever
+/// a schema sits: properties, items, `anyOf`/`oneOf`/`allOf`, `$defs`,
+/// `additionalProperties`.
 fn portable(
     schema: &rmcp::model::JsonObject,
     side: Side,
@@ -71,6 +83,13 @@ fn portable(
     fn walk(value: &mut Value, side: Side) {
         match value {
             Value::Object(map) => {
+                if map
+                    .get("format")
+                    .and_then(Value::as_str)
+                    .is_some_and(|f| RUST_NUMBER_FORMATS.contains(&f))
+                {
+                    map.remove("format");
+                }
                 let single = match map.get("type") {
                     Some(Value::Array(types))
                         if types.len() == 2 && types.contains(&json!("null")) =>
@@ -290,23 +309,29 @@ impl ServerHandler for RemaMcpServer {
 mod portability {
     use super::*;
 
-    /// Every `type` in the schemas is a single type (no `[T, "null"]`), so
-    /// clients with a single-type schema dialect accept the tools.
+    /// Every `type` in the schemas is a single type (no `[T, "null"]`) and
+    /// no `format` is a Rust number width, so clients with a single-type
+    /// schema dialect, or a standard format list, accept the tools.
     #[test]
     fn tool_schemas_use_one_type_per_value() {
-        fn arrays(value: &Value, path: String, found: &mut Vec<String>) {
+        fn offending(value: &Value, path: String, found: &mut Vec<String>) {
             match value {
                 Value::Object(map) => {
                     if matches!(map.get("type"), Some(Value::Array(_))) {
-                        found.push(path.clone());
+                        found.push(format!("{path}: type array"));
+                    }
+                    if let Some(format) = map.get("format").and_then(Value::as_str) {
+                        if RUST_NUMBER_FORMATS.contains(&format) {
+                            found.push(format!("{path}: format {format}"));
+                        }
                     }
                     for (key, child) in map {
-                        arrays(child, format!("{path}.{key}"), found);
+                        offending(child, format!("{path}.{key}"), found);
                     }
                 }
                 Value::Array(items) => {
                     for (i, child) in items.iter().enumerate() {
-                        arrays(child, format!("{path}[{i}]"), found);
+                        offending(child, format!("{path}[{i}]"), found);
                     }
                 }
                 _ => {}
@@ -314,13 +339,13 @@ mod portability {
         }
         let mut found = Vec::new();
         for tool in tools() {
-            arrays(
+            offending(
                 &Value::Object((*tool.input_schema).clone()),
                 format!("{}.input", tool.name),
                 &mut found,
             );
             if let Some(output) = &tool.output_schema {
-                arrays(
+                offending(
                     &Value::Object((**output).clone()),
                     format!("{}.output", tool.name),
                     &mut found,
@@ -328,10 +353,31 @@ mod portability {
             }
         }
         assert!(found.is_empty(), "{found:?}");
-        // A nullable output stays nullable, with its constraints on the
-        // typed branch.
+        // The formats were there to remove (the contract has u32 fields),
+        // and the bounds they came with stay: `posted_within_days` keeps
+        // its range, nested in `$defs` too (`LocationFilter` lengths).
+        let unportable = schema_for_type::<SearchJobsInput>();
+        assert!(
+            serde_json::to_string(&unportable)
+                .unwrap()
+                .contains(r#""format":"uint32""#),
+            "schemars stopped writing formats; the check is moot"
+        );
+        let search = tools().into_iter().find(|t| t.name == SEARCH_JOBS).unwrap();
+        let days = &search.input_schema["properties"]["posted_within_days"];
+        assert_eq!(days["type"], json!("integer"), "{days}");
+        assert_eq!(days["minimum"], json!(1), "{days}");
+        assert_eq!(days["maximum"], json!(365), "{days}");
+        assert!(days.get("format").is_none(), "{days}");
+        let city = &search.input_schema["$defs"]["LocationFilter"]["properties"]["city"];
+        assert_eq!(city["maxLength"], json!(100), "{city}");
+        // The output side keeps its bounds on the typed branch.
         let get_job = tools().into_iter().find(|t| t.name == GET_JOB).unwrap();
         let output = serde_json::to_string(get_job.output_schema.as_deref().unwrap()).unwrap();
+        assert!(!output.contains(r#""format":"uint32""#), "{output}");
+        assert!(!output.contains(r#""format":"double""#), "{output}");
+        // A nullable output stays nullable, with its constraints on the
+        // typed branch.
         assert!(output.contains(r#"{"type":"null"}"#), "{output}");
         // An error is text only: no structured content that a client would
         // check against the output schema.

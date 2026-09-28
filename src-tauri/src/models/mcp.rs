@@ -17,11 +17,27 @@ use super::text_enum;
 pub enum McpTransport {
     /// A local program ReMa starts; messages over its standard streams.
     Stdio,
-    /// A remote server at an HTTPS URL (Streamable HTTP).
+    /// A remote server at an HTTPS URL (Streamable HTTP; a server still on
+    /// the older HTTP+SSE transport is found by falling back to it).
     Http,
+    /// A remote server known to speak only the older HTTP+SSE transport
+    /// (protocol 2024-11-05): ReMa opens its event stream directly, without
+    /// trying Streamable HTTP first.
+    Sse,
 }
 
-text_enum!(McpTransport { Stdio => "stdio", Http => "http" });
+text_enum!(McpTransport {
+    Stdio => "stdio",
+    Http => "http",
+    Sse => "sse",
+});
+
+impl McpTransport {
+    /// A server reached over HTTP (either remote transport).
+    pub fn is_remote(self) -> bool {
+        matches!(self, Self::Http | Self::Sse)
+    }
+}
 
 /// Authentication for remote servers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]

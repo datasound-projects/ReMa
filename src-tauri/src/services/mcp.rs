@@ -630,6 +630,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn saves_and_tests_servers_on_the_older_http_sse_transport() {
+        let state = state();
+        let input = McpServerInput {
+            transport: McpTransport::Sse,
+            ..remote("Old", McpAuth::Bearer, Some("tok"))
+        };
+        let server = save(&state, None, input.clone()).await.unwrap();
+        assert_eq!(server.transport, McpTransport::Sse);
+        assert!(server.has_secret);
+        assert_eq!(get(&state, server.id).unwrap().transport, McpTransport::Sse);
+        // Nothing listens there: the stream is asked for directly (no
+        // Streamable HTTP probe), and the failure names the connection.
+        let result = test(&state, Some(server.id), input).await.unwrap();
+        assert!(!result.ok);
+        assert!(
+            result.message.starts_with("Could not connect:"),
+            "{}",
+            result.message
+        );
+        // OAuth is refused at the form.
+        let oauth = McpServerInput {
+            transport: McpTransport::Sse,
+            ..remote("Old OAuth", McpAuth::Oauth, None)
+        };
+        let error = save(&state, None, oauth).await.unwrap_err().to_string();
+        assert!(error.contains("older HTTP+SSE transport"), "{error}");
+    }
+
+    #[tokio::test]
     async fn enabling_disabling_and_removing() {
         let state = state();
         let a = save(&state, None, remote("A", McpAuth::None, None))

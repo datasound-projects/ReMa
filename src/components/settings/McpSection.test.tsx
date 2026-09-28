@@ -98,6 +98,16 @@ describe('Settings → MCP', () => {
     fireEvent.change(within(dialog).getByLabelText('Authentication'), { target: { value: 'bearer' } });
     expect(within(dialog).getByLabelText('Token')).toBeTruthy();
 
+    // A server on the older HTTP+SSE transport: the same remote fields,
+    // without OAuth (a token is sent with every request instead).
+    fireEvent.change(within(dialog).getByLabelText('Authentication'), { target: { value: 'oauth' } });
+    fireEvent.click(within(dialog).getByRole('radio', { name: 'Remote server (HTTP+SSE, older)' }));
+    expect(within(dialog).getByLabelText('Server URL')).toBeTruthy();
+    expect(within(dialog).getByText(/event-stream address/)).toBeTruthy();
+    const auth = within(dialog).getByLabelText('Authentication') as HTMLSelectElement;
+    expect(Array.from(auth.options).map((o) => o.value)).toEqual(['none', 'bearer', 'header']);
+    expect(auth.value).toBe('none');
+
     fireEvent.click(within(dialog).getByRole('radio', { name: 'Local program' }));
     fireEvent.change(within(dialog).getByLabelText('Name'), { target: { value: 'Notes' } });
     fireEvent.change(within(dialog).getByLabelText('Program'), { target: { value: 'node' } });

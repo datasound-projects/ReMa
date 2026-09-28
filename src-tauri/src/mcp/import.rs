@@ -143,6 +143,11 @@ pub fn config_path(app: McpImportApp, home: &Path) -> PathBuf {
         McpImportApp::ClaudeCode => home.join(".claude.json"),
         McpImportApp::Cursor => home.join(".cursor").join("mcp.json"),
         McpImportApp::VsCode => config_dir(home).join("Code").join("User").join("mcp.json"),
+        // Windsurf (now part of Cognition, documented with Devin; its
+        // agent is Cascade) still keeps its MCP settings where the Codeium
+        // extension put them. Whether a Devin desktop build keeps them
+        // elsewhere is not documented anywhere ReMa can check, so no other
+        // path is tried: a missing file means "not installed".
         McpImportApp::Windsurf => home
             .join(".codeium")
             .join("windsurf")
@@ -157,6 +162,26 @@ fn read_json(path: &Path) -> Option<Value> {
     }
     let text = std::fs::read_to_string(path).ok()?;
     parse_json(&text).ok()
+}
+
+/// An app's MCP configuration under `home`: absent when the app is not
+/// installed (or has no servers yet), which is not a failure to read.
+pub fn app_config(app: McpImportApp, home: &Path) -> AppResult<Value> {
+    let path = config_path(app, home);
+    if !path.exists() {
+        return Err(AppError::validation(format!(
+            "{} is not installed on this computer, or has no MCP servers yet ({} does not exist).",
+            app.label(),
+            path.display()
+        )));
+    }
+    read_json(&path).ok_or_else(|| {
+        AppError::validation(format!(
+            "{}'s MCP settings could not be read ({}).",
+            app.label(),
+            path.display()
+        ))
+    })
 }
 
 /// JSON, allowing the comments and trailing commas VS Code's files have.
@@ -422,9 +447,6 @@ pub fn to_input(
     let Some(url) = text_of(config.get("url")).or_else(|| text_of(config.get("serverUrl"))) else {
         return Err("It has no program or address.".into());
     };
-    // An HTTP+SSE server ("sse") is added like any remote server: ReMa
-    // tries Streamable HTTP first and then the older transport, as the MCP
-    // specification says (see `legacy_sse`).
     if matches!(kind.as_str(), "ws" | "websocket") {
         return Err(
             "It uses WebSocket, which is not an MCP transport ReMa (or the MCP specification) \
@@ -432,7 +454,15 @@ pub fn to_input(
                 .into(),
         );
     }
-    input.transport = McpTransport::Http;
+    // A server the other app reaches over the older HTTP+SSE transport
+    // ("sse", as Claude Code's `--transport sse` and Cursor write it) is
+    // marked as such, so ReMa opens its event stream directly (see
+    // `legacy_sse`) instead of probing Streamable HTTP first.
+    input.transport = if kind == "sse" {
+        McpTransport::Sse
+    } else {
+        McpTransport::Http
+    };
     input.url = expand(url, lookup)?;
     let headers: Vec<(String, String)> = match config.get("headers").and_then(Value::as_object) {
         Some(headers) => headers
@@ -482,7 +512,7 @@ fn summary(input: &McpServerInput) -> String {
             .chain(input.args.iter().map(String::as_str))
             .collect::<Vec<_>>()
             .join(" "),
-        McpTransport::Http => input.url.clone(),
+        McpTransport::Http | McpTransport::Sse => input.url.clone(),
     }
 }
 
@@ -537,9 +567,7 @@ pub fn request_config(request: &McpImportRequest) -> AppResult<Value> {
             .map_err(|e| AppError::validation(format!("That is not valid JSON: {e}."))),
         (None, Some(app)) => {
             let home = home().ok_or_else(|| AppError::internal("no home folder"))?;
-            read_json(&config_path(app, &home)).ok_or_else(|| {
-                AppError::validation(format!("{}'s MCP settings could not be read.", app.label()))
-            })
+            app_config(app, &home)
         }
         (None, None) => Err(AppError::validation("Choose where to add servers from.")),
     }
@@ -655,12 +683,33 @@ mod tests {
         assert!(to_input("two", &get("two"), &env)
             .unwrap_err()
             .contains("several headers"));
-        // The older HTTP+SSE transport is added as a remote server.
+        // The older HTTP+SSE transport is added as such (no probing).
         let (legacy, _) = to_input("legacy", &get("legacy"), &env).unwrap();
         assert_eq!(
             (legacy.transport, legacy.url.as_str()),
-            (McpTransport::Http, "https://old.example/sse")
+            (McpTransport::Sse, "https://old.example/sse")
         );
+        let (claude_code, _) = to_input(
+            "cc",
+            &json!({ "transport": "sse", "url": "https://old.example/sse" }),
+            &env,
+        )
+        .unwrap();
+        assert_eq!(claude_code.transport, McpTransport::Sse);
+        assert_eq!(summary(&claude_code), "https://old.example/sse");
+        // OAuth is not offered on it: the candidate says so.
+        let found = candidates(
+            &json!({ "mcpServers": { "old": {
+                "type": "sse", "url": "https://old.example/sse", "oauth": {}
+            }}}),
+            &env,
+            &[],
+        );
+        assert!(found[0]
+            .problem
+            .as_deref()
+            .unwrap()
+            .contains("older HTTP+SSE transport"));
         assert!(to_input("asks", &get("asks"), &env)
             .unwrap_err()
             .contains("by hand"));
@@ -731,5 +780,43 @@ mod tests {
         assert!(config_path(McpImportApp::ClaudeDesktop, home)
             .ends_with("Claude/claude_desktop_config.json"));
         assert!(config_path(McpImportApp::VsCode, home).ends_with("Code/User/mcp.json"));
+        assert!(config_path(McpImportApp::Windsurf, home)
+            .ends_with(".codeium/windsurf/mcp_config.json"));
+    }
+
+    #[test]
+    fn an_app_without_a_settings_file_is_not_installed_rather_than_unreadable() {
+        let home = std::env::temp_dir().join(format!(
+            "rema-mcp-import-{}-{}",
+            std::process::id(),
+            crate::time::now_ms()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        let error = app_config(McpImportApp::Windsurf, &home)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with("Windsurf is not installed on this computer"),
+            "{error}"
+        );
+        assert!(error.contains("mcp_config.json"), "{error}");
+        // An app that is there but with no servers is not "not installed".
+        let path = config_path(McpImportApp::Windsurf, &home);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{}").unwrap();
+        assert_eq!(
+            app_config(McpImportApp::Windsurf, &home).unwrap(),
+            json!({})
+        );
+        std::fs::write(&path, "{ not json").unwrap();
+        let error = app_config(McpImportApp::Windsurf, &home)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("could not be read"), "{error}");
+        std::fs::remove_dir_all(&home).unwrap();
+        // A missing file is not listed as a source either.
+        assert!(sources(&env, &[])
+            .iter()
+            .all(|s| Path::new(&s.path).is_file()));
     }
 }
