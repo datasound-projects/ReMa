@@ -4,6 +4,10 @@ include!("src/ipc_commands.rs");
 #[path = "src/connectors/build_config.rs"]
 mod build_config;
 
+// The pure part of the preflight below, tested by tests/build_support.rs.
+#[path = "build_support.rs"]
+mod build_support;
+
 /// Generated permission set allowing every app command. Granted to the main
 /// webview in `capabilities/default.json`.
 const PERMISSION_SET_PATH: &str = "permissions/app-commands.toml";
@@ -26,13 +30,13 @@ fn main() {
         std::fs::write(PERMISSION_SET_PATH, set).expect("write the permission set");
     }
     println!("cargo:rerun-if-changed=src/ipc_commands.rs");
-    connector_config();
+    let target = std::env::var("TARGET").expect("cargo sets TARGET");
+    let release = std::env::var("PROFILE").as_deref() == Ok("release");
+    let missing = connector_config(release);
     // Development builds look for runtimes fetched into `runtimes/` (see
     // `accounts::locate`), which are named after the target.
-    println!(
-        "cargo:rustc-env=REMA_TARGET_TRIPLE={}",
-        std::env::var("TARGET").expect("cargo sets TARGET")
-    );
+    println!("cargo:rustc-env=REMA_TARGET_TRIPLE={target}");
+    preflight(&target, release, &missing);
 
     tauri_build::try_build(
         tauri_build::Attributes::new().app_manifest(
@@ -48,8 +52,10 @@ fn main() {
 /// ReMa's own OAuth app registrations (`connectors.toml`, overridden by the
 /// environment), checked and compiled into the app as
 /// `connectors::config`. A release build without Google or Microsoft fails
-/// here instead of shipping connectors that cannot sign in.
-fn connector_config() {
+/// here instead of shipping connectors that cannot sign in; a development
+/// build goes on and shows those connectors as unavailable. Returns the
+/// settings that are not set, by name only.
+fn connector_config(release: bool) -> build_support::MissingKeys {
     const FILE: &str = "connectors.toml";
     println!("cargo:rerun-if-changed={FILE}");
     for key in build_config::KEYS {
@@ -70,31 +76,123 @@ fn connector_config() {
             .map(str::to_string)
     };
     let env = |name: &str| std::env::var(name).ok();
-    let release = std::env::var("PROFILE").as_deref() == Ok("release");
+    // What is not set at all, named before any validation so that one
+    // message lists everything a release is missing.
+    let missing =
+        build_support::missing_keys(build_config::KEYS.iter().map(|key| key.env), |name| {
+            let key = build_config::KEYS
+                .iter()
+                .find(|key| key.env == name)
+                .expect("a known key");
+            env(name)
+                .or_else(|| file(*key))
+                .is_some_and(|value| !value.trim().is_empty())
+        });
     let config = match build_config::resolve(&file, &env, release) {
         Ok(config) => config,
         Err(errors) => {
+            // Values never appear here: the resolver reports names, and
+            // the preflight lists what is missing by name.
             eprintln!(
-                "error: ReMa's connector configuration is incomplete or invalid:\n  - {}\n\n\
+                "error: ReMa's connector configuration is incomplete or invalid:\n  - {}\n\n{}\n\n\
                  Fill in src-tauri/{FILE} or set the environment variables named there\n\
                  (see docs/connectors/registration.md). Client IDs are public identifiers,\n\
                  not user secrets; users never enter them.",
-                errors.join("\n  - ")
+                errors.join("\n  - "),
+                build_support::preflight_report(release, false, &missing, &[])
             );
             std::process::exit(1);
         }
     };
-    if !config.missing.is_empty() {
-        println!(
-            "cargo:warning=development build without {}: those connectors show a developer \
-             diagnostic (a release build fails instead)",
-            config.missing.join(", ")
-        );
-    }
+    // What a development build lacks is named by `preflight`, once.
     let out = std::path::PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets OUT_DIR"));
     std::fs::write(
         out.join("connector_apps.rs"),
         build_config::to_rust(&config),
     )
     .expect("write the connector configuration");
+    missing
+}
+
+/// One report of everything a build is missing: OAuth settings by name
+/// (required for a release or optional) and the bundled runtimes for the
+/// target (checked for presence, executable format, processor and execute
+/// bit; their checksums were checked when `pnpm runtimes` fetched them).
+/// A build that bundles the runtimes (`pnpm build:app`, whose config lists
+/// them as `externalBin`) fails when one is unusable, with the paths, before
+/// the bundler fails without them. Every other build only warns.
+fn preflight(target: &str, release: bool, missing: &build_support::MissingKeys) {
+    println!("cargo:rerun-if-env-changed=TAURI_CONFIG");
+    let bundling = std::env::var("TAURI_CONFIG")
+        .map(|config| config.contains("externalBin"))
+        .unwrap_or(false);
+    let manifest_dir = std::path::PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR"),
+    );
+    let mut runtime_problems = Vec::new();
+    for relative in build_support::runtime_files(target) {
+        let path = manifest_dir.join(&relative);
+        // A file that appears later (a fetch after the first build) must
+        // rerun this script; a missing path would rerun it every time.
+        if path.exists() {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
+        let head = read_head(&path);
+        let problem = build_support::runtime_problem(
+            target,
+            head.as_deref(),
+            head.is_some() && is_executable(&path),
+        );
+        if let Some(problem) = problem {
+            runtime_problems.push((format!("src-tauri/{relative}"), problem));
+        }
+    }
+    let report = build_support::preflight_report(release, bundling, missing, &runtime_problems);
+    if report.is_empty() {
+        return;
+    }
+    if bundling && !runtime_problems.is_empty() {
+        eprintln!(
+            "error: ReMa cannot bundle its runtimes:\n{report}\n\n\
+             `pnpm runtimes` (or `pnpm build:app`) fetches them for this target; \
+             `node scripts/runtimes/fetch.mjs --check` explains what is wrong with a fetched one."
+        );
+        std::process::exit(1);
+    }
+    for line in report.lines() {
+        println!("cargo:warning={line}");
+    }
+}
+
+/// The first bytes of a file (enough for a PE header), or `None` when it is
+/// not a readable file.
+fn read_head(path: &std::path::Path) -> Option<Vec<u8>> {
+    use std::io::Read;
+    if !path.is_file() {
+        return None;
+    }
+    let mut head = vec![0u8; 4096];
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut read = 0;
+    while read < head.len() {
+        match file.read(&mut head[read..]) {
+            Ok(0) => break,
+            Ok(n) => read += n,
+            Err(_) => return None,
+        }
+    }
+    head.truncate(read);
+    Some(head)
+}
+
+fn is_executable(path: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).is_ok_and(|meta| meta.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
 }

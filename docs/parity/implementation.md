@@ -7,7 +7,8 @@ MCP servers work the way Claude Code and other harnesses run them; and let
 OpenAI and Anthropic models answer with their own web search, so the
 result in ReMa matches ChatGPT and Claude. Validation:
 [validation.md](validation.md); second pass with evidence levels:
-[verification.md](verification.md).
+[verification.md](verification.md); third pass, one row per open issue:
+[fixes.md](fixes.md).
 
 ## Sources (read September 2026)
 
@@ -34,7 +35,7 @@ result in ReMa matches ChatGPT and Claude. Validation:
 | # | Finding | Change |
 |---|---|---|
 | 1 | Connector tools were offered only when a question looked private; there was no per-chat choice. | Connectors are on in every chat and the **+** menu turns one off for that chat (migration 0014); the model decides when to use them. |
-| 2 | With connectors, the answer had no web at all. | The web stays until a tool returns private data. OpenAI and Anthropic drop their hosted search for the rest of the answer; ReMa's web tools refuse; MCP calls need approval. Codex and Gemini (search fixed for a whole answer) get either the connectors or their search per answer. |
+| 2 | With connectors, the answer had no web at all. | Two steps per answer (third pass, [fixes.md](fixes.md)): web research from the public view of the chat with the connector tools declared but deferred, then a separate private step with the whole chat, the connectors and the research's findings, without the web. Every provider works the same way; a later question researches again from the public view. |
 | 3 | A grant that goes unused expires (Microsoft after a while unused, Google about 6 months). | Accounts are renewed at start and daily while ReMa runs (a token refresh only, one at a time per account, retried on passing trouble). A Google `invalid_grant` says Google ended the sign-in without saying why, and adds the 7-day Testing context only when the build says the app is in Testing. |
 | 4 | Job, company and people questions always went through ReMa's search-first pipeline, so OpenAI and Anthropic answers differed from ChatGPT and Claude. | Models whose provider hosts a search (OpenAI API, ChatGPT through Codex, Anthropic, Gemini 3) search themselves and write the answer, not kept to career sites; ReMa MCP sits next to the search without a second nested search by the same provider. Local models, Gemini 2 and refused providers keep the pipeline. Settings → Career Search can choose ReMa verified search for every model. Scheduled tasks follow the same choice. |
 | 5 | Any job table in an answer reached Analytics. | Only answers and runs that looked something up are ingested. |

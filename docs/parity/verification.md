@@ -1,7 +1,9 @@
 # Connectors, search and MCP: verification (second pass)
 
 Follows [implementation.md](implementation.md) and [validation.md](validation.md).
-What is still open, and why, is in [open-issues.md](open-issues.md).
+What was still open after this pass, and why, is in
+[open-issues.md](open-issues.md); what the third pass did about each item is
+in [fixes.md](fixes.md).
 Each area is classified by the evidence behind it:
 
 - **VERIFIED**: executed for real, against the real counterpart.

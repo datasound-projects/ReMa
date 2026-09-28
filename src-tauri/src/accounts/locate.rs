@@ -8,7 +8,9 @@
 //! Apps opened from the Finder, the Dock or the Start menu do not inherit
 //! the terminal's `PATH`, so besides `PATH` ReMa looks in the folders the
 //! usual installers use (Homebrew, npm, Volta, nvm, pnpm, Go, …) and, on
-//! macOS and Linux, asks the login shell.
+//! macOS and Linux, asks the login shell for its environment once per run.
+//! On Windows programs are resolved with `PATH` and `PATHEXT` only; no
+//! shell is involved in finding anything.
 
 use std::{
     collections::HashMap,
@@ -16,6 +18,7 @@ use std::{
     ffi::{OsStr, OsString},
     path::{Path, PathBuf},
     process::Stdio,
+    sync::RwLock,
     time::Duration,
 };
 
@@ -51,8 +54,8 @@ pub type Version = [u64; 3];
 
 /// Finds `name`. An explicit path in `override_var` is used as is.
 /// Otherwise the copy shipped with ReMa and one installed on the computer
-/// (`PATH`, the usual install folders, the login shell) are compared, and
-/// the newest wins; ReMa's own copy wins a tie.
+/// (`PATH`, the usual install folders, the login shell's `PATH`) are
+/// compared, and the newest wins; ReMa's own copy wins a tie.
 pub async fn find(name: &str, override_var: &str) -> Option<(Located, Option<Version>)> {
     if let Some(path) = env::var_os(override_var).map(PathBuf::from) {
         if !is_executable(&path) {
@@ -65,7 +68,7 @@ pub async fn find(name: &str, override_var: &str) -> Option<(Located, Option<Ver
     let mut candidates: Vec<PathBuf> = bundled(name);
     let installed = match search(name, path_dirs().into_iter().chain(install_dirs())) {
         Some(path) => Some(path),
-        None => login_shell_lookup(name).await,
+        None => login_path_lookup(name).await,
     };
     candidates.extend(installed);
     candidates.dedup_by(|a, b| same_file(a, b));
@@ -86,12 +89,12 @@ pub async fn find(name: &str, override_var: &str) -> Option<(Located, Option<Ver
 }
 
 /// Finds an installed program by name (`PATH`, the usual install folders,
-/// the login shell), e.g. the command of a local MCP server.
+/// the login shell's `PATH`), e.g. the command of a local MCP server.
 pub async fn which(name: &str) -> Option<Located> {
     if let Some(path) = search(name, path_dirs().into_iter().chain(install_dirs())) {
         return Some(Located::at(path));
     }
-    login_shell_lookup(name).await.map(Located::at)
+    login_path_lookup(name).await.map(Located::at)
 }
 
 /// Where the user's shell would find `name` (an MCP server's program): the
@@ -101,10 +104,7 @@ pub async fn which(name: &str) -> Option<Located> {
 pub async fn which_as_shell(name: &str) -> Option<Located> {
     let login = login_environment().await;
     let dirs = shell_search_dirs(login.get(OsStr::new("PATH")).map(|p| p.as_os_str()));
-    if let Some(path) = search(name, dirs) {
-        return Some(Located::at(path));
-    }
-    login_shell_lookup(name).await.map(Located::at)
+    search(name, dirs).map(Located::at)
 }
 
 /// The folders a login shell searches, then ReMa's own and the usual install
@@ -153,47 +153,141 @@ pub fn extended_path_with(first: &[PathBuf], login_path: Option<&OsStr>) -> OsSt
     env::join_paths(dirs).unwrap_or_default()
 }
 
-/// Variables of the shell session itself, not of the user's setup.
-const SHELL_SESSION_VARS: &[&str] = &["PWD", "OLDPWD", "SHLVL", "_", "PS1", "PS2"];
+/// Variables of the shell session itself, not of the user's setup, and the
+/// two that carry ReMa's markers into the shell.
+const SHELL_SESSION_VARS: &[&str] = &[
+    "PWD",
+    "OLDPWD",
+    "SHLVL",
+    "_",
+    "PS1",
+    "PS2",
+    MARKER_BEGIN_VAR,
+    MARKER_END_VAR,
+];
 
-static LOGIN_ENV: tokio::sync::OnceCell<HashMap<OsString, OsString>> =
-    tokio::sync::OnceCell::const_new();
+/// How long a login shell may take to print its environment. Profiles that
+/// wait for a network mount, a password prompt or a stuck `ssh-add` would
+/// otherwise hold every MCP server and runtime lookup.
+const LOGIN_SHELL_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The environment variables through which the shell learns the two marker
+/// lines, so the command it runs is the same fixed text every time.
+const MARKER_BEGIN_VAR: &str = "REMA_ENV_BEGIN";
+const MARKER_END_VAR: &str = "REMA_ENV_END";
+
+/// The one command a POSIX shell (and fish, which reads `||` and `"$VAR"`
+/// the same way) runs: the begin marker on a line of its own, the
+/// environment (NUL-separated where `env -0` exists, otherwise one line per
+/// variable), the end marker. Nothing is ever spliced into this text.
+const POSIX_ENV_COMMAND: &str = "printf '\\n%s\\n' \"$REMA_ENV_BEGIN\"; \
+     command env -0 || command env; \
+     printf '\\n%s\\n' \"$REMA_ENV_END\"";
+
+/// The same for csh and tcsh, which have no `command` builtin.
+const CSH_ENV_COMMAND: &str = "printf '\\n%s\\n' \"$REMA_ENV_BEGIN\"; \
+     /usr/bin/env -0 || /usr/bin/env; \
+     printf '\\n%s\\n' \"$REMA_ENV_END\"";
+
+/// The login environment read this run. It is handed out as a `'static`
+/// reference (callers keep and iterate it), so a refresh leaks the previous
+/// map: a few kilobytes, only when the user asks for a refresh.
+static LOGIN_ENV: RwLock<Option<&'static HashMap<OsString, OsString>>> = RwLock::new(None);
+
+/// Serializes readers so one run asks the shell once, not once per caller.
+static LOGIN_ENV_READ: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// The environment the user's login shell sets up (variables exported in
 /// shell profiles: API keys, proxies, version managers, `PATH`), asked once
 /// per run, as VS Code and Zed do. Apps opened from the Finder, the Dock or
 /// a desktop launcher do not inherit it. Empty on Windows (programs there
 /// get the user's environment from the system) or when the shell does not
-/// answer in time.
+/// answer in time, in which case ReMa's own environment is all there is.
+/// Never blocks the caller's thread: the shell runs as a Tokio process.
 pub async fn login_environment() -> &'static HashMap<OsString, OsString> {
-    LOGIN_ENV.get_or_init(read_login_environment).await
+    if let Some(env) = *LOGIN_ENV.read().unwrap_or_else(|e| e.into_inner()) {
+        return env;
+    }
+    let _reading = LOGIN_ENV_READ.lock().await;
+    // Another caller may have finished while this one waited for the lock.
+    if let Some(env) = *LOGIN_ENV.read().unwrap_or_else(|e| e.into_inner()) {
+        return env;
+    }
+    store_login_environment(read_login_environment().await)
+}
+
+/// Asks the login shell again (after the user edited a profile or installed
+/// a version manager) and replaces the cached environment for this run.
+pub async fn refresh_login_environment() -> &'static HashMap<OsString, OsString> {
+    let _reading = LOGIN_ENV_READ.lock().await;
+    store_login_environment(read_login_environment().await)
+}
+
+fn store_login_environment(
+    env: HashMap<OsString, OsString>,
+) -> &'static HashMap<OsString, OsString> {
+    let env: &'static HashMap<OsString, OsString> = Box::leak(Box::new(env));
+    *LOGIN_ENV.write().unwrap_or_else(|e| e.into_inner()) = Some(env);
+    env
 }
 
 async fn read_login_environment() -> HashMap<OsString, OsString> {
-    const START: &str = "__REMA_ENV_START__";
-    const END: &str = "__REMA_ENV_END__";
     if cfg!(windows) {
         return HashMap::new();
     }
     let Some(shell) = user_shell().await else {
         return HashMap::new();
     };
-    let Some(args) = shell_arguments(&shell, START, END) else {
-        return HashMap::new();
+    ask_shell(&shell, LOGIN_SHELL_TIMEOUT)
+        .await
+        .unwrap_or_default()
+}
+
+/// Runs `shell` as a login and interactive shell and reads what it exports.
+/// The markers are random for this call, so nothing a profile prints
+/// (Powerlevel10k, conda, a message of the day) can be mistaken for the
+/// environment; only the text between the marker lines is read. `None`
+/// when the shell is of an unknown kind, fails, or does not finish within
+/// `timeout`, in which case it is killed and a warning is logged.
+async fn ask_shell(shell: &Path, timeout: Duration) -> Option<HashMap<OsString, OsString>> {
+    let args = shell_arguments(shell)?;
+    let nonce = {
+        let mut bytes = [0u8; 16];
+        // Without system randomness the markers are still unique per run
+        // (nothing a profile prints can predict them either way).
+        let _ = getrandom::fill(&mut bytes);
+        bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
     };
-    let output = tokio::time::timeout(
-        Duration::from_secs(10),
-        tokio::process::Command::new(shell)
-            .args(&args)
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await;
-    match output {
-        Ok(Ok(output)) => parse_env_block(&output.stdout, START, END),
-        _ => HashMap::new(),
+    let begin = format!("__REMA_ENV_BEGIN_{nonce}__");
+    let end = format!("__REMA_ENV_END_{nonce}__");
+    let mut command = tokio::process::Command::new(shell);
+    command
+        .args(&args)
+        .env(MARKER_BEGIN_VAR, &begin)
+        .env(MARKER_END_VAR, &end)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        // Dropping the unfinished `output()` future (on timeout) kills the
+        // shell, so a stuck profile does not linger.
+        .kill_on_drop(true);
+    match tokio::time::timeout(timeout, command.output()).await {
+        Ok(Ok(output)) => Some(parse_env_block(&output.stdout, &begin, &end)),
+        Ok(Err(error)) => {
+            eprintln!(
+                "locate: could not run the login shell {}: {error}; using ReMa's own environment",
+                shell.display()
+            );
+            None
+        }
+        Err(_) => {
+            eprintln!(
+                "locate: the login shell {} did not print its environment within {}s and was \
+                 stopped; using ReMa's own environment (Settings can ask it again)",
+                shell.display(),
+                timeout.as_secs()
+            );
+            None
+        }
     }
 }
 
@@ -265,39 +359,50 @@ fn shell_from_passwd(entry: &str) -> Option<PathBuf> {
     Some(PathBuf::from(shell)).filter(|p| p.is_absolute())
 }
 
-/// How to ask `shell` for its environment between two markers, as a login
-/// and interactive shell so both kinds of profile files are read (csh and
-/// tcsh take `-l` only on its own, so they read `.cshrc`). `None` for
-/// shells with another command syntax.
-fn shell_arguments(shell: &Path, start: &str, end: &str) -> Option<Vec<String>> {
+/// How to ask `shell` for its environment, as a login and interactive
+/// shell so both kinds of profile files are read (csh and tcsh take `-l`
+/// only on its own, so they read `.cshrc`). The command is one of two fixed
+/// strings; the markers reach the shell through its environment. `None`
+/// for shells with another command syntax.
+fn shell_arguments(shell: &Path) -> Option<Vec<String>> {
     let name = shell.file_name()?.to_string_lossy().to_string();
     match name.as_str() {
         "bash" | "zsh" | "sh" | "dash" | "ksh" | "mksh" | "fish" => Some(vec![
             "-i".into(),
             "-l".into(),
             "-c".into(),
-            format!("printf '%s' {start}; command env -0; printf '%s' {end}"),
+            POSIX_ENV_COMMAND.into(),
         ]),
-        "csh" | "tcsh" => Some(vec![
-            "-i".into(),
-            "-c".into(),
-            format!("printf '%s' {start}; /usr/bin/env -0; printf '%s' {end}"),
-        ]),
+        "csh" | "tcsh" => Some(vec!["-i".into(), "-c".into(), CSH_ENV_COMMAND.into()]),
         _ => None,
     }
 }
 
-/// The `NAME=value` entries (NUL-separated) between the two markers.
-fn parse_env_block(stdout: &[u8], start: &str, end: &str) -> HashMap<OsString, OsString> {
+/// The `NAME=value` entries between the two marker lines. Entries are
+/// NUL-separated when `env -0` printed them; otherwise one per line, and
+/// only lines that look like `NAME=value` count, so the continuation lines
+/// of a multi-line value (and anything else) are skipped. Whatever a
+/// profile prints before the first marker or after the last is ignored.
+fn parse_env_block(stdout: &[u8], begin: &str, end: &str) -> HashMap<OsString, OsString> {
     let text = String::from_utf8_lossy(stdout);
-    let Some(from) = text.find(start).map(|i| i + start.len()) else {
+    // A marker counts only as a whole line: `env` itself prints the marker
+    // variables, whose values contain the same text.
+    let begin_line = format!("\n{begin}\n");
+    let end_line = format!("\n{end}\n");
+    let Some(from) = text.find(&begin_line).map(|i| i + begin_line.len()) else {
         return HashMap::new();
     };
-    let Some(to) = text[from..].rfind(end).map(|i| from + i) else {
+    let Some(to) = text[from..].rfind(&end_line).map(|i| from + i) else {
         return HashMap::new();
     };
-    text[from..to]
-        .split('\0')
+    let block = &text[from..to];
+    let entries: Vec<&str> = if block.contains('\0') {
+        block.split('\0').collect()
+    } else {
+        block.lines().collect()
+    };
+    entries
+        .into_iter()
         .filter_map(|entry| entry.split_once('='))
         .filter(|(name, _)| {
             !name.is_empty()
@@ -344,23 +449,90 @@ fn same_file(a: &Path, b: &Path) -> bool {
 /// Asks the runtime for its version (`codex-cli 0.157.1`, `ant version
 /// 1.35.0`). `None` if it does not answer in time or prints no version.
 pub async fn version(located: &Located) -> Option<Version> {
-    let mut command = tokio::process::Command::new(&located.path);
+    let mut command = launch(&located.path, &["--version"]);
     command
-        .arg("--version")
         .env("PATH", located.search_path())
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .kill_on_drop(true);
-    #[cfg(windows)]
-    {
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
     let output = tokio::time::timeout(Duration::from_secs(20), command.output())
         .await
         .ok()?
         .ok()?;
     parse_version(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// A command that runs the program at `path` with `fixed_args`: literals
+/// from ReMa's own code, never text a user, a server or a model wrote.
+///
+/// On Windows, npm, pnpm, Volta and nvm-windows install programs as
+/// `.cmd` wrappers, which only `cmd.exe` can run. Such a wrapper is started
+/// as `cmd.exe /d /s /c ""<path>" <fixed args>"`: `/d` skips AutoRun
+/// commands, `/s` keeps the quoted path (spaces included) as one program
+/// name, and [`shim_command_line`] refuses anything cmd.exe would
+/// interpret. Everything else starts directly, without any shell.
+pub fn launch(path: &Path, fixed_args: &[&str]) -> tokio::process::Command {
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        if let Some(line) = shim_command_line(path, fixed_args) {
+            // The system's own cmd.exe, not whichever is first on PATH.
+            let cmd = env::var_os("SystemRoot")
+                .map(|root| PathBuf::from(root).join("System32").join("cmd.exe"))
+                .filter(|p| p.is_file())
+                .unwrap_or_else(|| PathBuf::from("cmd.exe"));
+            let mut command = tokio::process::Command::new(cmd);
+            command.args(["/d", "/s", "/c"]).raw_arg(line);
+            command.creation_flags(CREATE_NO_WINDOW);
+            return command;
+        }
+        let mut command = tokio::process::Command::new(path);
+        command.args(fixed_args);
+        command.creation_flags(CREATE_NO_WINDOW);
+        command
+    }
+    #[cfg(not(windows))]
+    {
+        let mut command = tokio::process::Command::new(path);
+        command.args(fixed_args);
+        command
+    }
+}
+
+/// The command line `cmd.exe /d /s /c` gets for a `.cmd` or `.bat` wrapper:
+/// `""<path>" <args>"`, whose outer quotes `/s` removes. `None` for any
+/// other program, and for a path or argument cmd.exe would not take
+/// literally (quotes, `%` and `!` expansions, `^` escapes, control
+/// characters); arguments must be plain option words.
+pub fn shim_command_line(path: &Path, fixed_args: &[&str]) -> Option<String> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    if extension != "cmd" && extension != "bat" {
+        return None;
+    }
+    let path = path.to_str()?;
+    if path.is_empty()
+        || path
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '"' | '%' | '!' | '^'))
+    {
+        return None;
+    }
+    let plain = |arg: &&str| {
+        !arg.is_empty()
+            && arg
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '='))
+    };
+    if !fixed_args.iter().all(plain) {
+        return None;
+    }
+    let mut line = format!("\"\"{path}\"");
+    for arg in fixed_args {
+        line.push(' ');
+        line.push_str(arg);
+    }
+    line.push('"');
+    Some(line)
 }
 
 /// The last `x.y.z` in the output; a leading `v` and pre-release or build
@@ -454,19 +626,53 @@ fn home_dir() -> Option<PathBuf> {
         .filter(|p| p.is_absolute())
 }
 
-/// The first `dir/name` (with Windows launcher extensions) that exists.
+/// The first `dir/name` that exists and can be run. On Windows, `name`
+/// takes the launchable `PATHEXT` extensions, as the command line does.
 fn search(name: &str, dirs: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
     let names: Vec<String> = if cfg!(windows) {
-        ["exe", "cmd", "bat"]
-            .iter()
-            .map(|ext| format!("{name}.{ext}"))
-            .collect()
+        let pathext = env::var("PATHEXT").ok();
+        windows_program_names(name, pathext.as_deref())
     } else {
         vec![name.to_string()]
     };
     dirs.into_iter()
         .flat_map(|dir| names.iter().map(move |n| dir.join(n)))
         .find(|candidate| is_executable(candidate))
+}
+
+/// Program extensions ReMa can start on Windows: executables and the
+/// `.cmd`/`.bat` wrappers package managers install (through cmd.exe, see
+/// [`launch`]). Scripts for other interpreters (`.ps1`, `.js`, `.vbs`) are
+/// not programs to ReMa even when `PATHEXT` lists them.
+const WINDOWS_LAUNCHABLE: [&str; 4] = [".exe", ".cmd", ".bat", ".com"];
+
+/// The file names `name` may have on Windows, in `PATHEXT` order (the
+/// order the command line resolves them in): `codex` → `codex.COM`,
+/// `codex.EXE`, `codex.BAT`, `codex.CMD`. A name that already carries a
+/// launchable extension is looked up as it is. Any launchable extension
+/// `PATHEXT` leaves out still counts, after the listed ones, so an npm
+/// `.cmd` wrapper is found under a trimmed `PATHEXT` too.
+pub fn windows_program_names(name: &str, pathext: Option<&str>) -> Vec<String> {
+    let lower = name.to_ascii_lowercase();
+    if WINDOWS_LAUNCHABLE.iter().any(|ext| lower.ends_with(ext)) {
+        return vec![name.to_string()];
+    }
+    let mut names: Vec<String> = pathext
+        .unwrap_or(".COM;.EXE;.BAT;.CMD")
+        .split(';')
+        .map(str::trim)
+        .filter(|ext| {
+            let ext = ext.to_ascii_lowercase();
+            WINDOWS_LAUNCHABLE.contains(&ext.as_str())
+        })
+        .map(|ext| format!("{name}{ext}"))
+        .collect();
+    for ext in WINDOWS_LAUNCHABLE {
+        if !names.iter().any(|n| n.to_ascii_lowercase().ends_with(ext)) {
+            names.push(format!("{name}{ext}"));
+        }
+    }
+    names
 }
 
 fn is_executable(path: &Path) -> bool {
@@ -484,34 +690,83 @@ fn is_executable(path: &Path) -> bool {
     }
 }
 
-/// Asks the user's login shell, which knows `PATH` changes from shell
-/// profiles (e.g. a custom npm prefix). Bounded, and only the resolved path
-/// is used.
-async fn login_shell_lookup(name: &str) -> Option<PathBuf> {
-    if cfg!(windows) || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+/// Where the user's login shell would find `name`: its `PATH`, read once
+/// per run (see [`login_environment`]) and searched by ReMa itself, so the
+/// name never reaches a shell. Nothing on Windows, where no shell is asked.
+async fn login_path_lookup(name: &str) -> Option<PathBuf> {
+    if cfg!(windows) {
         return None;
     }
-    let shell = env::var_os("SHELL")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())?;
-    let output = tokio::time::timeout(
-        Duration::from_secs(5),
-        tokio::process::Command::new(shell)
-            .args(["-lc", &format!("command -v {name}")])
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await
-    .ok()?
-    .ok()?;
-    let found = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::trim)
-        .rfind(|line| line.starts_with('/'))
-        .map(PathBuf::from)?;
-    is_executable(&found).then_some(found)
+    let login = login_environment().await;
+    let path = login.get(OsStr::new("PATH"))?;
+    search(name, env::split_paths(path))
+}
+
+#[cfg(test)]
+mod windows_tests {
+    //! The Windows path logic is plain string work, tested everywhere.
+    use super::*;
+
+    #[test]
+    fn windows_programs_take_the_launchable_pathext_extensions_in_order() {
+        assert_eq!(
+            windows_program_names("codex", Some(".COM;.EXE;.BAT;.CMD;.VBS;.JS;.PS1")),
+            ["codex.COM", "codex.EXE", "codex.BAT", "codex.CMD"]
+        );
+        assert_eq!(
+            windows_program_names("codex", None),
+            ["codex.COM", "codex.EXE", "codex.BAT", "codex.CMD"]
+        );
+        // A trimmed PATHEXT still finds npm's .cmd wrappers, after its own.
+        assert_eq!(
+            windows_program_names("npx", Some(".EXE")),
+            ["npx.EXE", "npx.cmd", "npx.bat", "npx.com"]
+        );
+        assert_eq!(windows_program_names("node.exe", None), ["node.exe"]);
+        assert_eq!(windows_program_names("Codex.CMD", None), ["Codex.CMD"]);
+        assert_eq!(
+            windows_program_names("server.ps1", Some(".PS1;.EXE")),
+            [
+                "server.ps1.EXE",
+                "server.ps1.cmd",
+                "server.ps1.bat",
+                "server.ps1.com"
+            ],
+            "an interpreter script is not a program"
+        );
+    }
+
+    #[test]
+    fn cmd_wrappers_run_through_cmd_exe_with_the_quoted_path_only() {
+        let shim = Path::new(r"C:\Users\Ana Lopez\AppData\Roaming\npm\codex.cmd");
+        assert_eq!(
+            shim_command_line(shim, &["--version"]).as_deref(),
+            Some(r#"""C:\Users\Ana Lopez\AppData\Roaming\npm\codex.cmd" --version""#)
+        );
+        assert_eq!(
+            shim_command_line(Path::new(r"C:\tools\run.BAT"), &[]).as_deref(),
+            Some(r#"""C:\tools\run.BAT"""#)
+        );
+        // Executables start directly, without cmd.exe.
+        assert_eq!(
+            shim_command_line(Path::new(r"C:\tools\codex.exe"), &["--version"]),
+            None
+        );
+        assert_eq!(shim_command_line(Path::new(r"C:\tools\codex"), &[]), None);
+        // What cmd.exe would interpret is refused rather than escaped.
+        for path in [
+            "C:\\odd\"name\\x.cmd",
+            r"C:\100%\x.cmd",
+            r"C:\bang!\x.cmd",
+            r"C:\caret^\x.cmd",
+            "C:\\new\nline\\x.cmd",
+        ] {
+            assert_eq!(shim_command_line(Path::new(path), &[]), None, "{path:?}");
+        }
+        for arg in ["--name=a b", "&& del", "\"", "--x|y", ""] {
+            assert_eq!(shim_command_line(shim, &[arg]), None, "{arg:?}");
+        }
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -519,10 +774,24 @@ mod tests {
     use super::*;
     use crate::state::testing::temp_dir;
 
+    fn executable(dir: &Path, name: &str, script: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
     #[test]
     fn reads_the_login_environment_between_its_markers() {
-        let stdout = b"Welcome to fish\n__S__HOME=/Users/ana\0PATH=/opt/homebrew/bin:/usr/bin\0OPENAI_API_KEY=sk-x=y\0PWD=/tmp\0SHLVL=2\0__E__";
-        let env = parse_env_block(stdout, "__S__", "__E__");
+        let (b, e) = ("__REMA_ENV_BEGIN_ab__", "__REMA_ENV_END_ab__");
+        // Chatter before (a message of the day, Powerlevel10k), NUL-separated
+        // entries, chatter after (a logout hook): only the block counts.
+        let stdout = format!(
+            "Welcome to fish\n\x1b[1mp10k\x1b[0m\n{b}\nHOME=/Users/ana\0PATH=/opt/homebrew/bin:/usr/bin\0\
+             OPENAI_API_KEY=sk-x=y\0PWD=/tmp\0SHLVL=2\0REMA_ENV_BEGIN={b}\0REMA_ENV_END={e}\0\n{e}\nbye\n"
+        );
+        let env = parse_env_block(stdout.as_bytes(), b, e);
         assert_eq!(
             env.get(OsStr::new("HOME")),
             Some(&OsString::from("/Users/ana"))
@@ -532,9 +801,87 @@ mod tests {
             Some(&OsString::from("sk-x=y"))
         );
         assert!(env.contains_key(OsStr::new("PATH")));
+        for session_var in ["PWD", "SHLVL", "REMA_ENV_BEGIN", "REMA_ENV_END"] {
+            assert!(!env.contains_key(OsStr::new(session_var)), "{session_var}");
+        }
+        assert!(!env
+            .values()
+            .any(|v| v.to_string_lossy().contains("Welcome")));
+        assert!(parse_env_block(b"no markers", b, e).is_empty());
+        assert!(
+            parse_env_block(format!("{b}\nA=1\n").as_bytes(), b, e).is_empty(),
+            "a shell stopped before the end marker gives nothing"
+        );
+    }
+
+    #[test]
+    fn without_env_0_only_name_value_lines_count() {
+        let (b, e) = ("__REMA_ENV_BEGIN_cd__", "__REMA_ENV_END_cd__");
+        // A profile that prints the marker text on a line of chatter cannot
+        // fake the block: the marker variables themselves are lines too.
+        let stdout = format!(
+            "conda activate base\nREMA_ENV_BEGIN={b}\n{b}\nHOME=/home/ana\nMOTD=first line\n  second line\n\
+             not a variable\nHTTPS_PROXY=http://proxy:3128\nREMA_ENV_END={e}\n{e}\nlogout chatter\n"
+        );
+        let env = parse_env_block(stdout.as_bytes(), b, e);
+        assert_eq!(
+            env.get(OsStr::new("HOME")),
+            Some(&OsString::from("/home/ana"))
+        );
+        assert_eq!(
+            env.get(OsStr::new("MOTD")),
+            Some(&OsString::from("first line")),
+            "a multi-line value keeps its first line"
+        );
+        assert_eq!(
+            env.get(OsStr::new("HTTPS_PROXY")),
+            Some(&OsString::from("http://proxy:3128"))
+        );
+        assert_eq!(env.len(), 3, "{env:?}");
+    }
+
+    #[tokio::test]
+    async fn a_chatty_profile_does_not_get_into_the_environment() {
+        // A "zsh" that prints before and after the command, exports a
+        // variable in its profile and then runs the command with /bin/sh.
+        let dir = temp_dir();
+        let shell = executable(
+            &dir,
+            "zsh",
+            "#!/bin/sh\necho 'Last login: today'\nprintf '\\033[1mfancy prompt\\033[0m\\n'\n\
+             export REMA_TEST_FROM_PROFILE=works\nshift 3\n/bin/sh -c \"$1\"\necho bye\n",
+        );
+        let env = ask_shell(&shell, Duration::from_secs(10)).await.unwrap();
+        assert_eq!(
+            env.get(OsStr::new("REMA_TEST_FROM_PROFILE")),
+            Some(&OsString::from("works"))
+        );
+        assert!(env.contains_key(OsStr::new("PATH")));
+        assert!(!env.contains_key(OsStr::new("REMA_ENV_BEGIN")));
         assert!(!env.contains_key(OsStr::new("PWD")));
-        assert!(!env.contains_key(OsStr::new("SHLVL")));
-        assert!(parse_env_block(b"no markers", "__S__", "__E__").is_empty());
+        assert!(
+            !env.iter().any(|(k, v)| {
+                let text = format!("{}{}", k.to_string_lossy(), v.to_string_lossy());
+                text.contains("Last login") || text.contains("fancy") || text.contains("bye")
+            }),
+            "{env:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_shell_that_does_not_answer_is_stopped_and_ignored() {
+        let dir = temp_dir();
+        let shell = executable(&dir, "bash", "#!/bin/sh\nexec sleep 30\n");
+        let started = std::time::Instant::now();
+        assert_eq!(ask_shell(&shell, Duration::from_millis(300)).await, None);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+        // The rest of ReMa goes on with its own environment.
+        let dirs = shell_search_dirs(None);
+        assert!(dirs.len() >= install_dirs().len());
     }
 
     #[test]
@@ -542,18 +889,18 @@ mod tests {
         let nvm = temp_dir();
         let system = temp_dir();
         for dir in [&nvm, &system] {
-            let node = dir.join("node");
-            std::fs::write(&node, "#!/bin/sh\n").unwrap();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o755)).unwrap();
-            }
+            executable(dir, "node", "#!/bin/sh\n");
         }
         let login = env::join_paths([&nvm, &system]).unwrap();
         let dirs = shell_search_dirs(Some(&login));
         assert_eq!(&dirs[..2], [nvm.clone(), system.clone()]);
         assert_eq!(search("node", dirs), Some(nvm.join("node")));
+        // The login PATH is searched by ReMa: the name never reaches a shell.
+        assert_eq!(
+            search("node", env::split_paths(&login)),
+            Some(nvm.join("node"))
+        );
+        assert_eq!(search("nod e; rm -rf /", env::split_paths(&login)), None);
         // Without a login shell, ReMa's own PATH and install folders remain.
         assert!(shell_search_dirs(None).len() >= install_dirs().len());
     }
@@ -570,17 +917,32 @@ mod tests {
             Some(PathBuf::from("/usr/bin/zsh"))
         );
         assert_eq!(shell_from_passwd("ana:x:501:20:Ana:/home/ana:"), None);
+        // A relative or empty shell is not trusted.
+        assert_eq!(shell_from_dscl("UserShell: zsh"), None);
     }
 
     #[test]
     fn each_shell_is_asked_in_its_own_syntax() {
-        let zsh = shell_arguments(Path::new("/bin/zsh"), "S", "E").unwrap();
+        let zsh = shell_arguments(Path::new("/bin/zsh")).unwrap();
         assert_eq!(&zsh[..3], ["-i", "-l", "-c"]);
-        assert!(zsh[3].contains("command env -0"));
-        let tcsh = shell_arguments(Path::new("/bin/tcsh"), "S", "E").unwrap();
+        assert_eq!(zsh[3], POSIX_ENV_COMMAND);
+        assert_eq!(
+            shell_arguments(Path::new("/usr/bin/fish")).unwrap()[3],
+            POSIX_ENV_COMMAND
+        );
+        let tcsh = shell_arguments(Path::new("/bin/tcsh")).unwrap();
         assert_eq!(&tcsh[..2], ["-i", "-c"]);
-        assert!(tcsh[2].contains("/usr/bin/env -0"));
-        assert_eq!(shell_arguments(Path::new("/usr/bin/nu"), "S", "E"), None);
+        assert_eq!(tcsh[2], CSH_ENV_COMMAND);
+        assert_eq!(shell_arguments(Path::new("/usr/bin/nu")), None);
+        // The command is fixed text: the markers come from the environment.
+        for command in [POSIX_ENV_COMMAND, CSH_ENV_COMMAND] {
+            assert!(command.contains("\"$REMA_ENV_BEGIN\""));
+            assert!(command.contains("\"$REMA_ENV_END\""));
+            assert!(command.contains("env -0 ||"), "falls back to line output");
+            assert!(!command.contains("__REMA"));
+        }
+        assert!(POSIX_ENV_COMMAND.contains("command env"));
+        assert!(CSH_ENV_COMMAND.contains("/usr/bin/env"));
     }
 
     #[test]
@@ -599,19 +961,11 @@ mod tests {
         );
     }
 
-    fn executable(dir: &Path, name: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-        let path = dir.join(name);
-        std::fs::write(&path, "#!/bin/sh\n").unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        path
-    }
-
     #[test]
     fn searches_folders_in_order_and_skips_non_executables() {
         let (a, b) = (temp_dir(), temp_dir());
         std::fs::write(a.join("codex"), "not executable").unwrap();
-        let wanted = executable(&b, "codex");
+        let wanted = executable(&b, "codex", "#!/bin/sh\n");
         assert_eq!(search("codex", [a.clone(), b.clone()]), Some(wanted));
         assert_eq!(search("ant", [a, b]), None);
     }
@@ -645,11 +999,11 @@ mod tests {
     async fn reads_the_version_of_each_copy() {
         let (old, new) = (temp_dir(), temp_dir());
         let script = |dir: &Path, version: &str| {
-            use std::os::unix::fs::PermissionsExt;
-            let path = dir.join("codex");
-            std::fs::write(&path, format!("#!/bin/sh\necho codex-cli {version}\n")).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-            path
+            executable(
+                dir,
+                "codex",
+                &format!("#!/bin/sh\necho codex-cli {version}\n"),
+            )
         };
         let older = script(&old, "0.150.0");
         let newer = script(&new, "0.160.2");

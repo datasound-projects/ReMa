@@ -1,14 +1,39 @@
 name: Release
 
-# Packages ReMa for Linux, macOS and Windows.
+# Packages ReMa for Linux, macOS (Apple silicon and Intel) and Windows.
 #
 # ReMa's own Google and Microsoft app registrations are public client
 # configuration (desktop apps are public OAuth clients; see
 # src-tauri/connectors.toml). This workflow takes them from the repository's
 # Actions variables (and the Google Desktop client secret, which Google does
 # not treat as confidential, from an Actions secret so logs mask it). When
-# connectors.toml does not hold them and a variable is missing, build.rs
-# fails the job: no release can ship with connectors that cannot sign in.
+# connectors.toml does not hold them and a required variable is missing,
+# build.rs fails the job: no release can ship with connectors that cannot
+# sign in. The Google client secret is optional: the build goes on without
+# it (build.rs names it as missing but optional).
+#
+# Code signing is optional too and driven by secrets. When the secrets for a
+# platform are set, the Tauri bundler signs (and on macOS notarizes) the
+# packages; when they are absent the job still builds and uploads the
+# packages with an "-unsigned" suffix and an UNSIGNED marker file, so test
+# builds are never mistaken for a release. Linux packages are not signed
+# either way and carry no suffix. Certificates, notarization credentials and
+# distribution approval are the repository owner's: see README, "Signing".
+#
+# macOS (all read by the Tauri bundler):
+#   APPLE_CERTIFICATE            base64 of the Developer ID Application .p12
+#   APPLE_CERTIFICATE_PASSWORD   its password
+#   APPLE_SIGNING_IDENTITY       "Developer ID Application: Name (TEAMID)"
+#   APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID   notarization (an app-specific
+#                                password of the Apple ID)
+# Windows, one of:
+#   WINDOWS_CERTIFICATE (base64 .pfx) + WINDOWS_CERTIFICATE_PASSWORD, or
+#   WINDOWS_CERTIFICATE_THUMBPRINT (a certificate already in the runner's
+#     store, e.g. on a self-hosted runner), or
+#   Azure Trusted Signing: AZURE_TENANT_ID, AZURE_CLIENT_ID,
+#     AZURE_CLIENT_SECRET (secrets) with the Actions variables
+#     AZURE_CODE_SIGNING_ENDPOINT, AZURE_CODE_SIGNING_ACCOUNT and
+#     AZURE_CODE_SIGNING_PROFILE (signs through trusted-signing-cli).
 
 on:
   workflow_dispatch:
@@ -25,18 +50,83 @@ jobs:
       matrix:
         include:
           - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            signable: false
           - os: macos-14
+            target: aarch64-apple-darwin
+            signable: true
+          - os: macos-14
+            target: x86_64-apple-darwin
+            signable: true
           - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            signable: true
     runs-on: ${{ matrix.os }}
     env:
       GOOGLE_DESKTOP_CLIENT_ID: ${{ vars.GOOGLE_DESKTOP_CLIENT_ID }}
       GOOGLE_DESKTOP_CLIENT_SECRET: ${{ secrets.GOOGLE_DESKTOP_CLIENT_SECRET }}
+      GOOGLE_PUBLISHING_STATUS: ${{ vars.GOOGLE_PUBLISHING_STATUS }}
       MICROSOFT_PUBLIC_CLIENT_ID: ${{ vars.MICROSOFT_PUBLIC_CLIENT_ID }}
       LINKEDIN_CLIENT_ID: ${{ vars.LINKEDIN_CLIENT_ID }}
       LINKEDIN_APPROVED_SCOPES: ${{ vars.LINKEDIN_APPROVED_SCOPES }}
 
     steps:
     - uses: actions/checkout@v7
+
+    # Names only, never values: which connector settings this build has,
+    # and which signing secrets. Empty variables are unset so that neither
+    # build.rs nor the bundler sees an empty value as a value.
+    - name: Preflight
+      id: preflight
+      shell: bash
+      env:
+        APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+        APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        APPLE_ID: ${{ secrets.APPLE_ID }}
+        WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+        WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.WINDOWS_CERTIFICATE_THUMBPRINT }}
+        AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        SIGNABLE: ${{ matrix.signable }}
+      run: |
+        for name in GOOGLE_DESKTOP_CLIENT_ID MICROSOFT_PUBLIC_CLIENT_ID; do
+          if [ -z "${!name}" ]; then
+            echo "::error::$name is not set (Actions variable): required for a release build"
+          else
+            echo "$name: set"
+          fi
+        done
+        for name in GOOGLE_DESKTOP_CLIENT_SECRET GOOGLE_PUBLISHING_STATUS LINKEDIN_CLIENT_ID LINKEDIN_APPROVED_SCOPES; do
+          if [ -z "${!name}" ]; then
+            echo "::notice::$name is not set: optional, the build goes on without it"
+          else
+            echo "$name: set"
+          fi
+        done
+        signed=false
+        case "$RUNNER_OS" in
+          macOS)
+            if [ -n "$APPLE_CERTIFICATE" ] && [ -n "$APPLE_SIGNING_IDENTITY" ]; then
+              signed=true
+              if [ -z "$APPLE_ID" ]; then
+                echo "::warning::macOS signing secrets are set but no notarization credentials (APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID): Gatekeeper will refuse the app"
+              fi
+            fi ;;
+          Windows)
+            if [ -n "$WINDOWS_CERTIFICATE" ] || [ -n "$WINDOWS_CERTIFICATE_THUMBPRINT" ] || [ -n "$AZURE_CLIENT_ID" ]; then
+              signed=true
+            fi ;;
+        esac
+        if [ "$SIGNABLE" = "true" ]; then
+          if [ "$signed" = "true" ]; then
+            echo "Signing: the packages will be signed"
+          else
+            echo "::warning::No signing secrets for $RUNNER_OS: the packages are uploaded unsigned (suffix -unsigned)"
+          fi
+          echo "suffix=$([ "$signed" = "true" ] && echo "" || echo "-unsigned")" >> "$GITHUB_OUTPUT"
+        else
+          echo "suffix=" >> "$GITHUB_OUTPUT"
+        fi
+        echo "signed=$signed" >> "$GITHUB_OUTPUT"
 
     - uses: pnpm/action-setup@v6
     - uses: actions/setup-node@v7
@@ -55,25 +145,106 @@ jobs:
           libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
           libayatana-appindicator3-dev librsvg2-dev patchelf
     - uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: ${{ matrix.target }}
     - uses: Swatinem/rust-cache@v2
       with:
         workspaces: src-tauri
+        key: ${{ matrix.target }}
 
-    # Fetches the bundled Codex and ant runtimes (checksums verified), builds
-    # the frontend and packages the app. build.rs checks the connector
-    # configuration first.
+    # A .pfx from the secrets goes into the runner's certificate store; the
+    # bundler then signs with its thumbprint (tauri.conf.json holds the
+    # digest algorithm and timestamp server).
+    - name: Import the Windows signing certificate
+      if: runner.os == 'Windows' && steps.preflight.outputs.signed == 'true'
+      shell: pwsh
+      env:
+        WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+        WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.WINDOWS_CERTIFICATE_THUMBPRINT }}
+        AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        AZURE_CODE_SIGNING_ENDPOINT: ${{ vars.AZURE_CODE_SIGNING_ENDPOINT }}
+        AZURE_CODE_SIGNING_ACCOUNT: ${{ vars.AZURE_CODE_SIGNING_ACCOUNT }}
+        AZURE_CODE_SIGNING_PROFILE: ${{ vars.AZURE_CODE_SIGNING_PROFILE }}
+      run: |
+        $config = @{ bundle = @{ windows = @{} } }
+        if ($env:WINDOWS_CERTIFICATE) {
+          $pfx = Join-Path $env:RUNNER_TEMP 'signing.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $password = ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          Remove-Item $pfx
+          $config.bundle.windows.certificateThumbprint = $cert.Thumbprint
+        } elseif ($env:WINDOWS_CERTIFICATE_THUMBPRINT) {
+          $config.bundle.windows.certificateThumbprint = $env:WINDOWS_CERTIFICATE_THUMBPRINT
+        } elseif ($env:AZURE_CLIENT_ID) {
+          foreach ($name in 'AZURE_CODE_SIGNING_ENDPOINT', 'AZURE_CODE_SIGNING_ACCOUNT', 'AZURE_CODE_SIGNING_PROFILE') {
+            if (-not (Get-Item "env:$name" -ErrorAction SilentlyContinue).Value) {
+              Write-Error "Azure Trusted Signing needs the Actions variable $name"
+              exit 1
+            }
+          }
+          cargo install trusted-signing-cli --locked
+          $config.bundle.windows.signCommand = "trusted-signing-cli -e $env:AZURE_CODE_SIGNING_ENDPOINT -a $env:AZURE_CODE_SIGNING_ACCOUNT -c $env:AZURE_CODE_SIGNING_PROFILE -d ReMa %1"
+        }
+        $file = Join-Path $env:RUNNER_TEMP 'signing.conf.json'
+        $config | ConvertTo-Json -Depth 5 | Set-Content -Path $file -Encoding utf8
+        "TAURI_SIGNING_CONFIG=$file" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+    # Fetches the bundled Codex and ant runtimes (checksums verified, built
+    # for the target), builds the frontend and packages the app for the
+    # target. build.rs checks the connector configuration and the fetched
+    # runtimes first. Signing secrets reach the bundler only when set: an
+    # empty APPLE_* variable would make it try to sign with nothing.
     - name: Package ReMa
-      run: pnpm build:app
+      shell: bash
+      env:
+        APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+        APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        APPLE_ID: ${{ secrets.APPLE_ID }}
+        APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+        APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+        AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+      run: |
+        for name in GOOGLE_DESKTOP_CLIENT_ID GOOGLE_DESKTOP_CLIENT_SECRET GOOGLE_PUBLISHING_STATUS \
+                    MICROSOFT_PUBLIC_CLIENT_ID LINKEDIN_CLIENT_ID LINKEDIN_APPROVED_SCOPES \
+                    APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY \
+                    APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID \
+                    AZURE_TENANT_ID AZURE_CLIENT_ID AZURE_CLIENT_SECRET; do
+          [ -z "${!name}" ] && unset "$name"
+        done
+        config=()
+        if [ -n "${TAURI_SIGNING_CONFIG:-}" ]; then
+          config=(--config "$TAURI_SIGNING_CONFIG")
+        fi
+        pnpm build:app --target "${{ matrix.target }}" "${config[@]}"
+
+    - name: Check the fetched runtimes
+      shell: bash
+      run: node scripts/runtimes/fetch.mjs --check --target "${{ matrix.target }}"
+
+    - name: Mark unsigned packages
+      if: matrix.signable && steps.preflight.outputs.signed != 'true'
+      shell: bash
+      run: |
+        mkdir -p src-tauri/target/${{ matrix.target }}/release/bundle
+        printf 'Unsigned test build of ReMa (%s, %s).\nNot notarized; not for distribution.\n' \
+          "${{ matrix.target }}" "${GITHUB_SHA}" \
+          > src-tauri/target/${{ matrix.target }}/release/bundle/UNSIGNED.txt
 
     - name: Keep the packages
       uses: actions/upload-artifact@v7
       with:
-        name: rema-${{ matrix.os }}
+        name: rema-${{ matrix.target }}${{ steps.preflight.outputs.suffix }}
         path: |
-          src-tauri/target/release/bundle/**/*.deb
-          src-tauri/target/release/bundle/**/*.rpm
-          src-tauri/target/release/bundle/**/*.AppImage
-          src-tauri/target/release/bundle/**/*.dmg
-          src-tauri/target/release/bundle/**/*.msi
-          src-tauri/target/release/bundle/**/*.exe
+          src-tauri/target/${{ matrix.target }}/release/bundle/UNSIGNED.txt
+          src-tauri/target/${{ matrix.target }}/release/bundle/**/*.deb
+          src-tauri/target/${{ matrix.target }}/release/bundle/**/*.rpm
+          src-tauri/target/${{ matrix.target }}/release/bundle/**/*.AppImage
+          src-tauri/target/${{ matrix.target }}/release/bundle/**/*.dmg
+          src-tauri/target/${{ matrix.target }}/release/bundle/**/*.msi
+          src-tauri/target/${{ matrix.target }}/release/bundle/**/*.exe
         if-no-files-found: error

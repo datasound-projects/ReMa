@@ -2,7 +2,7 @@
 // runtimes for one target into src-tauri/runtimes/, so ReMa's app bundle ships
 // them (ChatGPT and Claude Console sign-in work without a separate install).
 //
-//   node scripts/runtimes/fetch.mjs [--target <rust target triple>]
+//   node scripts/runtimes/fetch.mjs [--target <rust target triple>] [--check]
 //
 // - Codex: the npm registry's `latest` @openai/codex release. The platform
 //   package is checked against the registry's sha512 integrity, and only the
@@ -11,21 +11,31 @@
 //   release) names the latest version, the archive for each platform and its
 //   SHA-256. Windows archives are checked against the release's checksums.
 //
-// Nothing is kept unless its checksum matches. An up-to-date runtime is not
-// downloaded again. Uses `curl` and `tar`, which ship with macOS, Windows 10+
-// and Linux distributions, and honor the usual proxy settings.
+// Nothing is kept unless its checksum matches, and a kept executable must be
+// built for the target (its ELF, Mach-O or PE header says so) and runnable.
+// versions.json records the version, SHA-256 and size of each kept file, so
+// an up-to-date runtime is not downloaded again and a damaged one is. With
+// `--check` nothing is downloaded: the fetched runtimes for the target are
+// checked against versions.json (presence, checksum, architecture, execute
+// bit) and every problem is listed; build.rs makes the same checks, minus the
+// checksums, before a bundling build. Uses `curl` and `tar`, which ship with
+// macOS, Windows 10+ and Linux distributions, and honor the usual proxy
+// settings.
 
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   chmodSync,
+  closeSync,
   copyFileSync,
   createReadStream,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readdirSync,
   readFileSync,
+  readSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -107,6 +117,73 @@ async function digestStream(file, algorithm, encoding) {
   return hash.digest(encoding);
 }
 
+/** The executable format and processor an ELF, Mach-O or PE file is built for. */
+function binaryKind(file) {
+  const head = Buffer.alloc(4096);
+  const fd = openSync(file, 'r');
+  let length;
+  try {
+    length = readSync(fd, head, 0, head.length, 0);
+  } finally {
+    closeSync(fd);
+  }
+  if (length < 4) return null;
+  if (head.subarray(0, 4).equals(Buffer.from('\x7fELF', 'latin1'))) {
+    const machine = head[5] === 1 ? head.readUInt16LE(18) : head.readUInt16BE(18);
+    return { format: 'elf', arch: { 0x3e: 'x86_64', 0xb7: 'aarch64' }[machine] ?? 'other' };
+  }
+  if (head.readUInt32LE(0) === 0xfeedfacf || head.readUInt32BE(0) === 0xfeedfacf) {
+    const cputype = head[0] === 0xcf ? head.readUInt32LE(4) : head.readUInt32BE(4);
+    return { format: 'macho', arch: { 0x01000007: 'x86_64', 0x0100000c: 'aarch64' }[cputype] ?? 'other' };
+  }
+  if (head.readUInt32BE(0) === 0xcafebabe) return { format: 'macho', arch: 'universal' };
+  if (head[0] === 0x4d && head[1] === 0x5a && length >= 0x40) {
+    const pe = head.readUInt32LE(0x3c);
+    if (pe + 6 > length || head.toString('latin1', pe, pe + 4) !== 'PE\0\0') return null;
+    const machine = head.readUInt16LE(pe + 4);
+    return { format: 'pe', arch: { 0x8664: 'x86_64', 0xaa64: 'aarch64' }[machine] ?? 'other' };
+  }
+  return null;
+}
+
+/** What `triple` runs, in the terms of `binaryKind`. */
+function targetKind(triple) {
+  const arch = triple.startsWith('x86_64-') ? 'x86_64' : triple.startsWith('aarch64-') ? 'aarch64' : null;
+  const format = triple.includes('-apple-') ? 'macho' : triple.includes('-windows-') ? 'pe' : 'elf';
+  return { format, arch };
+}
+
+function isExecutable(file) {
+  const mode = statSync(file).mode;
+  return process.platform === 'win32' || (mode & 0o111) !== 0;
+}
+
+/**
+ * Why `file` is not a runtime for `triple`, or null. A recorded entry (from
+ * versions.json) adds the checksum and size to the check.
+ */
+async function problemWith(file, triple, recorded) {
+  if (!existsSync(file)) return 'missing';
+  if (!statSync(file).isFile()) return 'not a file';
+  const kind = binaryKind(file);
+  if (!kind) return 'not an executable file (the download may be incomplete)';
+  const wanted = targetKind(triple);
+  if (kind.format !== wanted.format) {
+    return `built for another operating system (${kind.format}, not ${wanted.format})`;
+  }
+  if (wanted.arch && kind.arch !== wanted.arch && !(kind.format === 'macho' && kind.arch === 'universal')) {
+    return `built for another processor (${kind.arch}, not ${wanted.arch})`;
+  }
+  if (!isExecutable(file)) return 'not executable (chmod +x)';
+  if (recorded?.sha256) {
+    if (statSync(file).size !== recorded.size) return `size differs from the fetched ${recorded.version}`;
+    if ((await digestStream(file, 'sha256', 'hex')) !== recorded.sha256) {
+      return `checksum differs from the fetched ${recorded.version}`;
+    }
+  }
+  return null;
+}
+
 function readVersions() {
   try {
     return JSON.parse(readFileSync(versionsFile, 'utf8'));
@@ -115,9 +192,32 @@ function readVersions() {
   }
 }
 
-function install(extracted, destination) {
+/** A recorded runtime: `{ version, sha256, size }`, or an older bare version string. */
+function recordedEntry(versions, triple, name) {
+  const entry = versions[triple]?.[name];
+  if (typeof entry === 'string') return { version: entry };
+  return entry && typeof entry === 'object' ? entry : undefined;
+}
+
+async function install(extracted, destination, triple) {
   copyFileSync(extracted, destination);
   chmodSync(destination, 0o755);
+  const problem = await problemWith(destination, triple);
+  if (problem) {
+    rmSync(destination, { force: true });
+    fail(`${destination} is ${problem}`);
+  }
+  return { sha256: await digestStream(destination, 'sha256', 'hex'), size: statSync(destination).size };
+}
+
+/** Whether the recorded runtime is present, intact and for the target. */
+async function upToDate(name, destination, triple, recorded, version) {
+  if (recorded?.version !== version) return false;
+  // Recorded before checksums were kept: fetch again so they are.
+  if (!recorded.sha256) return false;
+  if ((await problemWith(destination, triple, recorded)) !== null) return false;
+  console.log(`runtimes: ${name} ${version} is up to date`);
+  return true;
 }
 
 /** Finds `name` anywhere under `dir` (archive layouts differ by platform). */
@@ -138,10 +238,7 @@ async function fetchCodex(triple, platform, exe, recorded, work) {
   const latest = getJson(`${CODEX_REGISTRY}/latest`);
   const version = latest.version;
   const destination = join(outDir, `codex-${triple}${exe}`);
-  if (recorded === version && existsSync(destination)) {
-    console.log(`runtimes: Codex ${version} is up to date`);
-    return version;
-  }
+  if (await upToDate('Codex', destination, triple, recorded, version)) return recorded;
   const alias = latest.optionalDependencies?.[`@openai/codex-${platform}`];
   const spec = alias?.startsWith('npm:@openai/codex@') ? alias.slice('npm:@openai/codex@'.length) : null;
   if (!spec) fail(`Codex ${version} has no package for ${platform}`);
@@ -161,9 +258,9 @@ async function fetchCodex(triple, platform, exe, recorded, work) {
     .find((line) => new RegExp(`^package/vendor/[^/]+/bin/codex${exe.replace('.', '\\.')}$`).test(line));
   if (!member) fail('the Codex package does not contain the codex executable');
   run('tar', ['-xzf', archive, '-C', work, member]);
-  install(join(work, member), destination);
+  const kept = await install(join(work, member), destination, triple);
   console.log(`runtimes: Codex ${version} → ${destination}`);
-  return version;
+  return { version, ...kept };
 }
 
 async function fetchAnt(triple, [os, arch], exe, recorded, work) {
@@ -171,10 +268,7 @@ async function fetchAnt(triple, [os, arch], exe, recorded, work) {
   const version = /^\s*version\s+"([^"]+)"/m.exec(cask)?.[1];
   if (!version) fail('could not read the ant version from the Homebrew cask');
   const destination = join(outDir, `ant-${triple}${exe}`);
-  if (recorded === version && existsSync(destination)) {
-    console.log(`runtimes: ant ${version} is up to date`);
-    return version;
-  }
+  if (await upToDate('ant', destination, triple, recorded, version)) return recorded;
 
   const fileName = `ant_${version}_${os}_${arch}.${os === 'linux' ? 'tar.gz' : 'zip'}`;
   let sha256 = null;
@@ -214,9 +308,28 @@ async function fetchAnt(triple, [os, arch], exe, recorded, work) {
   }
   const binary = findFile(unpacked, `ant${exe}`);
   if (!binary) fail('the ant archive does not contain the ant executable');
-  install(binary, destination);
+  const kept = await install(binary, destination, triple);
   console.log(`runtimes: ant ${version} → ${destination}`);
-  return version;
+  return { version, ...kept };
+}
+
+/** `--check`: reports on the fetched runtimes for `triple` without any download. */
+async function check(triple, exe, versions) {
+  let problems = 0;
+  for (const name of ['codex', 'ant']) {
+    const file = join(outDir, `${name}-${triple}${exe}`);
+    const recorded = recordedEntry(versions, triple, name);
+    let problem = await problemWith(file, triple, recorded);
+    if (!problem && !recorded?.sha256) problem = 'not recorded in versions.json (fetch it again)';
+    if (problem) {
+      problems += 1;
+      console.error(`runtimes: ${file}: ${problem}`);
+    } else {
+      const size = statSync(file).size;
+      console.log(`runtimes: ${name} ${recorded.version} ok (${(size / 1024 / 1024).toFixed(0)} MB, sha256 ${recorded.sha256.slice(0, 12)}…)`);
+    }
+  }
+  if (problems) fail(`${problems} runtime(s) cannot be bundled for ${triple}`);
 }
 
 const triple = targetTriple();
@@ -229,10 +342,13 @@ const exe = triple.includes('windows') ? '.exe' : '';
 
 mkdirSync(outDir, { recursive: true });
 const versions = readVersions();
-const recorded = versions[triple] ?? {};
+if (process.argv.includes('--check')) {
+  await check(triple, exe, versions);
+  process.exit(0);
+}
 const work = mkdtempSync(join(tmpdir(), 'rema-runtimes-'));
-const record = (name, version) => {
-  versions[triple] = { ...versions[triple], [name]: version };
+const record = (name, entry) => {
+  versions[triple] = { ...versions[triple], [name]: entry };
   writeFileSync(versionsFile, `${JSON.stringify(versions, null, 2)}\n`);
 };
 try {
@@ -240,8 +356,8 @@ try {
   const antWork = join(work, 'ant');
   mkdirSync(codexWork);
   mkdirSync(antWork);
-  record('codex', await fetchCodex(triple, platform.codex, exe, recorded.codex, codexWork));
-  record('ant', await fetchAnt(triple, platform.ant, exe, recorded.ant, antWork));
+  record('codex', await fetchCodex(triple, platform.codex, exe, recordedEntry(versions, triple, 'codex'), codexWork));
+  record('ant', await fetchAnt(triple, platform.ant, exe, recordedEntry(versions, triple, 'ant'), antWork));
   for (const name of [`codex-${triple}${exe}`, `ant-${triple}${exe}`]) {
     const size = statSync(join(outDir, name)).size;
     console.log(`runtimes: ${name} ${(size / 1024 / 1024).toFixed(0)} MB`);

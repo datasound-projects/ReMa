@@ -1,5 +1,10 @@
 # ReMa: unresolved issues after the connector, search and MCP pass
 
+> Third pass (2026-09-28, later the same day): every item below was
+> worked on; the outcome per ID, the evidence and what remains for the
+> owner are in [fixes.md](fixes.md). This file is kept as the record of
+> the state before that pass.
+
 A handoff for the next agent. It lists every item from the last
 verification pass ([verification.md](verification.md)) that was not
 solved. For each one it says why it was not solved, what is already built,
