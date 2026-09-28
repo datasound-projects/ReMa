@@ -158,6 +158,7 @@ pub fn builder() -> Builder<tauri::Wry> {
             // Web search service
             commands::websearch::career_search_status,
             commands::websearch::check_career_search,
+            commands::websearch::set_answer_mode,
             commands::websearch::web_search_settings,
             commands::websearch::save_web_search_settings,
             commands::websearch::test_web_search,

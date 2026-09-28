@@ -35,6 +35,7 @@ pub mod evidence;
 pub mod extract;
 pub mod health;
 pub mod jobs;
+pub mod mode;
 pub mod plan;
 pub mod registry;
 pub mod requirement;

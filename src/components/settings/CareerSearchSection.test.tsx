@@ -10,6 +10,7 @@ import { CareerSearchSection } from './CareerSearchSection';
 const mocks = vi.hoisted(() => ({
   careerSearchStatus: vi.fn(),
   checkCareerSearch: vi.fn(),
+  setAnswerMode: vi.fn(),
   webSearchSettings: vi.fn(),
   saveWebSearchSettings: vi.fn(),
   testWebSearch: vi.fn(),
@@ -18,6 +19,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock('../../services/careerSearchService', () => ({
   careerSearchStatus: mocks.careerSearchStatus,
   checkCareerSearch: mocks.checkCareerSearch,
+  setAnswerMode: mocks.setAnswerMode,
 }));
 vi.mock('../../services/webSearchService', () => ({
   webSearchSettings: mocks.webSearchSettings,
@@ -64,6 +66,7 @@ const status: CareerSearchStatus = {
     },
   ],
   checked: [],
+  answerMode: 'model_search',
 };
 
 beforeEach(() => {
@@ -89,6 +92,7 @@ describe('Settings → Career Search', () => {
   it('shows what the selected model’s runtime can do, not a setting', async () => {
     mocks.careerSearchStatus.mockResolvedValue({
       ...status,
+      answerMode: 'verified',
       model: 'Claude Sonnet 5',
       modelSearch: 'Anthropic web search',
       capabilities: {
@@ -133,8 +137,22 @@ describe('Settings → Career Search', () => {
     });
     render(<CareerSearchSection />);
     expect(
-      await screen.findByText('Codex (ChatGPT account) · own web search (live) · kept to career sites'),
+      await screen.findByText('Codex (ChatGPT account) · own web search (live)'),
     ).toBeTruthy();
+  });
+
+  it('lets chats search like ChatGPT and Claude, or with ReMa verified search', async () => {
+    mocks.setAnswerMode.mockResolvedValue({ ...status, answerMode: 'verified' });
+    render(<CareerSearchSection />);
+    const own = (await screen.findByRole('radio', { name: /The model’s own web search/ })) as HTMLInputElement;
+    const verified = screen.getByRole('radio', { name: /ReMa verified search/ }) as HTMLInputElement;
+    expect(own.checked).toBe(true);
+    expect(verified.checked).toBe(false);
+
+    fireEvent.click(verified);
+    await waitFor(() => expect(mocks.setAnswerMode).toHaveBeenCalledWith('verified'));
+    await waitFor(() => expect(verified.checked).toBe(true));
+    expect(own.checked).toBe(false);
   });
 
   it('checks the sources on demand and shows recent searches', async () => {

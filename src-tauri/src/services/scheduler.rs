@@ -344,8 +344,16 @@ fn record_outputs(
             );
         }
     }
-    // Job listings in a prompt task's result become available to Analytics.
-    if task.kind == TaskKind::Prompt {
+    // Job listings in a prompt task's result become available to Analytics
+    // when the run searched for them (a list from the model's memory is not
+    // stored).
+    let searched = || {
+        runs::get(state, run_id)
+            .ok()
+            .and_then(|run| run.context)
+            .is_some_and(|c| c.searches > 0 || !c.sources_consulted.is_empty())
+    };
+    if task.kind == TaskKind::Prompt && searched() {
         match crate::analytics::ingest::from_task_result(state, run_id) {
             Ok(Some(ingested)) => activity.output(
                 RunOutputKind::JobSearchResults,
@@ -704,6 +712,9 @@ async fn run_task(
         TaskKind::Prompt => crate::business::service::intent(state, &task.prompt),
         _ => None,
     };
+    // A model with a web search of its own searches and writes the result
+    // itself, as in chat; ReMa's search-first runs are for the others.
+    let own_search = chat::answers_with_own_search(state, &endpoint, &task.model);
     match task.kind {
         TaskKind::Prompt
             if matches!(
@@ -728,7 +739,9 @@ async fn run_task(
             )
             .await
         }
-        TaskKind::Prompt if crate::network::planner::detect(&task.prompt).is_some() => {
+        TaskKind::Prompt
+            if !own_search && crate::network::planner::detect(&task.prompt).is_some() =>
+        {
             // Company, people and hiring research (e.g. tracking a company):
             // Network Connect researches first, as in chat (NC §42).
             use crate::network::{
@@ -892,7 +905,7 @@ async fn run_task(
                 report: None,
             })
         }
-        TaskKind::Prompt if retrieval::detect(&task.prompt).is_some() => {
+        TaskKind::Prompt if !own_search && retrieval::detect(&task.prompt).is_some() => {
             // A job search: search and validate first, as in chat.
             let query = retrieval::detect(&task.prompt).unwrap_or_default();
             let mut stages = Vec::new();
@@ -1018,7 +1031,7 @@ async fn run_task(
             })
         }
         TaskKind::Prompt
-            if {
+            if !own_search && {
                 let plan = career_search::plan::plan(&task.prompt);
                 plan.requirement == Requirement::Required && plan.scopes.any()
             } =>
@@ -1199,10 +1212,15 @@ async fn run_task(
             let tools = offer_tools.then(|| career_tools.clone());
             recorder.update_context(|c| c.web_search = web || offer_tools);
             let plan = career_search::plan::plan(&task.prompt);
-            let hints = if plan.scopes.any() {
+            // As in chat: kept to career sites unless the model searches on
+            // its own; the place of the request either way.
+            let hints = if plan.scopes.any() && !own_search {
                 career_search::plan::hints(&plan, &[])
             } else {
-                career_search::plan::Hints::default()
+                career_search::plan::Hints {
+                    location: plan.place.as_ref().map(|p| p.approx()),
+                    ..Default::default()
+                }
             };
             let mut system = system;
             if tools.is_some() {
@@ -1493,6 +1511,8 @@ mod tests {
         );
         providers::connect(&state, ProviderKind::Anthropic, "k")
             .await
+            .unwrap();
+        crate::career_search::mode::set(&state, crate::career_search::mode::AnswerMode::Verified)
             .unwrap();
         let mut input = every_4_hours(None);
         input.name = "Track Nordlicht AI".into();
@@ -2025,6 +2045,8 @@ mod tests {
         let site = crate::career_search::tests::sources().await;
         // The model never searches; ReMa's own job sources answer.
         let mut state = state(FakeLanguageModel::replying(&["Donau Data fits best."])).await;
+        crate::career_search::mode::set(&state, crate::career_search::mode::AnswerMode::Verified)
+            .unwrap();
         state.rema_mcp = crate::rema_mcp::RemaMcp::with(
             crate::rema_mcp::adapters::Apis::local(&site.base_url),
             true,
@@ -2073,6 +2095,8 @@ mod tests {
             "Anna Beispiel leads talent acquisition [2].",
         ]))
         .await;
+        crate::career_search::mode::set(&state, crate::career_search::mode::AnswerMode::Verified)
+            .unwrap();
         state.rema_mcp = crate::rema_mcp::RemaMcp::with(
             crate::rema_mcp::adapters::Apis::local(&site.base_url),
             true,

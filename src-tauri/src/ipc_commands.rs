@@ -123,6 +123,7 @@ pub const APP_COMMANDS: &[&str] = &[
     // Web search service
     "career_search_status",
     "check_career_search",
+    "set_answer_mode",
     "web_search_settings",
     "save_web_search_settings",
     "test_web_search",

@@ -653,7 +653,33 @@ fn preferences_round_trip_and_validate() {
 const TABLE_ANSWER: &str = "Here are matching roles:\n\n| Company | Role | Location | Work mode | Salary | Posted | Key skills | Link |\n|---|---|---|---|---|---|---|---|\n| Company A | AI Engineer | Vienna, Austria | Remote | €100k | 2 days ago | Python, K8s | https://boards.greenhouse.io/companya/jobs/777001 |\n| Globex | ML Engineer | Berlin | Hybrid | — | — | PyTorch | https://globex.example/careers/ml-888002 |\n";
 
 async fn connected(reply: &[&str]) -> AppState {
-    let state = new_state(reply);
+    connected_to(FakeLanguageModel::replying(reply)).await
+}
+
+/// A model that searches the web before it answers.
+fn searching(reply: &[&str]) -> FakeLanguageModel {
+    use crate::llm::{WebEvent, WebKind, WebSource};
+    FakeLanguageModel::replying(reply).searching(vec![
+        WebEvent::Started {
+            id: "s1".into(),
+            kind: WebKind::Search,
+            target: "AI Engineer jobs Austria".into(),
+        },
+        WebEvent::Finished {
+            id: "s1".into(),
+            kind: WebKind::Search,
+            target: "AI Engineer jobs Austria".into(),
+            sources: vec![WebSource {
+                title: "AI Engineer".into(),
+                url: "https://boards.greenhouse.io/companya/jobs/777001".into(),
+            }],
+            error: None,
+        },
+    ])
+}
+
+async fn connected_to(llm: FakeLanguageModel) -> AppState {
+    let state = testing::state(Arc::new(llm)).0;
     providers::connect(&state, ProviderKind::Anthropic, "k")
         .await
         .unwrap();
@@ -670,7 +696,7 @@ async fn connected(reply: &[&str]) -> AppState {
 
 #[tokio::test]
 async fn chat_answers_with_job_tables_are_ingested_automatically() {
-    let state = connected(&[TABLE_ANSWER]).await;
+    let state = connected_to(searching(&[TABLE_ANSWER])).await;
     let sent = chat::send_message(
         &state,
         SendMessageInput {
@@ -707,8 +733,80 @@ async fn chat_answers_with_job_tables_are_ingested_automatically() {
 }
 
 #[tokio::test]
-async fn scheduled_task_results_are_ingested_automatically() {
+async fn job_tables_the_model_did_not_look_up_stay_out_of_analytics() {
+    // The model lists jobs without searching (from its memory).
     let state = connected(&[TABLE_ANSWER]).await;
+    let sent = chat::send_message(
+        &state,
+        SendMessageInput {
+            conversation_id: None,
+            content: "Compare these AI roles in Austria".into(),
+            model: ModelRef {
+                provider_id: "anthropic".into(),
+                model_id: "model-a".into(),
+            },
+            use_profile: false,
+            agent_ids: Vec::new(),
+            mcp_server_ids: Vec::new(),
+            connectors: None,
+        },
+    )
+    .await
+    .unwrap();
+    for _ in 0..200 {
+        let message = state
+            .db
+            .call(|c| conversations::get_message(c, sent.assistant_message.id))
+            .unwrap();
+        if message.status != MessageStatus::Streaming {
+            assert!(message.content.contains("| Company A |"));
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(runs(&state).unwrap().is_empty());
+
+    // The same list from a scheduled task that did not search.
+    let task = tasks::create(
+        &state,
+        TaskInput {
+            name: "Weekly AI jobs".into(),
+            kind: TaskKind::Prompt,
+            use_profile: false,
+            prompt: "Weekly job table of remote AI roles".into(),
+            model: ModelRef {
+                provider_id: "anthropic".into(),
+                model_id: "model-a".into(),
+            },
+            timezone: "UTC".into(),
+            start_date: jiff::Zoned::now().date().tomorrow().unwrap().to_string(),
+            start_time: "08:00".into(),
+            schedule: Schedule::Interval {
+                every: 24,
+                unit: IntervalUnit::Hours,
+            },
+            end: EndCondition::Never,
+        },
+    )
+    .await
+    .unwrap();
+    let row = state.db.call(|c| task_repo::get(c, task.id)).unwrap();
+    let run = scheduler::run_once(
+        &state,
+        &row,
+        ExecutionTrigger::Manual,
+        None,
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert!(run.result.unwrap().contains("| Company A |"));
+    assert!(runs(&state).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn scheduled_task_results_are_ingested_automatically() {
+    let state = connected_to(searching(&[TABLE_ANSWER])).await;
     let task = tasks::create(
         &state,
         TaskInput {
@@ -1002,8 +1100,11 @@ async fn scheduled_job_searches_search_first_and_fail_without_a_search() {
         },
         end: EndCondition::Never,
     };
-    // The model never searches: the run fails instead of listing jobs.
+    // ReMa's verified search: the model never searches, so the run fails
+    // instead of listing jobs.
     let state = connected(&[TABLE_ANSWER]).await;
+    crate::career_search::mode::set(&state, crate::career_search::mode::AnswerMode::Verified)
+        .unwrap();
     let task = tasks::create(&state, input("Find new AI Engineer jobs in Vienna"))
         .await
         .unwrap();

@@ -72,6 +72,8 @@ pub struct CareerSearchStatus {
     pub recent: Vec<RouteReport>,
     /// Filled by a health check.
     pub checked: Vec<CheckResult>,
+    /// How chats answer questions that need the web.
+    pub answer_mode: super::mode::AnswerMode,
 }
 
 /// The default chat model, its name and endpoint.
@@ -116,8 +118,8 @@ fn model_route(endpoint: Option<&Endpoint>, caps: Option<&RuntimeCapabilities>) 
                     caps.and_then(|c| c.note.clone()).unwrap_or_default()
                 )
             } else {
-                "The selected model's own web search, live, kept to career sites and the place \
-                 you ask about."
+                "The selected model's own web search, live, localized to the place you ask \
+                 about."
                     .into()
             },
             available: true,
@@ -200,6 +202,7 @@ pub async fn status(state: &AppState) -> AppResult<CareerSearchStatus> {
             .collect(),
         recent: state.career.reports().into_iter().take(5).collect(),
         checked: Vec::new(),
+        answer_mode: super::mode::get(state),
     })
 }
 

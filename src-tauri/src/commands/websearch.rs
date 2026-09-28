@@ -1,7 +1,10 @@
 use tauri::State;
 
 use crate::{
-    career_search::status::{self, CareerSearchStatus},
+    career_search::{
+        mode::{self, AnswerMode},
+        status::{self, CareerSearchStatus},
+    },
     error::AppResult,
     services::websearch::{self, WebSearchInput, WebSearchSettings, WebSearchTest},
     state::AppState,
@@ -11,6 +14,18 @@ use crate::{
 #[tauri::command]
 #[specta::specta]
 pub async fn career_search_status(state: State<'_, AppState>) -> AppResult<CareerSearchStatus> {
+    status::status(&state).await
+}
+
+/// How chats answer questions that need the web: the model's own search
+/// (like ChatGPT and Claude) or ReMa's verified search.
+#[tauri::command]
+#[specta::specta]
+pub async fn set_answer_mode(
+    state: State<'_, AppState>,
+    mode: AnswerMode,
+) -> AppResult<CareerSearchStatus> {
+    mode::set(&state, mode)?;
     status::status(&state).await
 }
 

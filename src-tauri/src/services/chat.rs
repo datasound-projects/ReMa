@@ -513,6 +513,24 @@ pub fn web_switches_off_between_rounds(endpoint: &Endpoint) -> bool {
     }
 }
 
+/// Whether the model answers questions that need the web with its own
+/// search, as in ChatGPT and Claude: its provider hosts a search the model
+/// can use next to ReMa's tools (Gemini from 3 on), the provider has not
+/// refused it, the model takes tools, and Settings did not choose ReMa's
+/// verified search. Local models, Gemini before 3 and a provider that
+/// refused its search keep ReMa's search-first answers.
+pub fn answers_with_own_search(state: &AppState, endpoint: &Endpoint, model: &ModelRef) -> bool {
+    can_search_web(endpoint)
+        && (endpoint.kind != ProviderKind::Gemini
+            || crate::llm::gemini::combines_search_with_functions(&model.model_id))
+        && !cannot_use_tools(&format!("{}/{}", model.provider_id, model.model_id))
+        && state
+            .career
+            .refusal(&career_search::capabilities::provider_key(endpoint))
+            .is_none()
+        && career_search::mode::get(state) == career_search::mode::AnswerMode::ModelSearch
+}
+
 /// ReMa's tools that reach the web (career search and page reading,
 /// Network Connect and Business research).
 fn reaches_web(tool: &str) -> bool {
@@ -577,10 +595,12 @@ fn identity(now: i64) -> String {
 pub fn system_prompt(now: i64, web: bool) -> String {
     let web = if web {
         "You can search the web and open pages. Use them whenever an answer depends on \
-         current information, and always when asked for job openings: search job boards \
-         and company career pages, open the postings you list to check they are real and \
-         still open, and list only postings you actually found. Link each job to the \
-         posting itself, not to a search results page. Prefer recent postings; if you \
+         current information (job openings, companies, people in professional roles, \
+         salaries, the job market) instead of answering from memory, and always when asked \
+         for job openings: search job boards and company career pages, open the postings \
+         you list to check they are real and still open, and list only postings you \
+         actually found. Link each job to the posting itself, not to a search results \
+         page, and cite the pages other facts come from. Prefer recent postings; if you \
          cannot verify something, say so."
     } else {
         "You have no web access for this answer. Never present invented or remembered job \
@@ -1433,6 +1453,15 @@ pub(crate) fn rejects_tools(error: &AppError) -> bool {
         .any(|needle| lower.contains(needle))
 }
 
+/// Whether an answer looked something up: a web search or page, ReMa's
+/// search step, or a search tool (ReMa MCP, ReMa's career tools, the
+/// user's MCP servers). Connector reads do not count.
+fn looked_up(activity: &[ToolActivity]) -> bool {
+    activity
+        .iter()
+        .any(|a| a.status == ToolStatus::Completed && a.kind != ActivityKind::Connector)
+}
+
 /// Shows a notice with the answer (and keeps it with the message).
 fn record_notice(state: &AppState, conversation_id: i64, message_id: i64, notice: ToolActivity) {
     state
@@ -1567,6 +1596,12 @@ async fn generate(
         // before Network Connect and job search (B26).
         let business = crate::business::service::intent(state, &network_text)
             .filter(|_| !connector_tools::wants_private_data(&network_text));
+        // A model with a web search of its own searches and writes the
+        // answer itself, as in ChatGPT and Claude; ReMa's search-first
+        // answers are for the others, and for chats that read private data
+        // (their answers have no web access, ReMa's search does not see
+        // the chat).
+        let own_search = !private_history && answers_with_own_search(state, &endpoint, &model);
         if let Some(
             intent @ (crate::business::tools::Intent::Clients
             | crate::business::tools::Intent::Contracts),
@@ -1587,6 +1622,7 @@ async fn generate(
             .await;
         }
         if business.is_none()
+            && !own_search
             && !about_own_data(&network_text)
             && crate::network::planner::detect(&network_text).is_some()
         {
@@ -1607,7 +1643,7 @@ async fn generate(
         let job = turns
             .last()
             .filter(|t| t.role == MessageRole::User)
-            .filter(|_| business.is_none())
+            .filter(|_| business.is_none() && !own_search)
             .and_then(|t| listing_search(&t.content));
         if let Some(query) = job {
             return search_then_answer(
@@ -1635,6 +1671,7 @@ async fn generate(
         if plan.requirement == Requirement::Required
             && plan.scopes.any()
             && business.is_none()
+            && !own_search
             && !about_own_data(&latest_text)
         {
             return research_then_answer(
@@ -1656,9 +1693,18 @@ async fn generate(
         let mut notices = Vec::new();
         let model_key = format!("{}/{}", model.provider_id, model.model_id);
         let builtin = if crate::rema_mcp::is_enabled(state) && !cannot_use_tools(&model_key) {
-            match crate::rema_mcp::host::open(state, Some((&endpoint, &model.model_id)), &cancel)
+            // Next to the model's own search, ReMa MCP searches ReMa's
+            // sources, not the same provider a second time.
+            let discovery = if own_search {
+                crate::rema_mcp::engine::Discovery::beside_model_search(state).await
+            } else {
+                crate::rema_mcp::engine::Discovery::for_chat(
+                    state,
+                    Some((&endpoint, &model.model_id)),
+                )
                 .await
-            {
+            };
+            match crate::rema_mcp::host::open_with(state, discovery, &cancel).await {
                 Ok(hosted) => Some(hosted),
                 Err(error) => {
                     notices.push(ToolActivity {
@@ -1711,7 +1757,11 @@ async fn generate(
         // The connectors this chat has on (the composer's toggles; all
         // connected ones unless the user switched some off): the model
         // decides when to use them, like Claude's and ChatGPT's connectors.
-        let connector = if cannot_use_tools(&model_key) {
+        // Codex and Gemini keep their search for the whole answer, so there
+        // an answer gets either the connectors (a question about the user's
+        // own data) or the model's search, never both.
+        let exclusive = own_search && !web_switches_off_between_rounds(&endpoint);
+        let connector = if cannot_use_tools(&model_key) || (exclusive && !asks_private) {
             None
         } else {
             ConnectorTools::prepare(
@@ -1866,8 +1916,10 @@ async fn generate(
                 }),
             });
         }
-        // Career questions stay on career sites, at the request's place.
-        let hints = if plan.scopes.any() {
+        // Career questions stay on career sites, at the request's place; a
+        // model searching on its own, as in ChatGPT and Claude, is not kept
+        // to them.
+        let hints = if plan.scopes.any() && !own_search {
             career_search::plan::hints(&plan, &[])
         } else {
             career_search::plan::Hints {
@@ -2020,8 +2072,10 @@ async fn generate(
     });
     match saved {
         Ok(message) => {
-            // Job listings in the answer become available to Analytics.
-            if message.status == MessageStatus::Complete {
+            // Job listings in the answer become available to Analytics when
+            // the answer looked them up (a list from the model's memory is
+            // not stored).
+            if message.status == MessageStatus::Complete && looked_up(&message.activity) {
                 crate::analytics::ingest::after_chat_answer(state, message.id);
             }
             state.events.chat(ChatEvent::Finished { message })
@@ -2058,6 +2112,12 @@ mod tests {
             .await
             .unwrap();
         (state, events, llm)
+    }
+
+    /// ReMa's verified search (Settings → Career Search): ReMa searches
+    /// and checks first, the model writes about what was found.
+    fn verified(state: &AppState) {
+        career_search::mode::set(state, career_search::mode::AnswerMode::Verified).unwrap();
     }
 
     fn model() -> ModelRef {
@@ -2328,6 +2388,68 @@ mod tests {
             .tool_specs()
             .iter()
             .all(|s| !s.name.starts_with("applications_")));
+    }
+
+    #[tokio::test]
+    async fn codex_and_gemini_answers_get_either_connectors_or_their_search() {
+        // Gemini keeps its search for the whole answer (as does Codex), so
+        // ReMa cannot switch it off once a connector returned private data.
+        let mut fake = FakeLanguageModel::replying(&["ok"]);
+        fake.models = vec![crate::llm::fake::model("gemini-3-flash", true)];
+        let llm = Arc::new(fake);
+        let (state, _) = testing::state(llm.clone());
+        providers::connect(&state, ProviderKind::Gemini, "g-key")
+            .await
+            .unwrap();
+        state
+            .db
+            .call(|c| {
+                crate::db::jobs::insert_application(
+                    c,
+                    &crate::db::jobs::ApplicationRecord::new(
+                        "Acme",
+                        crate::models::jobs::ApplicationStatus::InProcess,
+                        now_ms(),
+                    ),
+                )
+            })
+            .unwrap();
+        let gemini = |content: &str| SendMessageInput {
+            model: ModelRef {
+                provider_id: "gemini".into(),
+                model_id: "gemini-3-flash".into(),
+            },
+            ..send(None, content)
+        };
+        for question in [
+            "What happened with my Acme application?",
+            "Find current AI Engineer jobs in Vienna",
+        ] {
+            let sent = send_message(&state, gemini(question)).await.unwrap();
+            let done = wait_until_done(&state, sent.assistant_message.id).await;
+            assert_eq!(done.status, MessageStatus::Complete, "{:?}", done.error);
+        }
+        let requests = llm.requests.lock().unwrap();
+        let tools = |i: usize| -> Vec<String> {
+            requests[i]
+                .1
+                .tool_specs()
+                .iter()
+                .map(|t| t.name.clone())
+                .collect()
+        };
+        // About the user's own data: the connectors, and no search of the
+        // provider's own next to them.
+        assert!(tools(0).contains(&connector_tools::APPLICATIONS_FIND_MATCH.to_string()));
+        assert!(requests[0].1.web.is_none());
+        // Anything else: the model's own search, without the connectors.
+        assert!(tools(1).iter().all(|n| !n.starts_with("applications_")));
+        assert!(requests[1]
+            .1
+            .web
+            .as_ref()
+            .is_some_and(|w| w.allowed_domains.is_empty()));
+        assert!(requests[1].1.private.is_none());
     }
 
     #[tokio::test]
@@ -2606,6 +2728,65 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn models_with_their_own_search_answer_like_chatgpt_and_claude() {
+            let llm = FakeLanguageModel::replying(&[
+                "Nordlicht AI is hiring a Senior AI Engineer in Vienna.",
+            ])
+            .searching(searched(&[
+                "https://jobs.example/ai-engineer-4411".to_string()
+            ]));
+            let (state, _, llm) = setup(llm).await;
+            let sent = send_message(&state, send(None, REQUEST)).await.unwrap();
+            let done = finished(&state, sent.assistant_message.id).await;
+            assert_eq!(done.status, MessageStatus::Complete, "{:?}", done.error);
+            // The model's own answer from its own searches, not ReMa's
+            // listings table with an assessment after it.
+            assert_eq!(
+                done.content,
+                "Nordlicht AI is hiring a Senior AI Engineer in Vienna."
+            );
+            assert!(done
+                .activity
+                .iter()
+                .all(|a| a.kind != ActivityKind::Retrieval));
+            assert!(done
+                .activity
+                .iter()
+                .any(|a| a.kind == ActivityKind::WebSearch && a.status == ToolStatus::Completed));
+            {
+                let requests = llm.requests.lock().unwrap();
+                assert_eq!(requests.len(), 1, "no search step before the answer");
+                let request = &requests[0].1;
+                let web = request.web.as_ref().expect("the provider's own search");
+                assert!(web.allowed_domains.is_empty(), "not kept to career sites");
+                assert!(web.location.is_some(), "localized to the place asked about");
+                // ReMa MCP's job tools sit next to the search.
+                assert!(request
+                    .tool_specs()
+                    .iter()
+                    .any(|t| t.name == "mcp_rema_search_jobs"));
+            }
+
+            // Current people and company questions, too.
+            let sent = send_message(
+                &state,
+                send(None, "Find current recruiters at Nordlicht AI."),
+            )
+            .await
+            .unwrap();
+            let done = finished(&state, sent.assistant_message.id).await;
+            assert_eq!(done.status, MessageStatus::Complete, "{:?}", done.error);
+            assert!(!done.content.starts_with("**Network Connect**"));
+            let requests = llm.requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            assert!(requests[1]
+                .1
+                .web
+                .as_ref()
+                .is_some_and(|w| w.allowed_domains.is_empty()));
+        }
+
+        #[tokio::test]
         async fn searches_validates_then_answers_about_what_it_found() {
             let site = job_site().await;
             let url = |path: &str| format!("{}{path}", site.base_url);
@@ -2622,6 +2803,7 @@ mod tests {
                 ]))
                 .then_reply(&postings);
             let (state, _, llm) = setup(llm).await;
+            verified(&state);
             let sent = send_message(&state, send(None, REQUEST)).await.unwrap();
             let done = finished(&state, sent.assistant_message.id).await;
 
@@ -2692,6 +2874,7 @@ mod tests {
         async fn a_model_that_does_not_search_gets_no_listings_through() {
             let llm = FakeLanguageModel::replying(&["Company A is hiring an AI Engineer."]);
             let (state, _, llm) = setup(llm).await;
+            verified(&state);
             let sent = send_message(&state, send(None, REQUEST)).await.unwrap();
             let done = finished(&state, sent.assistant_message.id).await;
 
@@ -2740,6 +2923,7 @@ mod tests {
             let sources = own_sources().await;
             let llm = FakeLanguageModel::replying(&["Donau Data looks good.", "#1 fits."]);
             let (mut state, _, llm) = setup(llm).await;
+            verified(&state);
             use_sources(&mut state, &sources.base_url);
             let sent = send_message(&state, send(None, REQUEST)).await.unwrap();
             let done = finished(&state, sent.assistant_message.id).await;
@@ -2782,6 +2966,7 @@ mod tests {
                 .then_reply(&postings)
                 .failing_first(vec![AppError::provider("Rate limit reached (429)")]);
             let (state, _, llm) = setup(llm).await;
+            verified(&state);
             let sent = send_message(&state, send(None, REQUEST)).await.unwrap();
             let done = finished(&state, sent.assistant_message.id).await;
 
@@ -2832,6 +3017,7 @@ mod tests {
             let llm =
                 FakeLanguageModel::replying(&["Unused."]).failing_first(vec![expired(), expired()]);
             let (mut state, _, llm) = setup(llm).await;
+            verified(&state);
             // ReMa's own sources are unreachable here; the service adds pages.
             use_sources(&mut state, "http://127.0.0.1:9");
             use_searxng(&state, &searxng.base_url);
@@ -2862,6 +3048,7 @@ mod tests {
             let llm = FakeLanguageModel::replying(&["From memory."])
                 .failing_first(vec![AppError::network("connection refused")]);
             let (state, _, llm) = setup(llm).await;
+            verified(&state);
             let sent = send_message(&state, send(None, REQUEST)).await.unwrap();
             let done = finished(&state, sent.assistant_message.id).await;
 
@@ -2889,6 +3076,7 @@ mod tests {
                 .searching(searched(&[]))
                 .then_reply(r#"{"postings":[]}"#);
             let (state, _, llm) = setup(llm).await;
+            verified(&state);
             let sent = send_message(&state, send(None, REQUEST)).await.unwrap();
             let done = finished(&state, sent.assistant_message.id).await;
             assert_eq!(done.status, MessageStatus::Complete);
@@ -3125,6 +3313,7 @@ mod tests {
             let site = crate::career_search::tests::sources().await;
             let llm = FakeLanguageModel::replying(&["Anna Beispiel heads talent acquisition [2]."]);
             let (mut state, _, llm) = setup(llm).await;
+            verified(&state);
             use_sources(&mut state, &site.base_url);
             let sent = send_message(
                 &state,
@@ -3215,6 +3404,7 @@ mod tests {
                 "Start with Lukas Gruber at Donau Data.",
             ]))
             .await;
+            verified(&state);
             use_sources(&mut state, &site.base_url);
             let sent = send_message(
                 &state,
@@ -3366,6 +3556,7 @@ mod tests {
                 "ReMa cannot see your connections.",
             ]))
             .await;
+            verified(&state);
             use_sources(&mut state, &site.base_url);
             let sent = send_message(&state, send(None, "Do I know anyone at Nordlicht AI?"))
                 .await
@@ -3384,6 +3575,7 @@ mod tests {
         async fn the_profile_is_used_only_when_the_chat_allows_it() {
             let site = crate::network::tests::sources().await;
             let (mut state, _, _) = setup(FakeLanguageModel::replying(&["ok"])).await;
+            verified(&state);
             use_sources(&mut state, &site.base_url);
             crate::services::profile::save(
                 &state,

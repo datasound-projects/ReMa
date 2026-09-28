@@ -5,6 +5,8 @@ import { useBackendEvent } from '../../hooks/useBackendEvent';
 import {
   careerSearchStatus,
   checkCareerSearch,
+  setAnswerMode,
+  type AnswerMode,
   type CareerSearchStatus,
   type RouteReport,
   type RuntimeCapabilities,
@@ -17,7 +19,22 @@ import { StatusIndicator } from '../ui/StatusIndicator';
 import { AdditionalSearchService } from './AdditionalSearchService';
 
 const HELP =
-  'When you ask for current jobs, companies, people or salaries, ReMa searches before it answers: its own job sources (employers’ job boards and public job boards), company websites and public data, and the selected model’s own web search when it has one. Local models get the same search as tools. Searches run in the background — no browser windows open — and a result is only shown with its source.';
+  'When you ask for current jobs, companies, people or salaries, a model with its own web search (OpenAI, ChatGPT, Claude, Gemini 3) searches the web itself and writes the answer, as it does in ChatGPT and Claude; ReMa’s job sources are there as ReMa MCP tools. Models without a search of their own get ReMa’s search: its job sources (employers’ job boards and public job boards), company websites and public data. With ReMa verified search, ReMa searches first for every model and opens each posting it lists. Searches run in the background — no browser windows open.';
+
+const MODES: { mode: AnswerMode; title: string; detail: string }[] = [
+  {
+    mode: 'model_search',
+    title: 'The model’s own web search',
+    detail:
+      'As in ChatGPT and Claude: the model searches the web and writes the answer. Models without a search of their own get ReMa’s search.',
+  },
+  {
+    mode: 'verified',
+    title: 'ReMa verified search',
+    detail:
+      'ReMa searches its job sources and the model’s search first, opens every posting it lists, and the model writes about what was found.',
+  },
+];
 
 function when(ms: number): string {
   return new Date(ms).toLocaleString(undefined, { hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'short' });
@@ -32,13 +49,16 @@ const RUNTIMES: Record<RuntimeCapabilities['runtime'], string> = {
   openai_compatible: 'Local or compatible server',
 };
 
-/** One line on what the selected model's runtime can do for search. */
-function describeCapabilities(c: RuntimeCapabilities): string {
+/**
+ * One line on what the selected model's runtime can do for search (kept to
+ * career sites only inside ReMa's verified search).
+ */
+function describeCapabilities(c: RuntimeCapabilities, mode: AnswerMode): string {
   const parts = [RUNTIMES[c.runtime]];
   if (c.nativeSearchAvailable) {
     parts.push(c.nativeDetail ? `own web search (${c.nativeDetail})` : 'own web search');
     if (c.nativeSearchLive && c.nativeDetail !== 'live') parts.push('live');
-    if (c.nativeDomainFiltering) parts.push('kept to career sites');
+    if (c.nativeDomainFiltering && mode === 'verified') parts.push('kept to career sites');
     if (c.nativeCitations) parts.push('reports its sources');
   } else {
     parts.push('ReMa searches for it');
@@ -65,8 +85,25 @@ export function CareerSearchSection() {
   const [checked, setChecked] = useState<CareerSearchStatus | null>(null);
   const [checking, setChecking] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [modeChoice, setModeChoice] = useState<AnswerMode | null>(null);
 
   const status = checked ?? (data.state.status === 'success' ? data.state.data : null);
+
+  const changeMode = async (mode: AnswerMode) => {
+    setSaving(true);
+    setError(null);
+    try {
+      await setAnswerMode(mode);
+      setModeChoice(mode);
+      setChecked((c) => (c ? { ...c, answerMode: mode } : c));
+      data.refresh();
+    } catch (err) {
+      setError(toApiError(err).message);
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const check = async () => {
     setChecking(true);
@@ -110,8 +147,28 @@ export function CareerSearchSection() {
               </p>
             )}
             {status.capabilities && (
-              <p className="career-search__capabilities">{describeCapabilities(status.capabilities)}</p>
+              <p className="career-search__capabilities">
+                {describeCapabilities(status.capabilities, modeChoice ?? status.answerMode)}
+              </p>
             )}
+            <fieldset className="career-search__mode">
+              <legend className="field__label">How chats search the web</legend>
+              {MODES.map(({ mode, title, detail }) => (
+                <label key={mode} className="radio career-search__mode-option">
+                  <input
+                    type="radio"
+                    name="answer-mode"
+                    checked={(modeChoice ?? status.answerMode) === mode}
+                    disabled={saving}
+                    onChange={() => void changeMode(mode)}
+                  />
+                  <span>
+                    <strong>{title}</strong>
+                    <span className="career-search__detail">{detail}</span>
+                  </span>
+                </label>
+              ))}
+            </fieldset>
             <ul className="career-search__routes" aria-label="Search routes">
               {status.routes.map((route) => (
                 <li key={route.name} className="career-search__route">

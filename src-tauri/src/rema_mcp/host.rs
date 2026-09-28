@@ -42,7 +42,15 @@ pub async fn open(
     endpoint: Option<(&Endpoint, &str)>,
     cancel: &CancellationToken,
 ) -> Result<Hosted, String> {
-    let discovery = Discovery::for_chat(state, endpoint).await;
+    open_with(state, Discovery::for_chat(state, endpoint).await, cancel).await
+}
+
+/// Opens a session that searches with `discovery`.
+pub async fn open_with(
+    state: &AppState,
+    discovery: Discovery,
+    cancel: &CancellationToken,
+) -> Result<Hosted, String> {
     let session = Session {
         state: state.clone(),
         discovery,

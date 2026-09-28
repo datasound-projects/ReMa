@@ -95,6 +95,22 @@ impl Discovery {
         }
     }
 
+    /// For a chat whose model searches the web itself in the same answer:
+    /// ReMa's sources and the search service, without a second search by
+    /// the same provider (the model runs that one, as in ChatGPT and Claude).
+    pub async fn beside_model_search(state: &AppState) -> Self {
+        let service = retrieval::backend::configured(state)
+            .await
+            .ok()
+            .flatten()
+            .map(Arc::new);
+        Self {
+            service,
+            provider: None,
+            open_web: false,
+        }
+    }
+
     /// "ReMa job sources + Brave Search + OpenAI web search".
     pub fn name(&self) -> Option<String> {
         let mut parts = vec![OWN_SOURCES.to_string()];

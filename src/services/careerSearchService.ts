@@ -1,7 +1,8 @@
-import { commands, type CareerSearchStatus } from '../generated/bindings';
+import { commands, type AnswerMode, type CareerSearchStatus } from '../generated/bindings';
 import { callBackend } from './ipc';
 
 export type {
+  AnswerMode,
   CareerSearchStatus,
   CheckResult,
   RouteReport,
@@ -18,4 +19,12 @@ export function careerSearchStatus(): Promise<CareerSearchStatus> {
 /** Checks that ReMa's own sources and company research answer now. */
 export function checkCareerSearch(): Promise<CareerSearchStatus> {
   return callBackend(() => commands.checkCareerSearch());
+}
+
+/**
+ * How chats answer questions that need the web: the model's own search (as
+ * in ChatGPT and Claude) or ReMa's verified search.
+ */
+export function setAnswerMode(mode: AnswerMode): Promise<CareerSearchStatus> {
+  return callBackend(() => commands.setAnswerMode(mode));
 }

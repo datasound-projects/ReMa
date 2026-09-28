@@ -242,6 +242,11 @@ export const commands = {
 	careerSearchStatus: () => __TAURI_INVOKE<CareerSearchStatus>("career_search_status"),
 	/**  Checks that ReMa's own sources and company research answer now. */
 	checkCareerSearch: () => __TAURI_INVOKE<CareerSearchStatus>("check_career_search"),
+	/**
+	 *  How chats answer questions that need the web: the model's own search
+	 *  (like ChatGPT and Claude) or ReMa's verified search.
+	 */
+	setAnswerMode: (mode: AnswerMode) => __TAURI_INVOKE<CareerSearchStatus>("set_answer_mode", { mode }),
 	/**  An optional search service (Advanced) that adds results. */
 	webSearchSettings: () => __TAURI_INVOKE<WebSearchSettings>("web_search_settings"),
 	/**  Saves the search service; the key goes to the OS credential store. */
@@ -504,6 +509,12 @@ export type AnalyticsQuery = {
 	/**  Keep only the first N jobs of the ranking. */
 	limit?: number | null,
 };
+
+export type AnswerMode = 
+/**  The model searches the web with its provider's own search. */
+"model_search" | 
+/**  ReMa searches and checks every posting first. */
+"verified";
 
 /**  Response of the `get_app_status` command. */
 export type AppStatus = {
@@ -854,6 +865,8 @@ export type CareerSearchStatus = {
 	recent: RouteReport[],
 	/**  Filled by a health check. */
 	checked: CheckResult[],
+	/**  How chats answer questions that need the web. */
+	answerMode: AnswerMode,
 };
 
 export type CategoryCount = {
