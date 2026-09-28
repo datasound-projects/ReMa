@@ -19,12 +19,15 @@ export function useAsyncData<T>(load: () => Promise<T>) {
 
   useEffect(() => {
     let active = true;
+    const started = performance.now();
 
     load()
       .then((data) => {
+        noteSlowLoad(load, started);
         if (active) setState({ status: 'success', data });
       })
       .catch((error: unknown) => {
+        noteSlowLoad(load, started);
         if (active) setState({ status: 'error', error: toApiError(error) });
       });
 
@@ -41,6 +44,18 @@ export function useAsyncData<T>(load: () => Promise<T>) {
   const refresh = useCallback(() => setVersion((n) => n + 1), []);
 
   return { state, retry, refresh };
+}
+
+/** A load that took longer than this is noted in the console (with its
+ * name, never its data), so a slow Settings section can be traced to the
+ * backend call behind it. */
+export const SLOW_LOAD_MS = 2_000;
+
+function noteSlowLoad(load: () => unknown, started: number) {
+  const took = performance.now() - started;
+  if (took > SLOW_LOAD_MS) {
+    console.warn(`Slow load: ${load.name || 'anonymous'} took ${Math.round(took)} ms`);
+  }
 }
 
 /** The loaded data, or `fallback` while loading or on error. */

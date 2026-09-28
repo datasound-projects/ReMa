@@ -144,8 +144,11 @@ pub struct WebToolChoice {
     pub search: &'static str,
     pub fetch: Option<&'static str>,
     /// `allowed_callers: ["direct"]`: the model calls search itself rather
-    /// than from code execution. Required for models without programmatic
-    /// tool calling on the dynamic-filtering versions.
+    /// than from code execution. The `_20260209` and later versions default
+    /// to a code execution caller (dynamic filtering), which provisions a
+    /// container and is not eligible for zero data retention; ReMa asks
+    /// for direct calls on every version that takes the field (server
+    /// tools documentation, "ZDR and allowed_callers").
     pub direct: bool,
 }
 
@@ -166,32 +169,31 @@ fn model_version(model_id: &str) -> Option<(String, u32, u32)> {
     Some((family, major, minor))
 }
 
-/// Models told (by a 400) to call web search directly, learned at run time
-/// so the next request is right the first time.
-static DIRECT_ONLY: std::sync::OnceLock<std::sync::Mutex<Vec<String>>> = std::sync::OnceLock::new();
-
-fn learned_direct(model_id: &str) -> bool {
-    DIRECT_ONLY
-        .get()
-        .is_some_and(|m| m.lock().unwrap().iter().any(|id| id == model_id))
-}
-
-/// Remembers that the model needs direct web search; false when it was
-/// already known (the request should not be retried again).
-pub fn learn_direct(model_id: &str) -> bool {
-    let mut known = DIRECT_ONLY.get_or_init(Default::default).lock().unwrap();
-    if known.iter().any(|id| id == model_id) {
-        return false;
-    }
-    known.push(model_id.to_string());
-    true
-}
-
-/// A 400 asking for `allowed_callers` (a model without programmatic tool
-/// calling given a dynamic-filtering web tool).
-pub fn asks_for_direct_callers(error: &AppError) -> bool {
+/// A 400 saying a thinking block is bound to a different conversation
+/// (preserved thinking: the system prompt, tools or earlier messages
+/// changed since it was written). The documented recovery is to ask the
+/// API to drop such blocks once, or else to leave every thinking block out.
+pub fn is_prefix_mismatch(error: &AppError) -> bool {
     matches!(error, AppError::Provider(message)
-        if message.contains("(400)") && message.to_lowercase().contains("allowed_callers"))
+        if message.contains("(400)")
+            && (message.contains("Invalid `signature`")
+                || message.contains("bound to a different conversation")
+                || message.contains("prefix_mismatch_behavior")))
+}
+
+/// Leaves every thinking block out of the steps sent back (the documented
+/// fallback when the API cannot be asked to drop the invalid ones).
+pub fn strip_thinking(rounds: &mut [ToolRound]) {
+    for round in rounds {
+        if let Some(Value::Array(blocks)) = round.content.as_mut() {
+            blocks.retain(|b| {
+                !matches!(
+                    b.get("type").and_then(Value::as_str),
+                    Some("thinking" | "redacted_thinking")
+                )
+            });
+        }
+    }
 }
 
 /// Whether the model thinks when a request does not mention thinking: the
@@ -222,10 +224,10 @@ fn max_tokens(model_id: &str, requested: Option<u32>) -> u32 {
     }
 }
 
-/// The web tools for a model. Dynamic filtering (the `_20260209` and
-/// later versions) is available on Claude 4.6 and later and the Mythos
-/// models; every other model gets basic search. Claude Haiku models have
-/// no programmatic tool calling, so they call search directly.
+/// The web tools for a model. The `_20260318` versions (response
+/// inclusion control) are available on Claude 4.6 and later and the Mythos
+/// models; every other model gets basic search, whose only caller is
+/// direct anyway.
 pub fn web_tool_choice(model_id: &str) -> WebToolChoice {
     use web_tool_versions::*;
     let basic = WebToolChoice {
@@ -248,7 +250,7 @@ pub fn web_tool_choice(model_id: &str) -> WebToolChoice {
     WebToolChoice {
         search: SEARCH_CURRENT,
         fetch: Some(FETCH_CURRENT),
-        direct: family == "haiku" || learned_direct(model_id),
+        direct: true,
     }
 }
 
@@ -406,9 +408,11 @@ pub fn request_body(model_id: &str, request: &ChatRequest) -> Value {
 }
 
 /// Web tools were switched off mid-answer on a model that thinks by
-/// default, so earlier steps carry thinking bound to the old tool list.
+/// default, so earlier steps carry thinking bound to the old tool list; or
+/// the API refused a request over such a block and the answer is retried
+/// once with the documented setting.
 fn drops_stale_thinking(model_id: &str, request: &ChatRequest) -> bool {
-    request.web_dropped && thinks_by_default(model_id)
+    request.drop_stale_thinking || (request.web_dropped && thinks_by_default(model_id))
 }
 
 /// Ids of the server tool calls whose result is in this answer (a deferred
@@ -832,7 +836,7 @@ mod tests {
             let choice = web_tool_choice(id);
             assert_eq!(choice.search, "web_search_20260318", "{id}");
             assert_eq!(choice.fetch, Some("web_fetch_20260318"), "{id}");
-            assert!(!choice.direct, "{id} has programmatic tool calling");
+            assert!(choice.direct, "{id}: searches are called directly");
         }
         for id in [
             "claude-haiku-4-5-20251001",
@@ -847,8 +851,8 @@ mod tests {
             assert_eq!(choice.search, "web_search_20250305", "{id}");
             assert_eq!(choice.fetch, None, "{id}");
         }
-        // A Haiku model with dynamic filtering has no programmatic tool
-        // calling: it calls search directly.
+        // Every version that takes `allowed_callers` is asked for direct
+        // calls: no code execution container for dynamic filtering.
         assert!(web_tool_choice("claude-haiku-5").direct);
         let request = ChatRequest {
             web: Some(crate::llm::WebSearch::default()),
@@ -865,17 +869,29 @@ mod tests {
                 "allowed_callers": ["direct"], "response_inclusion": "full"
             })
         );
-        // A model the API says must call search directly is remembered.
-        let asked = AppError::provider(
-            "Anthropic: tools.0: this model requires `allowed_callers: [\"direct\"]` (400)",
+        // The documented refusal of a thinking block written for another
+        // prefix, and the fallback that leaves thinking out.
+        let refused = AppError::provider(
+            "Anthropic: messages.1.content.0: Invalid `signature` in `thinking` block. The \
+             block is bound to a different conversation. (400)",
         );
-        assert!(asks_for_direct_callers(&asked));
-        assert!(!asks_for_direct_callers(&AppError::provider(
+        assert!(is_prefix_mismatch(&refused));
+        assert!(!is_prefix_mismatch(&AppError::provider(
             "Anthropic: web search is not enabled (400)"
         )));
-        assert!(learn_direct("claude-sonnet-6-test"));
-        assert!(!learn_direct("claude-sonnet-6-test"), "learned once");
-        assert!(web_tool_choice("claude-sonnet-6-test").direct);
+        let mut rounds = vec![ToolRound {
+            content: Some(json!([
+                { "type": "thinking", "thinking": "…", "signature": "sig" },
+                { "type": "redacted_thinking", "data": "…" },
+                { "type": "text", "text": "Checking." },
+            ])),
+            ..ToolRound::default()
+        }];
+        strip_thinking(&mut rounds);
+        assert_eq!(
+            rounds[0].content,
+            Some(json!([{ "type": "text", "text": "Checking." }]))
+        );
 
         // Career searches: the registry's sites and the request's place.
         let request = ChatRequest {
@@ -899,14 +915,15 @@ mod tests {
                 "type": "web_search_20260318", "name": "web_search", "max_uses": 8,
                 "allowed_domains": ["karriere.at", "linkedin.com"],
                 "user_location": { "type": "approximate", "city": "Vienna", "country": "AT", "timezone": "Europe/Vienna" },
-                "response_inclusion": "full"
+                "allowed_callers": ["direct"], "response_inclusion": "full"
             })
         );
         assert_eq!(
             tools[1],
             json!({
                 "type": "web_fetch_20260318", "name": "web_fetch", "max_uses": 8,
-                "max_content_tokens": 20_000, "response_inclusion": "full"
+                "max_content_tokens": 20_000, "allowed_callers": ["direct"],
+                "response_inclusion": "full"
             })
         );
         // Without a place in the request, no location is sent.

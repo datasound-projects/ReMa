@@ -43,6 +43,7 @@ const message = (id: number, conversationId: number, overrides: Partial<Message>
   error: null,
   model,
   activity: [],
+  context: null,
   createdAt: 0,
   ...overrides,
 });

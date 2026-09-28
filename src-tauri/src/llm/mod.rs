@@ -273,11 +273,13 @@ impl fmt::Debug for ToolBox {
 
 /// Why web search stopped in the middle of an answer.
 pub const PRIVATE_WEB_OFF: &str = "this answer read your mail, calendar or applications, so web \
-access is off for the rest of this chat. Start a new chat for answers from the web.";
+access is off for the rest of this answer. A later question can search the web again; that search \
+sees your messages, not what was read here.";
 
 /// Why a search asked for in the same step as a private-data tool did not
 /// run.
-pub const PRIVATE_WEB_NOT_RUN: &str = "Not run: this answer read your private data first.";
+pub const PRIVATE_WEB_NOT_RUN: &str =
+    "Not run: the answer went on to your private data, which has no web access.";
 
 /// Most model calls in one answer when tools are used. After this many
 /// rounds the model answers once more with tools switched off.
@@ -317,6 +319,42 @@ pub struct ChatRequest {
     /// step: later steps go out with a different tool list than the one the
     /// model's earlier steps were written with.
     pub web_dropped: bool,
+    /// Tools declared for this request that must not run in it: a call to
+    /// one ends the request with [`Finish::Deferred`] before any tool of
+    /// that step runs (the public research phase of an answer declares the
+    /// private-data tools so the model can ask for them, and runs them in a
+    /// separate request without web access).
+    pub deferred: Option<Deferred>,
+    /// The API refused a thinking block bound to an earlier prefix: the
+    /// request is retried once asking it to drop such blocks.
+    pub drop_stale_thinking: bool,
+    /// That was refused too: every thinking block was left out, for good.
+    pub thinking_stripped: bool,
+}
+
+/// Which tool names a request defers (see [`ChatRequest::deferred`]).
+#[derive(Clone)]
+pub struct Deferred(pub Arc<dyn Fn(&str) -> bool + Send + Sync>);
+
+impl Deferred {
+    pub fn new(is_deferred: impl Fn(&str) -> bool + Send + Sync + 'static) -> Self {
+        Self(Arc::new(is_deferred))
+    }
+
+    pub fn applies(&self, tool: &str) -> bool {
+        (self.0)(tool)
+    }
+
+    /// Whether any of the calls belongs to the deferred set.
+    pub fn any(&self, calls: &[ToolCall]) -> bool {
+        calls.iter().any(|c| self.applies(&c.name))
+    }
+}
+
+impl fmt::Debug for Deferred {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Deferred(..)")
+    }
 }
 
 impl ChatRequest {
@@ -358,6 +396,10 @@ impl ChatRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Finish {
     Complete,
+    /// The model asked for a tool that belongs to the answer's next phase
+    /// (a private-data tool during public research): nothing was run, and
+    /// the caller continues in a separate request.
+    Deferred,
     /// The model hit its output limit; the text is truncated.
     MaxTokens,
     /// The provider declined to answer (safety filters).
@@ -738,16 +780,23 @@ impl LanguageModel for ProviderLanguageModel {
                         .await
                 };
                 let step = match result {
-                    // Anthropic asks this model to call web search directly
-                    // (no programmatic tool calling): once, then remembered.
+                    // A thinking block of an earlier step no longer matches
+                    // its prefix (preserved thinking): the documented
+                    // recovery, once, is to have the API drop such blocks;
+                    // failing that, thinking is left out for good.
                     Err(error)
                         if endpoint.kind == ProviderKind::Anthropic
-                            && request.web.is_some()
-                            && request.rounds.is_empty()
+                            && !request.rounds.is_empty()
                             && round_text.is_empty()
-                            && anthropic::asks_for_direct_callers(&error)
-                            && anthropic::learn_direct(model_id) =>
+                            && anthropic::is_prefix_mismatch(&error)
+                            && !request.thinking_stripped =>
                     {
+                        if request.drop_stale_thinking {
+                            anthropic::strip_thinking(&mut request.rounds);
+                            request.thinking_stripped = true;
+                        } else {
+                            request.drop_stale_thinking = true;
+                        }
                         continue;
                     }
                     // The provider refused its web tools for this model or
@@ -794,6 +843,32 @@ impl LanguageModel for ProviderLanguageModel {
                 // The final round answers; a call it makes anyway is not run.
                 if step.calls.is_empty() || step.finish != Finish::Complete || request.tools_off {
                     return Ok(step.finish);
+                }
+                // A tool of the answer's next phase: nothing of this step
+                // runs (a search the model asked for next to it neither).
+                if request
+                    .deferred
+                    .as_ref()
+                    .is_some_and(|d| d.any(&step.calls))
+                {
+                    if let Some(web) = &request.web {
+                        request.rounds.push(ToolRound {
+                            text: round_text,
+                            calls: step.calls,
+                            content: step.content,
+                            ..ToolRound::default()
+                        });
+                        for (id, kind, target) in anthropic::unresolved_web_calls(&request.rounds) {
+                            web.report(WebEvent::Finished {
+                                id,
+                                kind,
+                                target,
+                                sources: Vec::new(),
+                                error: Some(PRIVATE_WEB_NOT_RUN.into()),
+                            });
+                        }
+                    }
+                    return Ok(Finish::Deferred);
                 }
                 let mut outputs = Vec::with_capacity(step.calls.len());
                 for call in &step.calls {

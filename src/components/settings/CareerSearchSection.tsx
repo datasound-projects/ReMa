@@ -1,5 +1,6 @@
 import { useCallback, useState } from 'react';
 
+import { LoadingRows } from '../ui/LoadingRows';
 import { useAsyncData } from '../../hooks/useAsyncData';
 import { useBackendEvent } from '../../hooks/useBackendEvent';
 import {
@@ -138,6 +139,7 @@ export function CareerSearchSection() {
             {data.state.error.message}
           </p>
         )}
+        {data.state.status === 'loading' && !status && <LoadingRows count={2} label="Loading career search…" />}
         {status && (
           <>
             {status.model && (

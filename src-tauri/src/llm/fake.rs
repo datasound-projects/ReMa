@@ -150,6 +150,21 @@ impl LanguageModel for FakeLanguageModel {
                     if cancel.is_cancelled() {
                         return Ok(Finish::Cancelled);
                     }
+                    // Like the provider loop: a deferred tool ends the
+                    // request before anything of its step runs.
+                    if request
+                        .deferred
+                        .as_ref()
+                        .is_some_and(|d| d.applies(&call.name))
+                    {
+                        let mut with_round = request.clone();
+                        with_round.rounds.push(round);
+                        self.requests
+                            .lock()
+                            .unwrap()
+                            .push((model_id.to_string(), with_round));
+                        return Ok(Finish::Deferred);
+                    }
                     let output = tools.executor.execute(call).await;
                     self.tool_outputs.lock().unwrap().push(output.clone());
                     round.calls.push(call.clone());

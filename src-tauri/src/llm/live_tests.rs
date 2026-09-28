@@ -7,10 +7,13 @@
 //!   cargo test --locked --lib live_ -- --ignored --nocapture --test-threads 1
 //! ```
 //!
-//! Optional: `REMA_LIVE_<PROVIDER>_MODEL` picks the model, and
-//! `REMA_LIVE_CODEX_HOME` points at a Codex home signed in with ChatGPT
-//! (ReMa's is `<ReMa data folder>/runtimes/codex`). A check whose key is
-//! not set prints `BLOCKED` and what it needs.
+//! `REMA_LIVE_<PROVIDER>_MODEL` names the exact model to use (required:
+//! nothing is picked from the provider's list), and `REMA_LIVE_CODEX_HOME`
+//! points at a Codex home signed in with ChatGPT (ReMa's is `<ReMa data
+//! folder>/runtimes/codex`). `REMA_SEARCH_PROOF_TARGET=<host>` chooses the
+//! search proof's question (see `career_search::proof::TARGETS`). A check
+//! whose key or model is not set prints `BLOCKED` and what it needs. Each
+//! run is one request per check with a 2,000-token answer.
 
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -42,27 +45,39 @@ fn api_endpoint(kind: ProviderKind, base_url: &str, key: String) -> Endpoint {
     }
 }
 
-/// The model to use: the variable's, or the provider's first model whose id
-/// contains `prefer`.
+/// The model to use: the variable's, checked against the provider's
+/// list. Never picked from the list by name, so a live run costs exactly
+/// the model the person meant (a first substring match could be an old,
+/// preview or expensive model).
 async fn pick_model(
     llm: &ProviderLanguageModel,
     endpoint: &Endpoint,
     var: &str,
-    prefer: &str,
-) -> String {
-    if let Some(model) = key(var) {
-        return model;
-    }
+    example: &str,
+) -> Option<String> {
+    let Some(model) = key(var) else {
+        blocked(
+            "the model choice",
+            &format!("{var} to the exact model id (for example one containing \"{example}\")"),
+        );
+        return None;
+    };
     let models = llm
         .list_models(endpoint)
         .await
         .expect("list the provider's models");
-    models
-        .iter()
-        .find(|m| m.id.contains(prefer))
-        .or_else(|| models.first())
-        .map(|m| m.id.clone())
-        .expect("the provider lists a model")
+    if !models.is_empty() && !models.iter().any(|m| m.id == model) {
+        println!(
+            "BLOCKED {var}={model}: the provider does not list that model (it lists {}).",
+            models
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        return None;
+    }
+    Some(model)
 }
 
 async fn prove_native_search(
@@ -72,13 +87,43 @@ async fn prove_native_search(
     llm: ProviderLanguageModel,
 ) {
     let fetcher = crate::rema_mcp::fetch::Fetcher::new("0.1.0", false);
-    let evidence = proof::prove(&llm, &fetcher, &endpoint, &model, CancellationToken::new())
+    let target = proof::target();
+    // The capability: the provider must search. Then the choice: left to
+    // itself, does the model search for a question that needs the web?
+    // The second is reported, not required (it is the model's judgement).
+    for (mode, label) in [
+        (proof::Mode::Forced, "search required"),
+        (proof::Mode::ByChoice, "search by the model's choice"),
+    ] {
+        let evidence = proof::prove_with(
+            &llm,
+            &fetcher,
+            &endpoint,
+            &model,
+            target,
+            mode,
+            CancellationToken::new(),
+        )
         .await
-        .unwrap_or_else(|e| panic!("{check} ({model}) failed: {e}"));
-    println!("{check} ({model}): {evidence:#?}");
-    match evidence.verdict() {
-        Ok(summary) => println!("VERIFIED {check} ({model}): {summary}"),
-        Err(problem) => panic!("FAILED {check} ({model}): {problem}"),
+        .unwrap_or_else(|e| panic!("{check} ({model}, {label}) failed: {e}"));
+        println!("{check} ({model}, {label}): {evidence:#?}");
+        for line in evidence.evidence() {
+            println!(
+                "  {} {}: {}",
+                if line.ok { "ok " } else { "-- " },
+                line.name,
+                line.detail
+            );
+        }
+        match (mode, evidence.verdict()) {
+            (_, Ok(summary)) => println!("VERIFIED {check} ({model}, {label}): {summary}"),
+            (proof::Mode::Forced, Err(problem)) => {
+                panic!("FAILED {check} ({model}, {label}): {problem}")
+            }
+            (proof::Mode::ByChoice, Err(problem)) => {
+                println!("PARTIALLY VERIFIED {check} ({model}, {label}): {problem}")
+            }
+        }
     }
 }
 
@@ -90,7 +135,9 @@ async fn live_anthropic_native_search() {
     };
     let llm = ProviderLanguageModel::new(None);
     let endpoint = api_endpoint(ProviderKind::Anthropic, anthropic::DEFAULT_BASE_URL, key);
-    let model = pick_model(&llm, &endpoint, "REMA_LIVE_ANTHROPIC_MODEL", "opus").await;
+    let Some(model) = pick_model(&llm, &endpoint, "REMA_LIVE_ANTHROPIC_MODEL", "opus").await else {
+        return;
+    };
     prove_native_search("Anthropic native search", endpoint, model, llm).await;
 }
 
@@ -102,7 +149,9 @@ async fn live_openai_native_search() {
     };
     let llm = ProviderLanguageModel::new(None);
     let endpoint = api_endpoint(ProviderKind::Openai, openai::DEFAULT_BASE_URL, key);
-    let model = pick_model(&llm, &endpoint, "REMA_LIVE_OPENAI_MODEL", "gpt-5").await;
+    let Some(model) = pick_model(&llm, &endpoint, "REMA_LIVE_OPENAI_MODEL", "gpt-5").await else {
+        return;
+    };
     prove_native_search("OpenAI native search", endpoint, model, llm).await;
 }
 
@@ -114,7 +163,10 @@ async fn live_gemini_native_search() {
     };
     let llm = ProviderLanguageModel::new(None);
     let endpoint = api_endpoint(ProviderKind::Gemini, gemini::DEFAULT_BASE_URL, key);
-    let model = pick_model(&llm, &endpoint, "REMA_LIVE_GEMINI_MODEL", "gemini-3").await;
+    let Some(model) = pick_model(&llm, &endpoint, "REMA_LIVE_GEMINI_MODEL", "gemini-3").await
+    else {
+        return;
+    };
     prove_native_search("Gemini native search", endpoint, model, llm).await;
 }
 
@@ -142,7 +194,9 @@ async fn live_codex_native_search() {
         credential: None,
         server_web_search: false,
     };
-    let model = pick_model(&llm, &endpoint, "REMA_LIVE_CODEX_MODEL", "gpt-5").await;
+    let Some(model) = pick_model(&llm, &endpoint, "REMA_LIVE_CODEX_MODEL", "gpt-5").await else {
+        return;
+    };
     prove_native_search("ChatGPT (Codex) native search", endpoint, model, llm).await;
 }
 
@@ -210,7 +264,9 @@ async fn live_anthropic_mail_and_search_in_one_answer() {
     };
     let llm = ProviderLanguageModel::new(None);
     let endpoint = api_endpoint(ProviderKind::Anthropic, anthropic::DEFAULT_BASE_URL, key);
-    let model = pick_model(&llm, &endpoint, "REMA_LIVE_ANTHROPIC_MODEL", "opus").await;
+    let Some(model) = pick_model(&llm, &endpoint, "REMA_LIVE_ANTHROPIC_MODEL", "opus").await else {
+        return;
+    };
     let private = Arc::new(AtomicBool::new(false));
     let timeline = Arc::new(Timeline::default());
     let request = ChatRequest {

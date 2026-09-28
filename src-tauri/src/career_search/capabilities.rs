@@ -210,12 +210,7 @@ pub fn base(endpoint: &Endpoint, model_id: &str) -> RuntimeCapabilities {
             caps.native_search_live = true;
             caps.native_domain_filtering = true;
             caps.native_citations = true;
-            let choice = anthropic::web_tool_choice(model_id);
-            caps.native_detail = Some(if choice.direct {
-                format!("{} (direct)", choice.search)
-            } else {
-                choice.search.to_string()
-            });
+            caps.native_detail = Some(anthropic::web_tool_choice(model_id).search.to_string());
         }
         (ProviderKind::Gemini, _) => {
             caps.runtime = RuntimeType::GeminiApi;

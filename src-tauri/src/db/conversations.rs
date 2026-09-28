@@ -6,15 +6,18 @@ use super::{agents, mcp};
 use crate::{
     error::{AppError, AppResult},
     models::{
-        chat::{ChatConnector, Conversation, Message, MessageRole, MessageStatus, ToolActivity},
+        chat::{
+            AnswerContext, ChatConnector, Conversation, Message, MessageRole, MessageStatus,
+            ToolActivity,
+        },
         provider::ModelRef,
     },
 };
 
 const CONVERSATION_COLUMNS: &str =
     "id, title, provider_id, model_id, created_at, updated_at, profile_context, connectors";
-const MESSAGE_COLUMNS: &str =
-    "id, conversation_id, role, content, status, error, provider_id, model_id, created_at, activity";
+const MESSAGE_COLUMNS: &str = "id, conversation_id, role, content, status, error, provider_id, \
+     model_id, created_at, activity, context";
 
 fn conversation_from_row(row: &Row) -> rusqlite::Result<Conversation> {
     Ok(Conversation {
@@ -79,6 +82,7 @@ fn message_from_row(row: &Row) -> rusqlite::Result<Message> {
     let provider_id: Option<String> = row.get(6)?;
     let model_id: Option<String> = row.get(7)?;
     let activity: Option<String> = row.get(9)?;
+    let context: Option<String> = row.get(10)?;
     Ok(Message {
         id: row.get(0)?,
         conversation_id: row.get(1)?,
@@ -95,6 +99,7 @@ fn message_from_row(row: &Row) -> rusqlite::Result<Message> {
         activity: activity
             .and_then(|a| serde_json::from_str::<Vec<ToolActivity>>(&a).ok())
             .unwrap_or_default(),
+        context: context.as_deref().and_then(AnswerContext::parse),
         created_at: row.get(8)?,
     })
 }
@@ -228,6 +233,7 @@ pub fn finish_message(
     status: MessageStatus,
     error: Option<&str>,
     activity: &[ToolActivity],
+    context: Option<AnswerContext>,
 ) -> AppResult<Message> {
     let activity = if activity.is_empty() {
         None
@@ -235,8 +241,16 @@ pub fn finish_message(
         Some(serde_json::to_string(activity).map_err(|e| AppError::internal(e.to_string()))?)
     };
     conn.execute(
-        "UPDATE messages SET content = ?2, status = ?3, error = ?4, activity = ?5 WHERE id = ?1",
-        params![id, content, status.as_str(), error, activity],
+        "UPDATE messages SET content = ?2, status = ?3, error = ?4, activity = ?5, context = ?6
+         WHERE id = ?1",
+        params![
+            id,
+            content,
+            status.as_str(),
+            error,
+            activity,
+            context.map(|c| c.as_str())
+        ],
     )?;
     get_message(conn, id)
 }
@@ -245,7 +259,7 @@ pub fn finish_message(
 pub fn restart_message(conn: &Connection, id: i64, model: &ModelRef) -> AppResult<Message> {
     conn.execute(
         "UPDATE messages SET content = '', status = 'streaming', error = NULL, activity = NULL,
-             provider_id = ?2, model_id = ?3
+             context = NULL, provider_id = ?2, model_id = ?3
          WHERE id = ?1",
         params![id, model.provider_id, model.model_id],
     )?;
@@ -300,7 +314,15 @@ mod tests {
                     created_at: 1_001,
                 },
             )?;
-            finish_message(c, reply.id, "Hello!", MessageStatus::Complete, None, &[])?;
+            finish_message(
+                c,
+                reply.id,
+                "Hello!",
+                MessageStatus::Complete,
+                None,
+                &[],
+                None,
+            )?;
 
             let messages = list_messages(c, conversation.id)?;
             assert_eq!(messages.len(), 2);

@@ -549,6 +549,15 @@ export type AnalyticsQuery = {
 	limit?: number | null,
 };
 
+/**
+ *  What a model saw when it wrote an answer. Web research only ever sees
+ *  the public context: the user's own messages and answers written from
+ *  it. An answer written with the user's private data in view (its own
+ *  tool results, or earlier private answers) belongs to the private
+ *  context and is left out of later web research.
+ */
+export type AnswerContext = "public" | "private";
+
 export type AnswerMode = 
 /**  The model searches the web with its provider's own search. */
 "model_search" | 
@@ -2362,6 +2371,11 @@ export type Message = {
 	model: ModelRef | null,
 	/**  Tools used while answering. */
 	activity: ToolActivity[],
+	/**
+	 *  For assistant messages: what the model saw when it wrote this
+	 *  (`None` for messages from before ReMa kept track).
+	 */
+	context: AnswerContext | null,
 	createdAt: number,
 };
 

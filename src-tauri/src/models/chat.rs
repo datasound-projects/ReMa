@@ -160,8 +160,25 @@ pub struct Message {
     pub model: Option<ModelRef>,
     /// Tools used while answering.
     pub activity: Vec<ToolActivity>,
+    /// For assistant messages: what the model saw when it wrote this
+    /// (`None` for messages from before ReMa kept track).
+    pub context: Option<AnswerContext>,
     pub created_at: i64,
 }
+
+/// What a model saw when it wrote an answer. Web research only ever sees
+/// the public context: the user's own messages and answers written from
+/// it. An answer written with the user's private data in view (its own
+/// tool results, or earlier private answers) belongs to the private
+/// context and is left out of later web research.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum AnswerContext {
+    Public,
+    Private,
+}
+
+text_enum!(AnswerContext { Public => "public", Private => "private" });
 
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]

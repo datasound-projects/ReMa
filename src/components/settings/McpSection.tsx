@@ -18,6 +18,7 @@ import {
 } from '../../services/mcpService';
 import { ChevronDownIcon, ChevronRightIcon, MoreIcon, PlugIcon, PlusIcon } from '../icons';
 import { HelpTip } from '../ui/HelpTip';
+import { LoadingRows } from '../ui/LoadingRows';
 import { Menu, type MenuItem } from '../ui/Menu';
 import { StatusIndicator, type StatusTone } from '../ui/StatusIndicator';
 import { Switch } from '../ui/Switch';
@@ -76,6 +77,7 @@ export function McpSection({ focus = false }: { focus?: boolean }) {
         </p>
       )}
       <div className="panel panel--list" aria-labelledby="mcp-mine">
+        {servers.state.status === 'loading' && <LoadingRows count={1} label="Loading MCP servers…" />}
         {servers.state.status === 'success' && list.length === 0 && (
           <div className="mcp-empty">
             <PlugIcon aria-hidden="true" />

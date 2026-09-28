@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react';
 import { testingNote } from '../../lib/connectorNotes';
+import { LoadFailed, LoadingRows } from '../ui/LoadingRows';
 
 import { useNavigation } from '../../app/navigation';
 import { useAction } from '../../hooks/useAction';
@@ -86,9 +87,12 @@ export function ConnectorsSection({ focus = false }: { focus?: boolean }) {
         </div>
       </div>
       {remote.state.status === 'error' && (
-        <p className="form-error" role="alert">
-          {remote.state.error.message}
-        </p>
+        <LoadFailed message={remote.state.error.message} onRetry={remote.retry} />
+      )}
+      {remote.state.status === 'loading' && (
+        <div className="panel panel--list">
+          <LoadingRows count={2} label="Loading connectors…" />
+        </div>
       )}
       {overview && (
         <>

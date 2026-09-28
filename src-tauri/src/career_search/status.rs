@@ -261,13 +261,26 @@ pub async fn check(state: &AppState) -> AppResult<CareerSearchStatus> {
             );
             let outcome = tokio::time::timeout(Duration::from_secs(120), run).await;
             let (ok, detail) = match outcome {
-                Ok(Ok(proof)) => match proof.verdict() {
-                    Ok(evidence) => (
-                        true,
-                        format!("{name}, {}: {evidence}", native::engine_name(endpoint)),
-                    ),
-                    Err(problem) => (false, format!("{name}: {problem}")),
-                },
+                // Every line of evidence, each on its own: the search, its
+                // citations, a page read, the answer agreeing with it. A
+                // search is verified only when all of them hold.
+                Ok(Ok(proof)) => {
+                    let lines = proof
+                        .evidence()
+                        .into_iter()
+                        .map(|e| {
+                            format!("{} {}: {}", if e.ok { "✓" } else { "✗" }, e.name, e.detail)
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    match proof.verdict() {
+                        Ok(_) => (
+                            true,
+                            format!("{name}, {}: {lines}", native::engine_name(endpoint)),
+                        ),
+                        Err(_) => (false, format!("{name} (not fully verified): {lines}")),
+                    }
+                }
                 Ok(Err(error)) => (false, format!("{name} could not search: {error}")),
                 Err(_) => (
                     false,

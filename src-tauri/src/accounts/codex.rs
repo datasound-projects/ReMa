@@ -49,7 +49,7 @@ use super::{locate, AccountRuntime, RuntimeStatus, SignInAttempt, SignInOutcome}
 use crate::{
     error::{AppError, AppResult},
     llm::{
-        BoxFuture, ChatRequest, DeltaSink, FetchedModel, Finish, ToolCall, ToolExecutor,
+        BoxFuture, ChatRequest, Deferred, DeltaSink, FetchedModel, Finish, ToolCall, ToolExecutor,
         ToolOutput, WebEvent, WebKind, WebSearch, WebSource,
     },
     models::chat::MessageRole,
@@ -65,6 +65,9 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// A turn that reports nothing for this long is considered stuck.
 const TURN_IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+/// What a deferred tool call is answered with before its turn is stopped.
+const DEFERRED_TOOL: &str =
+    "This tool runs in a separate step without web access; this turn ends here.";
 /// Instructions when a request has no system prompt: Codex's own base
 /// instructions are for a coding agent.
 const DEFAULT_INSTRUCTIONS: &str = "You are a helpful assistant.";
@@ -375,6 +378,7 @@ impl CodexRuntime {
             on_delta,
             executor.as_deref(),
             request.web.as_ref(),
+            request.deferred.as_ref(),
         )
         .await;
         drop(route);
@@ -397,6 +401,7 @@ async fn run_turn(
     on_delta: DeltaSink<'_>,
     tools: Option<&dyn ToolExecutor>,
     web: Option<&WebSearch>,
+    deferred: Option<&Deferred>,
 ) -> AppResult<Finish> {
     if !history.is_empty() {
         conn.request(
@@ -458,6 +463,27 @@ async fn run_turn(
                     arguments: params.get("arguments").cloned().unwrap_or(Value::Null),
                     provider_data: None,
                 };
+                // A tool of the answer's next phase: this thread (with its
+                // web search) ends here, and the answer goes on in another
+                // one without it.
+                if deferred.is_some_and(|d| d.applies(&call.name)) {
+                    let _ = conn
+                        .respond(
+                            id,
+                            json!({
+                                "contentItems": [{ "type": "inputText", "text": DEFERRED_TOOL }],
+                                "success": false,
+                            }),
+                        )
+                        .await;
+                    let _ = conn
+                        .request(
+                            "turn/interrupt",
+                            json!({ "threadId": thread_id, "turnId": turn_id }),
+                        )
+                        .await;
+                    return Ok(Finish::Deferred);
+                }
                 let output = match tools {
                     Some(tools) => {
                         // Stopping the answer interrupts a long tool call too.

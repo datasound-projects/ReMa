@@ -503,21 +503,18 @@ async fn a_search_the_organization_turned_off_continues_with_remas_tools() {
     ));
 }
 
+/// Web search is always asked for as a direct call (no code execution
+/// container for dynamic filtering), so the request is right the first
+/// time; a refusal for any other reason is not retried.
 #[tokio::test]
-async fn a_model_told_to_search_directly_is_asked_again_directly() {
-    let (base_url, mut received) = serve_sequence(vec![
-        (
-            400,
-            vec!["{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"tools.0: this model does not support programmatic tool calling; set allowed_callers to [\\\"direct\\\"]\"}}"],
-        ),
-        (
-            200,
-            vec![
-                "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Searched.\"}}\n\n",
-                "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
-            ],
-        ),
-    ])
+async fn web_search_is_called_directly_from_the_first_request() {
+    let (base_url, mut received) = serve_sequence(vec![(
+        200,
+        vec![
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Searched.\"}}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        ],
+    )])
     .await;
     let endpoint = endpoint(ProviderKind::Anthropic, base_url, "sk-ant-test");
     let web = Arc::new(RecordingWeb::default());
@@ -526,12 +523,87 @@ async fn a_model_told_to_search_directly_is_asked_again_directly() {
     assert_eq!(result.unwrap(), Finish::Complete);
     assert_eq!(text, "Searched.");
     let first = body_of(&received.recv().await.unwrap());
-    assert!(first["tools"][0].get("allowed_callers").is_none());
-    let second = body_of(&received.recv().await.unwrap());
-    assert_eq!(second["tools"][0]["allowed_callers"], json!(["direct"]));
-    assert_eq!(second["tools"][0]["type"], "web_search_20260318");
-    // Search stayed on: nothing was reported unavailable.
+    assert_eq!(first["tools"][0]["allowed_callers"], json!(["direct"]));
+    assert_eq!(first["tools"][0]["type"], "web_search_20260318");
+    assert_eq!(first["tools"][1]["allowed_callers"], json!(["direct"]));
     assert!(web.0.lock().unwrap().is_empty());
+}
+
+/// The API refuses a thinking block written for another prefix (preserved
+/// thinking): the request is sent once more asking the API to drop such
+/// blocks; refused again, it goes out with every thinking block left out.
+#[tokio::test]
+async fn a_thinking_block_bound_elsewhere_is_dropped_once_then_left_out() {
+    let refusal = "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"messages.1.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation. Remove the block, or set `thinking.block_binding.prefix_mismatch_behavior` to \\\"drop_block\\\".\"}}";
+    let (base_url, mut received) = serve_sequence(vec![
+        (400, vec![refusal]),
+        (400, vec![refusal]),
+        (
+            200,
+            vec![
+                "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Done.\"}}\n\n",
+                "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+            ],
+        ),
+    ])
+    .await;
+    let endpoint = endpoint(ProviderKind::Anthropic, base_url, "sk-ant-test");
+    let mut request = request();
+    request.tools = Some(tool_box("lookup", Arc::new(crate::llm::fake::NoTools)));
+    // A step already taken in this answer, with its thinking.
+    request.rounds.push(ToolRound {
+        text: String::new(),
+        calls: vec![ToolCall {
+            id: "toolu_1".into(),
+            name: "lookup".into(),
+            arguments: json!({}),
+            provider_data: None,
+        }],
+        outputs: vec![ToolOutput {
+            content: "42".into(),
+            is_error: false,
+        }],
+        content: Some(json!([
+            { "type": "thinking", "thinking": "Look it up.", "signature": "sig" },
+            { "type": "tool_use", "id": "toolu_1", "name": "lookup", "input": {} },
+        ])),
+        paused: false,
+    });
+    let (result, text) = run(
+        &endpoint,
+        "claude-opus-5-5",
+        &request,
+        &ProviderLanguageModel::new(None),
+    )
+    .await;
+    assert_eq!(result.unwrap(), Finish::Complete);
+    assert_eq!(text, "Done.");
+
+    let first = received.recv().await.unwrap();
+    assert!(!first.to_ascii_lowercase().contains("anthropic-beta"));
+    let body = body_of(&first);
+    assert!(body.get("thinking").is_none());
+    assert_eq!(body["messages"][1]["content"][0]["type"], "thinking");
+
+    let second = received.recv().await.unwrap();
+    assert!(second
+        .to_ascii_lowercase()
+        .contains("anthropic-beta: thinking-binding-controls-2026-08-01"));
+    let body = body_of(&second);
+    assert_eq!(
+        body["thinking"]["block_binding"]["prefix_mismatch_behavior"],
+        "drop_block"
+    );
+    assert_eq!(body["messages"][1]["content"][0]["type"], "thinking");
+
+    let third = body_of(&received.recv().await.unwrap());
+    let step: Vec<&str> = third["messages"][1]["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(step, ["tool_use"]);
 }
 
 #[tokio::test]

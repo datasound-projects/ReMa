@@ -8,6 +8,7 @@ import { CareerSearchSection } from '../components/settings/CareerSearchSection'
 import { CloudProviderRow } from '../components/settings/CloudProviderRow';
 import { CustomEndpointRow } from '../components/settings/ProviderRows';
 import { BrandLogo } from '../components/ui/BrandLogo';
+import { LoadFailed, LoadingRows } from '../components/ui/LoadingRows';
 import { StatusIndicator } from '../components/ui/StatusIndicator';
 import { useAppStatus } from '../hooks/useAppStatus';
 import { useModelCatalog } from '../hooks/useModelCatalog';
@@ -48,12 +49,11 @@ export function SettingsPage({ focus }: { focus?: 'mcp' | 'connectors' }) {
         </div>
 
         {settings.state.status === 'error' && (
-          <p className="form-error" role="alert">
-            {settings.state.error.message}
-          </p>
+          <LoadFailed message={settings.state.error.message} onRetry={settings.retry} />
         )}
 
         <div className="panel panel--list">
+          {settings.state.status === 'loading' && <LoadingRows count={3} label="Loading providers…" />}
           {cloud.map((provider) => (
             <CloudProviderRow
               key={provider.id}
