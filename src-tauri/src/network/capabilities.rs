@@ -337,7 +337,9 @@ pub fn relationship_access(providers: &[ProviderCapabilities]) -> RelationshipAc
             whom you know."
             .into(),
         _ => "No professional network that shares its connection list with ReMa is connected, \
-            so ReMa cannot tell whom you know. It can still research relevant people."
+            so ReMa cannot tell whom you know. Import your LinkedIn connections (your LinkedIn \
+            data export) or contacts (vCard) in Settings → Connectors to include them. ReMa can \
+            still research relevant people."
             .into(),
     })
 }

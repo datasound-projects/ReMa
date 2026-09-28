@@ -24,6 +24,7 @@ import { IconButton } from '../ui/IconButton';
 import { StatusIndicator } from '../ui/StatusIndicator';
 import { Switch } from '../ui/Switch';
 import { ConnectorLogo } from './ConnectorIcons';
+import { NetworkContactsCard } from './NetworkContactsCard';
 
 const MICROSOFT_APPS_URL = 'https://account.microsoft.com/privacy/app-access';
 const GOOGLE_APPS_URL = 'https://myaccount.google.com/connections';
@@ -104,6 +105,7 @@ export function ConnectorsSection({ focus = false }: { focus?: boolean }) {
                 <ConnectorCard key={connector.id} connector={connector} onOpen={() => setOpenId(connector.id)} />
               ))}
           </div>
+          <NetworkContactsCard />
           <MailTrackingNote />
           <BackgroundOptions overview={overview} />
           <p className="form__hint connectors__privacy">{mailPrivacy(overview.mailProcessing)}</p>

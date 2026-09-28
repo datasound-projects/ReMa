@@ -548,6 +548,64 @@ async fn permitted_first_degree_connections_are_matched_for_the_session_only() {
 }
 
 #[tokio::test]
+async fn imported_contacts_show_whom_you_know_without_linkedins_api() {
+    let site = sources().await;
+    let state = state_for(&site);
+    // No LinkedIn sign-in at all: the user's own export and a vCard.
+    let dir = crate::state::testing::temp_dir();
+    let csv = dir.join("Connections.csv");
+    std::fs::write(
+        &csv,
+        "Notes:\n\"Some e-mail addresses may be missing.\"\n\nFirst Name,Last Name,URL,Email Address,Company,Position,Connected On\nJane,Example,https://www.linkedin.com/in/jane-example,jane@example.com,Nordlicht AI,Senior ML Engineer,12 Mar 2021\nMax,Muster,,,Nordlichter Bank,Product,01 Jan 2020\n",
+    )
+    .unwrap();
+    super::contacts::import(
+        &state,
+        super::contacts::ContactSource::LinkedinExport,
+        &[csv],
+    )
+    .unwrap();
+
+    let result = research(&state, "Do I know anyone at Nordlicht AI?").await;
+    assert_eq!(
+        result.connections_outcome,
+        ConnectionsOutcome::Checked {
+            provider: ProviderId::Linkedin,
+            checked: 2,
+            matched: 1
+        }
+    );
+    assert_eq!(result.connections[0].name, "Jane Example");
+    assert_eq!(
+        result.connections[0].relationship.label,
+        "LinkedIn connection (from your data export)"
+    );
+    assert!(result.connections[0]
+        .match_reason
+        .contains("Your LinkedIn data export lists them at Nordlicht AI"));
+    let stage = result
+        .stages
+        .iter()
+        .find(|s| s.stage == super::model::Stage::Connections)
+        .unwrap();
+    assert!(stage
+        .sources
+        .contains(&"Your imported contacts".to_string()));
+    // Matched by ReMa, never sent to a model.
+    let view = service::view_for(
+        &result,
+        Purpose::ProfessionalResearch,
+        Operation::ModelProcess,
+    );
+    assert!(!super::render::model_context(&view).contains("Jane"));
+    // Nothing went to LinkedIn.
+    assert!(site
+        .requests()
+        .iter()
+        .all(|r| !r.target.starts_with("/linkedin")));
+}
+
+#[tokio::test]
 async fn identity_only_linkedin_never_claims_no_connections() {
     let site = sources().await;
     let state = state_for(&site);

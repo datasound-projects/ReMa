@@ -61,6 +61,26 @@ export const commands = {
 	networkCancel: (runId: string) => __TAURI_INVOKE<boolean>("network_cancel", { runId }),
 	/**  The page's last result this session (nothing is kept on disk). */
 	networkLastResult: () => __TAURI_INVOKE<LastNetworkResult>("network_last_result"),
+	/**  Contacts the user imported (their LinkedIn export, vCards): counts only. */
+	networkContacts: () => __TAURI_INVOKE<ContactsSummary>("network_contacts"),
+	/**
+	 *  Lets the user pick their LinkedIn data export (the ZIP, or
+	 *  Connections.csv) or vCard files and imports the contacts in them.
+	 *  `None` if the user cancelled.
+	 */
+	importNetworkContacts: (source: ContactSource) => __TAURI_INVOKE<{
+	/**  Contacts read from the files. */
+	read: number,
+	/**  Files that held no contacts ReMa could read, with the reason. */
+	problems: string[],
+	summary: ContactsSummary,
+} | null>("import_network_contacts", { source }),
+	/**  Removes imported contacts (one source, or all). */
+	clearNetworkContacts: (source: 
+/**  LinkedIn's data export (`Connections.csv`). */
+"linkedin_export" | 
+/**  vCard files (XING, an address book). */
+"vcard" | null) => __TAURI_INVOKE<ContactsSummary>("clear_network_contacts", { source }),
 	businessOverview: () => __TAURI_INVOKE<BusinessOverview>("business_overview"),
 	businessSaveProfile: (profile: BusinessProfile) => __TAURI_INVOKE<BusinessProfile>("business_save_profile", { profile }),
 	businessCreateOffer: (content: OfferContent, idempotencyKey: string) => __TAURI_INVOKE<Offer>("business_create_offer", { content, idempotencyKey }),
@@ -1243,6 +1263,29 @@ export type ContactRef = {
 	sourceUrl: string | null,
 };
 
+/**  Where imported contacts came from. */
+export type ContactSource = 
+/**  LinkedIn's data export (`Connections.csv`). */
+"linkedin_export" | 
+/**  vCard files (XING, an address book). */
+"vcard";
+
+/**  The result of one import. */
+export type ContactsImported = {
+	/**  Contacts read from the files. */
+	read: number,
+	/**  Files that held no contacts ReMa could read, with the reason. */
+	problems: string[],
+	summary: ContactsSummary,
+};
+
+/**  What Settings shows about imported contacts. */
+export type ContactsSummary = {
+	linkedin: number,
+	vcard: number,
+	lastImportedAt: number | null,
+};
+
 export type ContractCriteria = {
 	skills: string,
 	locations: Locations,
@@ -1485,7 +1528,9 @@ export type DataSource = "linkedin_api" | "xing_api" |
 /**  A job posting from ReMa's job layer (Jobs MCP). */
 "jobs_mcp" | "wikidata" | 
 /**  A page a model's hosted web search reported. */
-"model_web_search" | "user_entered";
+"model_web_search" | "user_entered" | 
+/**  Contacts the user imported: their LinkedIn data export or vCards. */
+"contacts_import";
 
 export type DatasetSummary = {
 	/**  Human description of scope, filters and limit. */

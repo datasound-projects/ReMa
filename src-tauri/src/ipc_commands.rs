@@ -37,6 +37,9 @@ pub const APP_COMMANDS: &[&str] = &[
     "network_research",
     "network_cancel",
     "network_last_result",
+    "network_contacts",
+    "import_network_contacts",
+    "clear_network_contacts",
     // Business
     "business_overview",
     "business_save_profile",

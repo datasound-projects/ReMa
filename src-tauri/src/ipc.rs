@@ -72,6 +72,9 @@ pub fn builder() -> Builder<tauri::Wry> {
             commands::network::network_research,
             commands::network::network_cancel,
             commands::network::network_last_result,
+            commands::network::network_contacts,
+            commands::network::import_network_contacts,
+            commands::network::clear_network_contacts,
             // Business
             commands::business::business_overview,
             commands::business::business_save_profile,

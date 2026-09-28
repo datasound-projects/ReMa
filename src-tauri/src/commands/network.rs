@@ -4,14 +4,16 @@
 
 use std::sync::Arc;
 
-use tauri::State;
+use tauri::{AppHandle, State};
+use tauri_plugin_dialog::DialogExt;
 
 use crate::{
-    error::AppResult,
+    error::{AppError, AppResult},
     events::EventSink,
     llm::Endpoint,
     network::{
         capabilities::{self, ProviderCapabilities},
+        contacts::{self, ContactSource, ContactsImported, ContactsSummary},
         model::{LastNetworkResult, NetworkResearchInput, NetworkResult},
         service::{self, Request},
     },
@@ -19,6 +21,60 @@ use crate::{
     services::providers,
     state::AppState,
 };
+
+/// Contacts the user imported (their LinkedIn export, vCards): counts only.
+#[tauri::command]
+#[specta::specta]
+pub fn network_contacts(state: State<'_, AppState>) -> AppResult<ContactsSummary> {
+    contacts::summary(&state)
+}
+
+/// Lets the user pick their LinkedIn data export (the ZIP, or
+/// Connections.csv) or vCard files and imports the contacts in them.
+/// `None` if the user cancelled.
+#[tauri::command]
+#[specta::specta]
+pub async fn import_network_contacts(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    source: ContactSource,
+) -> AppResult<Option<ContactsImported>> {
+    let dialog = app.dialog().file();
+    let paths: Vec<std::path::PathBuf> = match source {
+        ContactSource::LinkedinExport => dialog
+            .set_title("Choose your LinkedIn data export (ZIP or Connections.csv)")
+            .add_filter("LinkedIn export", &["zip", "csv"])
+            .blocking_pick_file()
+            .into_iter()
+            .collect(),
+        ContactSource::Vcard => dialog
+            .set_title("Choose contact cards (vCard)")
+            .add_filter("vCard", &["vcf", "vcard"])
+            .blocking_pick_files()
+            .unwrap_or_default(),
+    }
+    .into_iter()
+    .filter_map(|picked| picked.into_path().ok())
+    .collect();
+    if paths.is_empty() {
+        return Ok(None);
+    }
+    let state = state.inner().clone();
+    tokio::task::spawn_blocking(move || contacts::import(&state, source, &paths))
+        .await
+        .map_err(|e| AppError::internal(e.to_string()))?
+        .map(Some)
+}
+
+/// Removes imported contacts (one source, or all).
+#[tauri::command]
+#[specta::specta]
+pub fn clear_network_contacts(
+    state: State<'_, AppState>,
+    source: Option<ContactSource>,
+) -> AppResult<ContactsSummary> {
+    contacts::clear(&state, source)
+}
 
 /// What LinkedIn and XING let ReMa do right now.
 #[tauri::command]

@@ -1,9 +1,17 @@
-import { commands, type NetworkResearchInput, type NetworkResult } from '../generated/bindings';
+import {
+  commands,
+  type ContactSource,
+  type ContactsSummary,
+  type NetworkResearchInput,
+  type NetworkResult,
+} from '../generated/bindings';
 import { callBackend } from './ipc';
 
 export type {
   CapabilityItem,
   Company,
+  ContactSource,
+  ContactsSummary,
   Confidence,
   Connection,
   ConnectionsOutcome,
@@ -42,4 +50,22 @@ export function cancelNetworkResearch(runId: string): Promise<boolean> {
 export async function getLastNetworkResult(): Promise<NetworkResult | null> {
   const last = await callBackend(() => commands.networkLastResult());
   return last.result;
+}
+
+/** Counts of the contacts the user imported (LinkedIn export, vCards). */
+export function getNetworkContacts(): Promise<ContactsSummary> {
+  return callBackend(() => commands.networkContacts());
+}
+
+/**
+ * Opens a file picker for the LinkedIn data export (ZIP or Connections.csv)
+ * or vCard files and imports them; null if the user cancelled.
+ */
+export function importNetworkContacts(source: ContactSource) {
+  return callBackend(() => commands.importNetworkContacts(source));
+}
+
+/** Removes imported contacts: one source, or all (`null`). */
+export function clearNetworkContacts(source: ContactSource | null): Promise<ContactsSummary> {
+  return callBackend(() => commands.clearNetworkContacts(source));
 }

@@ -14,6 +14,7 @@
 
 pub mod capabilities;
 pub mod companies;
+pub mod contacts;
 pub mod evidence;
 pub mod model;
 pub mod people;

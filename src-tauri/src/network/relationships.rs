@@ -1,9 +1,10 @@
 //! Permitted relationships (NC §9, §22, §23, §41, §57): the user's own
-//! first-degree connections, only from LinkedIn's Connections API and only
-//! when LinkedIn granted ReMa that permission. ReMa matches them to
-//! companies itself; the data is shown for this session only, never sent
-//! to a model, never stored. There is no second-degree lookup: LinkedIn's
-//! API does not offer one, and none is simulated.
+//! first-degree connections, from LinkedIn's Connections API when LinkedIn
+//! granted ReMa that permission (shown for this session only, never
+//! stored), and from contacts the user imported (their LinkedIn data
+//! export or vCards; see `contacts`). ReMa matches them to companies
+//! itself and never sends them to a model. There is no second-degree
+//! lookup: no source offers one, and none is simulated.
 
 use std::time::Duration;
 
@@ -27,12 +28,24 @@ use crate::{
 const MAX_PAGES: u32 = 20;
 const PAGE_SIZE: u32 = 50;
 
-/// One connection as LinkedIn returns it.
+/// Where a connection-list member came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// LinkedIn's Connections API (session only).
+    LinkedinApi,
+    /// The user's LinkedIn data export.
+    LinkedinExport,
+    /// A vCard the user imported (XING, an address book).
+    Vcard,
+}
+
+/// One connection: from LinkedIn, or imported by the user.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Member {
     pub name: String,
     pub headline: Option<String>,
     pub profile_url: Option<String>,
+    pub origin: Origin,
 }
 
 fn text(value: &Value, key: &str) -> Option<String> {
@@ -65,6 +78,7 @@ pub fn members(page: &Value) -> Vec<Member> {
                             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
                     })
                     .map(|v| format!("https://www.linkedin.com/in/{v}")),
+                origin: Origin::LinkedinApi,
             })
         })
         .collect()
@@ -183,26 +197,65 @@ pub fn match_companies(members: &[Member], companies: &[Company]) -> Vec<Connect
                 company_id: Some(company.id.clone()),
                 company_name: Some(company.name.clone()),
                 profile_url: member.profile_url.clone(),
-                relationship: relationship(now),
-                match_reason: format!(
-                    "Their LinkedIn headline names {} (as they describe it; LinkedIn does not \
-                     confirm the employer)",
-                    company.name
-                ),
+                relationship: relationship(member.origin, now),
+                match_reason: match member.origin {
+                    Origin::LinkedinApi => format!(
+                        "Their LinkedIn headline names {} (as they describe it; LinkedIn does \
+                         not confirm the employer)",
+                        company.name
+                    ),
+                    Origin::LinkedinExport => format!(
+                        "Your LinkedIn data export lists them at {} (as of your export)",
+                        company.name
+                    ),
+                    Origin::Vcard => format!(
+                        "Their contact card names {} (as of when you saved it)",
+                        company.name
+                    ),
+                },
             });
         }
     }
     out
 }
 
-fn relationship(now: i64) -> Relationship {
+fn relationship(origin: Origin, now: i64) -> Relationship {
+    let (provider, label, persistence) = match origin {
+        Origin::LinkedinApi => (
+            ProviderId::Linkedin,
+            "LinkedIn first-degree connection",
+            Persistence::Session,
+        ),
+        Origin::LinkedinExport => (
+            ProviderId::Linkedin,
+            "LinkedIn connection (from your data export)",
+            Persistence::PersistentPermitted,
+        ),
+        Origin::Vcard => (
+            ProviderId::Xing,
+            "Your contact (imported vCard)",
+            Persistence::PersistentPermitted,
+        ),
+    };
     Relationship {
-        provider: ProviderId::Linkedin,
+        provider,
         degree: 1,
-        label: "LinkedIn first-degree connection".into(),
+        label: label.into(),
         fetched_at: now,
-        persistence: Persistence::Session,
+        persistence,
     }
+}
+
+/// API members and imported contacts together; a person in both counts
+/// once (the API's entry wins).
+pub fn merge(mut members: Vec<Member>, imported: Vec<Member>) -> Vec<Member> {
+    for contact in imported {
+        let key = resolve::name_key(&contact.name);
+        if !members.iter().any(|m| resolve::name_key(&m.name) == key) {
+            members.push(contact);
+        }
+    }
+    members
 }
 
 /// Marks researched people who are the user's connections: the same name

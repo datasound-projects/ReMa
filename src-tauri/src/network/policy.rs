@@ -84,6 +84,8 @@ pub enum DataSource {
     /// A page a model's hosted web search reported.
     ModelWebSearch,
     UserEntered,
+    /// Contacts the user imported: their LinkedIn data export or vCards.
+    ContactsImport,
 }
 
 impl DataSource {
@@ -97,6 +99,7 @@ impl DataSource {
             Self::Wikidata => "Wikidata",
             Self::ModelWebSearch => "Web search",
             Self::UserEntered => "Entered by you",
+            Self::ContactsImport => "Your imported contacts",
         }
     }
 
@@ -182,6 +185,10 @@ fn agreement(source: DataSource) -> String {
             "Public pages read within robots rules; no authenticated pages".into()
         }
         DataSource::UserEntered => "The user's own data".into(),
+        DataSource::ContactsImport => format!(
+            "The user's own LinkedIn data export or vCard files, imported by the user; the \
+             contacts' own data (reviewed {REVIEWED_AT})"
+        ),
     }
 }
 
@@ -247,6 +254,7 @@ pub fn check(
             Persistence::PersistentPermitted,
             &all,
         ),
+        DataSource::ContactsImport => contacts_import(class, purpose, operation),
         // Public sources.
         _ => match class {
             DataClass::Company | DataClass::Job => decision(
@@ -288,6 +296,50 @@ pub fn check(
                 )
             }
         },
+    }
+}
+
+/// Contacts the user imported: their own list, but the contacts' personal
+/// data. Kept on this computer and matched by ReMa for the user's own
+/// professional research; never sent to a model, copied out or used to
+/// win clients (the contacts never agreed to marketing).
+fn contacts_import(class: DataClass, purpose: Purpose, operation: Operation) -> Decision {
+    use Destination::*;
+    use Operation::*;
+    let source = DataSource::ContactsImport;
+    if class != DataClass::FirstDegreeConnection {
+        return decision(
+            source,
+            false,
+            "Imported files hold only your contacts.",
+            Persistence::Ephemeral,
+            &[],
+        );
+    }
+    if purpose.is_commercial() {
+        return decision(
+            source,
+            false,
+            "Your contacts are not used for client acquisition, outreach or GTM research.",
+            Persistence::Ephemeral,
+            &[],
+        );
+    }
+    match operation {
+        Fetch | Display | Derive | Store => decision(
+            source,
+            true,
+            "Your contacts, kept on this computer and matched by ReMa to show whom you know.",
+            Persistence::PersistentPermitted,
+            &[Screen, LocalDatabase],
+        ),
+        ModelProcess | Export => decision(
+            source,
+            false,
+            "ReMa matches your contacts itself; they are never sent to a model or copied out.",
+            Persistence::Ephemeral,
+            &[],
+        ),
     }
 }
 

@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     capabilities::{self, RelationshipAccess},
-    companies,
+    companies, contacts,
     model::{
         Company, ConnectionsOutcome, JobRef, NetworkResult, ResultStatus, Row, Stage, StageReport,
     },
@@ -26,6 +26,7 @@ use super::{
 use crate::{
     career_search::plan,
     llm::Endpoint,
+    models::connectors::ProviderId,
     retrieval::Progress,
     services::profile_context::{self, Field},
     state::AppState,
@@ -382,41 +383,76 @@ pub async fn research(
             );
         }
         let providers = capabilities::all(state).await.unwrap_or_default();
-        result.connections_outcome = match capabilities::relationship_access(&providers) {
-            RelationshipAccess::Unavailable(reason) => ConnectionsOutcome::Unavailable { reason },
-            RelationshipAccess::Available(provider)
-                if !policy::check(
-                    policy::DataSource::LinkedinApi,
-                    DataClass::FirstDegreeConnection,
-                    purpose,
-                    Operation::Fetch,
-                )
-                .allowed =>
-            {
-                let _ = provider;
-                ConnectionsOutcome::Unavailable {
-                    reason: "Connection data from LinkedIn cannot be used for this purpose.".into(),
-                }
-            }
-            RelationshipAccess::Available(provider) => {
+        // Contacts the user imported (their LinkedIn export, vCards).
+        let imported = if policy::check(
+            policy::DataSource::ContactsImport,
+            DataClass::FirstDegreeConnection,
+            purpose,
+            Operation::Derive,
+        )
+        .allowed
+        {
+            contacts::members(state).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let imported_provider = if imported
+            .iter()
+            .any(|m| m.origin != relationships::Origin::Vcard)
+        {
+            ProviderId::Linkedin
+        } else {
+            ProviderId::Xing
+        };
+        let mut check = |members: Vec<relationships::Member>, provider: ProviderId| {
+            let matched = relationships::match_companies(&members, &result.companies);
+            relationships::mark_people(&mut result.people, &matched);
+            let outcome = ConnectionsOutcome::Checked {
+                provider,
+                checked: members.len() as u32,
+                matched: matched.len() as u32,
+            };
+            result.connections = matched;
+            outcome
+        };
+        let api_allowed = policy::check(
+            policy::DataSource::LinkedinApi,
+            DataClass::FirstDegreeConnection,
+            purpose,
+            Operation::Fetch,
+        )
+        .allowed;
+        let has_imported = !imported.is_empty();
+        let mut checked_with = Vec::new();
+        let outcome = match capabilities::relationship_access(&providers) {
+            RelationshipAccess::Available(provider) if api_allowed => {
                 match relationships::connections(state).await {
                     Ok(members) => {
-                        let matched = relationships::match_companies(&members, &result.companies);
-                        relationships::mark_people(&mut result.people, &matched);
-                        let outcome = ConnectionsOutcome::Checked {
-                            provider,
-                            checked: members.len() as u32,
-                            matched: matched.len() as u32,
-                        };
-                        result.connections = matched;
-                        outcome
+                        checked_with.push("LinkedIn".to_string());
+                        check(relationships::merge(members, imported), provider)
                     }
-                    Err(error) => ConnectionsOutcome::Failed {
+                    Err(error) if imported.is_empty() => ConnectionsOutcome::Failed {
                         reason: error.to_string(),
                     },
+                    Err(error) => {
+                        notes.push(format!(
+                            "LinkedIn's connection list could not be read ({error}); your \
+                             imported contacts were checked instead."
+                        ));
+                        check(imported, imported_provider)
+                    }
                 }
             }
+            _ if has_imported => check(imported, imported_provider),
+            RelationshipAccess::Unavailable(reason) => ConnectionsOutcome::Unavailable { reason },
+            RelationshipAccess::Available(_) => ConnectionsOutcome::Unavailable {
+                reason: "Connection data cannot be used for this purpose.".into(),
+            },
         };
+        if has_imported && matches!(outcome, ConnectionsOutcome::Checked { .. }) {
+            checked_with.push("Your imported contacts".to_string());
+        }
+        result.connections_outcome = outcome;
         result.stages.push(report(
             Stage::Connections,
             match &result.connections_outcome {
@@ -433,7 +469,7 @@ pub async fn research(
                 ConnectionsOutcome::NotRequested => String::new(),
             },
             match &result.connections_outcome {
-                ConnectionsOutcome::Checked { .. } => vec!["LinkedIn".into()],
+                ConnectionsOutcome::Checked { .. } => checked_with,
                 _ => Vec::new(),
             },
             match &result.connections_outcome {
