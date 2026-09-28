@@ -344,8 +344,13 @@ pub fn parse_remotive(value: &Value, api_url: &str, now: i64) -> Vec<JobRecord> 
             posted(&mut record, day, REMOTIVE, api_url, "publication_date", now);
             record.links.canonical_url = text(job, "/url");
             record.quality.availability = Availability::Active;
-            record.quality.availability_basis =
-                Some("listed on Remotive (public remote-jobs API; source: Remotive)".into());
+            // Remotive's public API lists jobs later than its site does: a
+            // listing here is current as of the API, not live.
+            record.quality.availability_basis = Some(
+                "listed on Remotive (public remote-jobs API, which lags the site; source: \
+                 Remotive)"
+                    .into(),
+            );
             record.dates.last_checked_at = Some(extract::iso(now));
             finish_common(&mut record, REMOTIVE, api_url, now);
             Some(record)

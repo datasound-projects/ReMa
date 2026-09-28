@@ -99,7 +99,11 @@ export function WebActivity({ activity }: { activity: ToolActivity[] }) {
       {unavailable && (
         <p className="web-activity__notice" role="status">
           <GlobeIcon aria-hidden="true" />
-          <span>Web search could not be used for this answer{unavailable.detail ? `: ${unavailable.detail}` : '.'}</span>
+          <span>
+            {unavailable.id === 'web:private'
+              ? (unavailable.detail ?? 'Web research ended for this answer.')
+              : `Web search could not be used for this answer${unavailable.detail ? `: ${unavailable.detail}` : '.'}`}
+          </span>
         </p>
       )}
       {(entries.length > 0 || step) && (

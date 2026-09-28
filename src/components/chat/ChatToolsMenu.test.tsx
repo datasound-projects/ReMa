@@ -128,5 +128,8 @@ describe('Chat + menu', () => {
     });
     expect(screen.getByRole('menuitemcheckbox', { name: /Gmail/ }).getAttribute('aria-checked')).toBe('false');
     expect(screen.getByRole('menuitemcheckbox', { name: /Applications/ }).getAttribute('aria-checked')).toBe('true');
+    // Once the chat has its own list, the menu says what that means for
+    // accounts connected later.
+    expect(screen.getByText(/an account connected later stays off here/)).toBeTruthy();
   });
 });

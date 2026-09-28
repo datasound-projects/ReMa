@@ -138,6 +138,11 @@ export function ChatToolsMenu({
             {!connectors.some((c) => c.id !== 'applications') && (
               <p className="plus-menu__hint">Connect Gmail, Outlook or your calendar once in Settings.</p>
             )}
+            {selection.connectors !== null && (
+              <p className="plus-menu__hint">
+                This chat keeps its own list: an account connected later stays off here until you turn it on.
+              </p>
+            )}
             <button
               type="button"
               role="menuitem"

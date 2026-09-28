@@ -70,3 +70,23 @@ describe('WebActivity: ReMa’s job search step', () => {
     expect(screen.getByText('Search stopped')).toBeTruthy();
   });
 });
+
+describe('the end of web research', () => {
+  it('says the answer went on with private data, without calling the search unusable', () => {
+    render(
+      <WebActivity
+        activity={[
+          activity({
+            id: 'web:private',
+            kind: 'web_search',
+            status: 'unavailable',
+            detail: 'Web research ended: the answer goes on with your mail, which has no web access.',
+          }),
+        ]}
+      />,
+    );
+    const notice = screen.getByRole('status').textContent ?? '';
+    expect(notice).toContain('Web research ended');
+    expect(notice).not.toContain('could not be used');
+  });
+});
