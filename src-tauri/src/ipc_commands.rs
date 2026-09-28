@@ -114,6 +114,11 @@ pub const APP_COMMANDS: &[&str] = &[
     // Portfolio Studio
     "list_portfolios",
     "create_portfolio",
+    "get_portfolio",
+    "rename_portfolio",
+    "import_portfolio_file",
+    "import_portfolio_document",
+    "portfolio_ai_assist",
     "save_portfolio",
     "duplicate_portfolio",
     "delete_portfolio",

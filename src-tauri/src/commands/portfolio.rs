@@ -3,8 +3,13 @@ use tauri_plugin_dialog::DialogExt;
 
 use crate::{
     error::AppResult,
-    models::portfolio::{PageSize, PortfolioDocument, PortfolioInput, PortfolioStart},
-    services::portfolio,
+    models::portfolio::{
+        AiProposal, AiRequest, PortfolioDocument, PortfolioImport, PortfolioInput, PortfolioKind,
+    },
+    services::{
+        portfolio::{self, PortfolioCreate},
+        portfolio_ai, portfolio_import, profile,
+    },
     state::AppState,
 };
 
@@ -14,17 +19,81 @@ pub async fn list_portfolios(state: State<'_, AppState>) -> AppResult<Vec<Portfo
     portfolio::list(&state)
 }
 
-/// A new document, blank or with a one-time copy of the Custom Profile.
+#[tauri::command]
+#[specta::specta]
+pub async fn get_portfolio(state: State<'_, AppState>, id: i64) -> AppResult<PortfolioDocument> {
+    portfolio::get(&state, id)
+}
+
+/// A new document: blank, sample, a one-time copy of the Custom Profile, or
+/// reviewed content from an import.
 #[tauri::command]
 #[specta::specta]
 pub async fn create_portfolio(
     state: State<'_, AppState>,
-    name: String,
-    template_id: String,
-    page_size: PageSize,
-    start: PortfolioStart,
+    request: PortfolioCreate,
 ) -> AppResult<PortfolioDocument> {
-    portfolio::create(&state, &name, &template_id, page_size, start)
+    portfolio::create(&state, request)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn rename_portfolio(
+    state: State<'_, AppState>,
+    id: i64,
+    name: String,
+) -> AppResult<PortfolioDocument> {
+    portfolio::rename(&state, id, &name)
+}
+
+/// Lets the user pick a CV or cover letter file, stores it as a Profile
+/// document (the original is never changed) and reads it into editable
+/// parts for review. `None` if the user cancelled.
+#[tauri::command]
+#[specta::specta]
+pub async fn import_portfolio_file(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    kind: PortfolioKind,
+) -> AppResult<Option<PortfolioImport>> {
+    let title = match kind {
+        PortfolioKind::Cv => "Choose the CV to import",
+        PortfolioKind::CoverLetter => "Choose the cover letter to import",
+    };
+    let Some(path) = app
+        .dialog()
+        .file()
+        .set_title(title)
+        .add_filter("Documents", &profile::picker_extensions(None))
+        .blocking_pick_file()
+        .and_then(|picked| picked.into_path().ok())
+    else {
+        return Ok(None);
+    };
+    portfolio_import::import_file(&state, &path, kind)
+        .await
+        .map(Some)
+}
+
+/// Reads a document already in the Profile (an older CV) for review.
+#[tauri::command]
+#[specta::specta]
+pub async fn import_portfolio_document(
+    state: State<'_, AppState>,
+    document_id: i64,
+    kind: PortfolioKind,
+) -> AppResult<PortfolioImport> {
+    portfolio_import::import(&state, document_id, kind).await
+}
+
+/// One AI assistant request; the answer is a proposal for review.
+#[tauri::command]
+#[specta::specta]
+pub async fn portfolio_ai_assist(
+    state: State<'_, AppState>,
+    request: AiRequest,
+) -> AppResult<AiProposal> {
+    portfolio_ai::assist(&state, request).await
 }
 
 #[tauri::command]

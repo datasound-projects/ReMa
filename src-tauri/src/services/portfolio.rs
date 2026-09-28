@@ -14,8 +14,9 @@ use crate::{
     error::{AppError, AppResult},
     models::{
         portfolio::{
-            PageSize, PortfolioContent, PortfolioDocument, PortfolioEntry, PortfolioHeader,
-            PortfolioInput, PortfolioSection, PortfolioStart, SectionKind,
+            CoverLetter, PageSize, PortfolioContent, PortfolioDocument, PortfolioEntry,
+            PortfolioHeader, PortfolioInput, PortfolioKind, PortfolioSection, PortfolioStart,
+            PortfolioStyle, SectionKind,
         },
         profile::{Profile, ProfileCredential},
     },
@@ -25,12 +26,16 @@ use crate::{
 };
 
 pub const DEFAULT_TEMPLATE: &str = "modern";
+pub const DEFAULT_LETTER_TEMPLATE: &str = "letter-classic";
 const MAX_SECTIONS: usize = 30;
 const MAX_ENTRIES: usize = 60;
 const MAX_TAGS: usize = 100;
 const MAX_TITLE: usize = 200;
 const MAX_DESCRIPTION: usize = 5_000;
 const MAX_TEXT: usize = 8_000;
+const MAX_LETTER_BODY: usize = 12_000;
+/// Largest header photo (a data URL) kept in a document.
+const MAX_PHOTO_BYTES: usize = 400 * 1024;
 /// Largest exported PDF accepted from the interface.
 const MAX_PDF_BYTES: usize = 25 * 1024 * 1024;
 
@@ -43,7 +48,7 @@ pub fn get(state: &AppState, id: i64) -> AppResult<PortfolioDocument> {
 }
 
 /// A short random id for sections and entries.
-fn new_id() -> String {
+pub fn new_id() -> String {
     let mut bytes = [0u8; 6];
     getrandom::fill(&mut bytes).unwrap_or_default();
     bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -86,9 +91,174 @@ fn blank_content() -> PortfolioContent {
     }
 }
 
+fn sample_entry(
+    title: &str,
+    subtitle: &str,
+    location: &str,
+    start: &str,
+    end: &str,
+    description: &str,
+) -> PortfolioEntry {
+    PortfolioEntry {
+        location: location.into(),
+        start: start.into(),
+        end: end.into(),
+        description: description.into(),
+        ..entry(title, subtitle)
+    }
+}
+
+/// Sample content, to see a template with text in it. It is clearly a
+/// sample (a made-up person) and is replaced as the user edits.
+pub fn sample_content() -> PortfolioContent {
+    PortfolioContent {
+        header: PortfolioHeader {
+            full_name: "Alex Morgan".into(),
+            headline: "Senior Data Engineer".into(),
+            email: "alex.morgan@example.com".into(),
+            phone: "+44 20 7946 0000".into(),
+            location: "London, UK".into(),
+            website: "https://alexmorgan.example".into(),
+            linkedin: "https://linkedin.com/in/alexmorgan".into(),
+            github: "https://github.com/alexmorgan".into(),
+            photo: String::new(),
+        },
+        sections: vec![
+            section(
+                SectionKind::Summary,
+                Vec::new(),
+                "Data engineer with eight years of experience building reliable pipelines and \
+                 analytics platforms. Led the migration of a 40 TB warehouse to a lakehouse \
+                 with zero downtime, and mentors a team of five."
+                    .into(),
+            ),
+            section(
+                SectionKind::Experience,
+                vec![
+                    sample_entry(
+                        "Senior Data Engineer",
+                        "Northwind Analytics",
+                        "London",
+                        "2021-03",
+                        "Present",
+                        "- Designed the streaming platform that processes 2 billion events a day\n\
+                         - Cut warehouse costs by 35% by moving cold data to object storage\n\
+                         - Introduced data contracts, reducing schema incidents by half",
+                    ),
+                    sample_entry(
+                        "Data Engineer",
+                        "Contoso Retail",
+                        "Manchester",
+                        "2018-01",
+                        "2021-02",
+                        "- Built the nightly ETL for 120 stores in Spark and Airflow\n\
+                         - Owned the customer 360 model used by marketing and finance",
+                    ),
+                ],
+                String::new(),
+            ),
+            section(
+                SectionKind::Projects,
+                vec![PortfolioEntry {
+                    url: "https://github.com/alexmorgan/lakehouse-kit".into(),
+                    ..sample_entry(
+                        "Lakehouse Kit",
+                        "Open source",
+                        "",
+                        "2023",
+                        "",
+                        "A toolkit for table maintenance and quality checks on open table formats.",
+                    )
+                }],
+                String::new(),
+            ),
+            section(
+                SectionKind::Education,
+                vec![sample_entry(
+                    "MSc Computer Science",
+                    "University of Edinburgh",
+                    "Edinburgh",
+                    "2014",
+                    "2016",
+                    "",
+                )],
+                String::new(),
+            ),
+            section(
+                SectionKind::Skills,
+                vec![
+                    PortfolioEntry {
+                        tags: ["Python", "SQL", "Scala", "Spark", "Airflow", "dbt"]
+                            .map(String::from)
+                            .to_vec(),
+                        ..entry("Engineering", "")
+                    },
+                    PortfolioEntry {
+                        tags: ["AWS", "Kubernetes", "Terraform", "Kafka"]
+                            .map(String::from)
+                            .to_vec(),
+                        ..entry("Platform", "")
+                    },
+                ],
+                String::new(),
+            ),
+            section(
+                SectionKind::Certifications,
+                vec![sample_entry(
+                    "AWS Certified Data Analytics",
+                    "Amazon Web Services",
+                    "",
+                    "",
+                    "2022",
+                    "",
+                )],
+                String::new(),
+            ),
+            section(
+                SectionKind::Languages,
+                vec![entry("English", "Native"), entry("German", "B2")],
+                String::new(),
+            ),
+        ],
+    }
+}
+
+/// A sample cover letter, matching the sample CV.
+pub fn sample_letter() -> CoverLetter {
+    CoverLetter {
+        recipient_name: "Jordan Lee".into(),
+        recipient_title: "Head of Data Platform".into(),
+        company: "Fabrikam".into(),
+        address: "1 Market Street\nLondon EC1A 1AA".into(),
+        position: "Staff Data Engineer".into(),
+        date: "12 March 2026".into(),
+        subject: "Application for Staff Data Engineer".into(),
+        greeting: "Dear Jordan Lee,".into(),
+        body: "I am writing to apply for the Staff Data Engineer position at Fabrikam. Over \
+               the past eight years I have built streaming and batch platforms that teams rely \
+               on every day, most recently at Northwind Analytics.\n\nAt Northwind I designed \
+               the platform that now processes two billion events a day and led a warehouse \
+               migration with no downtime. I care about data contracts, clear ownership and \
+               tooling that makes the right thing the easy thing.\n\nI would welcome the chance \
+               to discuss how I could contribute to your platform team."
+            .into(),
+        closing: "Kind regards,".into(),
+        signature: "Alex Morgan".into(),
+    }
+}
+
+/// Empty letter parts with a greeting and closing already in.
+fn blank_letter() -> CoverLetter {
+    CoverLetter {
+        greeting: "Dear Hiring Manager,".into(),
+        closing: "Kind regards,".into(),
+        ..CoverLetter::default()
+    }
+}
+
 /// A one-time copy of the Custom Profile and credentials. Afterwards the
 /// document and the Profile are edited independently.
-fn content_from_profile(profile: &Profile, credentials: &[ProfileCredential]) -> PortfolioContent {
+pub fn content_from_profile(profile: &Profile, credentials: &[ProfileCredential]) -> PortfolioContent {
     let header = PortfolioHeader {
         full_name: profile.full_name(),
         headline: profile.title.clone(),
@@ -102,6 +272,7 @@ fn content_from_profile(profile: &Profile, credentials: &[ProfileCredential]) ->
         },
         linkedin: profile.linkedin.clone(),
         github: profile.github.clone(),
+        photo: String::new(),
     };
     let experience = profile
         .experience
@@ -185,33 +356,75 @@ fn content_from_profile(profile: &Profile, credentials: &[ProfileCredential]) ->
     PortfolioContent { header, sections }
 }
 
-pub fn create(
-    state: &AppState,
-    name: &str,
-    template_id: &str,
-    page_size: PageSize,
-    start: PortfolioStart,
-) -> AppResult<PortfolioDocument> {
-    let content = match start {
-        PortfolioStart::Blank => blank_content(),
-        PortfolioStart::CustomProfile => state.db.call(|c| {
+/// What a new document is made from.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PortfolioCreate {
+    pub name: String,
+    pub kind: PortfolioKind,
+    pub template_id: String,
+    pub page_size: Option<PageSize>,
+    pub start: Option<PortfolioStart>,
+    /// Reviewed content from an import (`start` is then ignored).
+    pub content: Option<PortfolioContent>,
+    pub letter: Option<CoverLetter>,
+    pub source_document_id: Option<i64>,
+}
+
+pub fn create(state: &AppState, request: PortfolioCreate) -> AppResult<PortfolioDocument> {
+    let start = request.start.unwrap_or(PortfolioStart::Blank);
+    let profile = || {
+        state.db.call(|c| {
             let (profile, _) = profile_repo::get(c)?;
             Ok(content_from_profile(
                 &profile,
                 &profile_repo::list_credentials(c)?,
             ))
-        })?,
+        })
+    };
+    let content = match (request.content, start) {
+        (Some(content), _) => content,
+        (None, PortfolioStart::Blank) => blank_content(),
+        (None, PortfolioStart::Sample) => sample_content(),
+        (None, PortfolioStart::CustomProfile) => profile()?,
+    };
+    let letter = match (request.letter, request.kind, start) {
+        (Some(letter), _, _) => letter,
+        (None, PortfolioKind::CoverLetter, PortfolioStart::Sample) => sample_letter(),
+        (None, PortfolioKind::CoverLetter, PortfolioStart::CustomProfile) => CoverLetter {
+            signature: content.header.full_name.clone(),
+            ..blank_letter()
+        },
+        (None, PortfolioKind::CoverLetter, PortfolioStart::Blank) => blank_letter(),
+        (None, PortfolioKind::Cv, _) => CoverLetter::default(),
+    };
+    let template_id = if request.template_id.trim().is_empty() {
+        match request.kind {
+            PortfolioKind::Cv => DEFAULT_TEMPLATE,
+            PortfolioKind::CoverLetter => DEFAULT_LETTER_TEMPLATE,
+        }
+        .to_string()
+    } else {
+        request.template_id
     };
     let input = normalize(PortfolioInput {
-        name: if name.trim().is_empty() {
-            "Untitled CV".into()
+        name: if request.name.trim().is_empty() {
+            match request.kind {
+                PortfolioKind::Cv => "Untitled CV",
+                PortfolioKind::CoverLetter => "Untitled cover letter",
+            }
+            .into()
         } else {
-            name.to_string()
+            request.name
         },
-        template_id: template_id.to_string(),
-        page_size,
+        kind: request.kind,
+        template_id,
+        page_size: request.page_size.unwrap_or(PageSize::A4),
         accent: String::new(),
+        style: PortfolioStyle::default(),
         content,
+        letter,
+        source_document_id: request.source_document_id,
     })?;
     let document = state.db.call(|c| {
         let id = repo::insert(c, &input, now_ms())?;
@@ -241,12 +454,29 @@ pub fn duplicate(state: &AppState, id: i64) -> AppResult<PortfolioDocument> {
             .collect();
         let copy = PortfolioInput {
             name,
+            kind: original.kind,
             template_id: original.template_id,
             page_size: original.page_size,
             accent: original.accent,
+            style: original.style,
             content: original.content,
+            letter: original.letter,
+            source_document_id: original.source_document_id,
         };
         let id = repo::insert(c, &copy, now_ms())?;
+        repo::get(c, id)
+    })?;
+    state.events.portfolio_changed();
+    Ok(document)
+}
+
+pub fn rename(state: &AppState, id: i64, name: &str) -> AppResult<PortfolioDocument> {
+    let name = line(name, 120, "Name")?;
+    if name.is_empty() {
+        return Err(AppError::validation("Give the document a name."));
+    }
+    let document = state.db.call(|c| {
+        repo::rename(c, id, &name, now_ms())?;
         repo::get(c, id)
     })?;
     state.events.portfolio_changed();
@@ -322,6 +552,106 @@ fn normalize_accent(value: &str) -> AppResult<String> {
     Ok(value)
 }
 
+fn normalize_color(value: &str, field: &str) -> AppResult<String> {
+    normalize_accent(value).map_err(|_| {
+        AppError::validation(format!("{field}: choose a color from the picker."))
+    })
+}
+
+/// One of a fixed set of choices, or empty.
+fn choice(value: &str, allowed: &[&str], field: &str) -> AppResult<String> {
+    let value = value.trim().to_lowercase();
+    if value.is_empty() || allowed.contains(&value.as_str()) {
+        Ok(value)
+    } else {
+        Err(AppError::validation(format!("{field}: unknown option.")))
+    }
+}
+
+fn normalize_style(s: PortfolioStyle) -> AppResult<PortfolioStyle> {
+    let scale = if s.scale == 0.0 {
+        0.0
+    } else if s.scale.is_finite() && (0.8..=1.25).contains(&s.scale) {
+        (s.scale * 100.0).round() / 100.0
+    } else {
+        return Err(AppError::validation("Text size: choose a size from the list."));
+    };
+    Ok(PortfolioStyle {
+        palette: line(&s.palette, 40, "Palette")?,
+        heading_color: normalize_color(&s.heading_color, "Heading color")?,
+        text_color: normalize_color(&s.text_color, "Text color")?,
+        background_color: normalize_color(&s.background_color, "Background")?,
+        panel_color: normalize_color(&s.panel_color, "Sidebar color")?,
+        font_pairing: line(&s.font_pairing, 40, "Fonts")?,
+        scale,
+        margins: choice(&s.margins, &["narrow", "normal", "wide"], "Margins")?,
+        line_spacing: choice(&s.line_spacing, &["tight", "normal", "relaxed"], "Line spacing")?,
+        section_spacing: choice(
+            &s.section_spacing,
+            &["tight", "normal", "relaxed"],
+            "Section spacing",
+        )?,
+        columns: choice(
+            &s.columns,
+            &["single", "sidebar_left", "sidebar_right", "columns_right"],
+            "Layout",
+        )?,
+        pattern: choice(&s.pattern, &["none", "dots", "grid", "diagonal"], "Pattern")?,
+        dividers: choice(&s.dividers, &["none", "hairline", "dotted", "thick"], "Dividers")?,
+        header: choice(
+            &s.header,
+            &["left", "center", "band", "split", "stacked"],
+            "Header",
+        )?,
+        sidebar: choice(&s.sidebar, &["tinted", "plain", "outlined"], "Sidebar")?,
+        text_align: choice(&s.text_align, &["left", "justify"], "Alignment")?,
+        show_photo: s.show_photo,
+    })
+}
+
+fn normalize_letter(l: CoverLetter) -> AppResult<CoverLetter> {
+    Ok(CoverLetter {
+        recipient_name: line(&l.recipient_name, MAX_TITLE, "Recipient")?,
+        recipient_title: line(&l.recipient_title, MAX_TITLE, "Recipient title")?,
+        company: line(&l.company, MAX_TITLE, "Company")?,
+        address: text(&l.address, 600, "Address")?,
+        position: line(&l.position, MAX_TITLE, "Position")?,
+        date: line(&l.date, 80, "Date")?,
+        subject: line(&l.subject, MAX_TITLE, "Subject")?,
+        greeting: line(&l.greeting, MAX_TITLE, "Greeting")?,
+        body: text(&l.body, MAX_LETTER_BODY, "Letter")?,
+        closing: line(&l.closing, MAX_TITLE, "Closing")?,
+        signature: line(&l.signature, MAX_TITLE, "Signature")?,
+    })
+}
+
+/// A `data:image/(png|jpeg|webp);base64,…` URL of a bounded size, or empty.
+fn normalize_photo(value: &str) -> AppResult<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(String::new());
+    }
+    let ok = ["data:image/png;base64,", "data:image/jpeg;base64,", "data:image/webp;base64,"]
+        .iter()
+        .any(|prefix| value.starts_with(prefix));
+    if !ok {
+        return Err(AppError::validation("Photo: choose a PNG, JPEG or WebP image."));
+    }
+    if value.len() > MAX_PHOTO_BYTES * 4 / 3 + 40 {
+        return Err(AppError::validation(
+            "Photo: choose a smaller image (up to 400 KB).",
+        ));
+    }
+    let payload = &value[value.find(',').unwrap_or(0) + 1..];
+    if !payload
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'=')
+    {
+        return Err(AppError::validation("Photo: the image data is not valid."));
+    }
+    Ok(value.to_string())
+}
+
 fn normalize_entry(e: PortfolioEntry) -> AppResult<PortfolioEntry> {
     if e.tags.len() > MAX_TAGS {
         return Err(AppError::validation("Too many skills in one group."));
@@ -360,6 +690,7 @@ fn normalize_content(content: PortfolioContent) -> AppResult<PortfolioContent> {
         website: normalize_url(&h.website, "Website")?,
         linkedin: normalize_url(&h.linkedin, "LinkedIn")?,
         github: normalize_url(&h.github, "GitHub")?,
+        photo: normalize_photo(&h.photo)?,
     };
     let mut sections = Vec::with_capacity(content.sections.len());
     let mut seen = std::collections::HashSet::new();
@@ -405,10 +736,14 @@ fn normalize(input: PortfolioInput) -> AppResult<PortfolioInput> {
     }
     Ok(PortfolioInput {
         name,
+        kind: input.kind,
         template_id: input.template_id,
         page_size: input.page_size,
         accent: normalize_accent(&input.accent)?,
+        style: normalize_style(input.style)?,
         content: normalize_content(input.content)?,
+        letter: normalize_letter(input.letter)?,
+        source_document_id: input.source_document_id.filter(|id| *id > 0),
     })
 }
 
@@ -416,6 +751,7 @@ fn normalize(input: PortfolioInput) -> AppResult<PortfolioInput> {
 
 /// The visible content as plain text, for Profile context.
 pub fn plain_text(content: &PortfolioContent) -> String {
+    // The letter body is not part of Profile context: it is per-application.
     let h = &content.header;
     let mut out: Vec<String> = Vec::new();
     let head = [
@@ -439,6 +775,17 @@ pub fn plain_text(content: &PortfolioContent) -> String {
         out.push(format!("Links: {links}"));
     }
     for section in content.sections.iter().filter(|s| s.visible) {
+        let block = section_text(section);
+        if !block.is_empty() {
+            out.push(format!("{}:\n{}", section.title, block));
+        }
+    }
+    out.join("\n\n")
+}
+
+/// One section's visible text (without its title).
+pub fn section_text(section: &PortfolioSection) -> String {
+    {
         let mut block: Vec<String> = Vec::new();
         if !section.text.is_empty() {
             block.push(section.text.clone());
@@ -474,11 +821,8 @@ pub fn plain_text(content: &PortfolioContent) -> String {
                 block.push(item);
             }
         }
-        if !block.is_empty() {
-            out.push(format!("{}:\n{}", section.title, block.join("\n")));
-        }
+        block.join("\n")
     }
-    out.join("\n\n")
 }
 
 #[cfg(test)]
@@ -495,10 +839,24 @@ mod tests {
         testing::state(Arc::new(FakeLanguageModel::replying(&[]))).0
     }
 
+    fn input(name: &str, template_id: &str, page_size: PageSize, accent: &str, content: PortfolioContent) -> PortfolioInput {
+        PortfolioInput {
+            name: name.into(),
+            kind: PortfolioKind::Cv,
+            template_id: template_id.into(),
+            page_size,
+            accent: accent.into(),
+            style: PortfolioStyle::default(),
+            content,
+            letter: CoverLetter::default(),
+            source_document_id: None,
+        }
+    }
+
     #[test]
     fn creates_blank_and_profile_based_documents() {
         let state = state();
-        let blank = create(&state, "", "minimal", PageSize::A4, PortfolioStart::Blank).unwrap();
+        let blank = create(&state, PortfolioCreate { template_id: "minimal".into(), ..Default::default() }).unwrap();
         assert_eq!(blank.name, "Untitled CV");
         assert_eq!(blank.content.sections.len(), 5);
         assert!(blank.content.header.full_name.is_empty());
@@ -522,10 +880,13 @@ mod tests {
         .unwrap();
         let copy = create(
             &state,
-            "Data CV",
-            "technical",
-            PageSize::Letter,
-            PortfolioStart::CustomProfile,
+            PortfolioCreate {
+                name: "Data CV".into(),
+                template_id: "technical".into(),
+                page_size: Some(PageSize::Letter),
+                start: Some(PortfolioStart::CustomProfile),
+                ..Default::default()
+            },
         )
         .unwrap();
         assert_eq!(copy.content.header.full_name, "Ana Tester");
@@ -535,13 +896,7 @@ mod tests {
         assert_eq!(copy.content.sections[3].entries[0].tags, ["Rust", "SQL"]);
 
         // The copy is independent: editing it leaves the Custom Profile alone.
-        let mut input = PortfolioInput {
-            name: copy.name.clone(),
-            template_id: copy.template_id.clone(),
-            page_size: copy.page_size,
-            accent: String::new(),
-            content: copy.content.clone(),
-        };
+        let mut input = input(&copy.name, &copy.template_id, copy.page_size, "", copy.content.clone());
         input.content.header.full_name = "A. Tester".into();
         save(&state, copy.id, input).unwrap();
         let (saved_profile, _) = state.db.call(|c| profile_db::get(c)).unwrap();
@@ -551,7 +906,15 @@ mod tests {
     #[test]
     fn switching_templates_keeps_content_and_duplicates_are_independent() {
         let state = state();
-        let doc = create(&state, "CV", "minimal", PageSize::A4, PortfolioStart::Blank).unwrap();
+        let doc = create(
+            &state,
+            PortfolioCreate {
+                name: "CV".into(),
+                template_id: "minimal".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let mut content = doc.content.clone();
         content.header.full_name = "Ana Tester".into();
         content.sections[0].text = "Builds data platforms.".into();
@@ -560,13 +923,7 @@ mod tests {
         let saved = save(
             &state,
             doc.id,
-            PortfolioInput {
-                name: "CV".into(),
-                template_id: "minimal".into(),
-                page_size: PageSize::A4,
-                accent: "#0A66C2".into(),
-                content: content.clone(),
-            },
+            input("CV", "minimal", PageSize::A4, "#0A66C2", content.clone()),
         )
         .unwrap();
         assert_eq!(saved.accent, "#0a66c2");
@@ -574,13 +931,7 @@ mod tests {
         let switched = save(
             &state,
             doc.id,
-            PortfolioInput {
-                name: "CV".into(),
-                template_id: "executive".into(),
-                page_size: PageSize::Letter,
-                accent: String::new(),
-                content: saved.content.clone(),
-            },
+            input("CV", "executive", PageSize::Letter, "", saved.content.clone()),
         )
         .unwrap();
         assert_eq!(switched.template_id, "executive");
@@ -605,14 +956,16 @@ mod tests {
     #[test]
     fn rejects_invalid_content_and_pdfs() {
         let state = state();
-        let doc = create(&state, "CV", "minimal", PageSize::A4, PortfolioStart::Blank).unwrap();
-        let base = PortfolioInput {
-            name: "CV".into(),
-            template_id: "minimal".into(),
-            page_size: PageSize::A4,
-            accent: String::new(),
-            content: doc.content.clone(),
-        };
+        let doc = create(
+            &state,
+            PortfolioCreate {
+                name: "CV".into(),
+                template_id: "minimal".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let base = input("CV", "minimal", PageSize::A4, "", doc.content.clone());
         let mut bad_link = base.clone();
         bad_link.content.header.website = "javascript:alert(1)".into();
         let mut bad_template = base.clone();

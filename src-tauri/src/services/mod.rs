@@ -11,6 +11,8 @@ pub mod mail_monitor;
 pub mod mcp;
 pub mod notifications;
 pub mod portfolio;
+pub mod portfolio_ai;
+pub mod portfolio_import;
 pub mod profile;
 pub mod profile_context;
 pub mod profile_import;

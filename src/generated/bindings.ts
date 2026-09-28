@@ -240,8 +240,38 @@ export const commands = {
 	/**  Deletes a credential and its file. */
 	deleteCredential: (id: number) => __TAURI_INVOKE<null>("delete_credential", { id }),
 	listPortfolios: () => __TAURI_INVOKE<PortfolioDocument[]>("list_portfolios"),
-	/**  A new document, blank or with a one-time copy of the Custom Profile. */
-	createPortfolio: (name: string, templateId: string, pageSize: PageSize, start: PortfolioStart) => __TAURI_INVOKE<PortfolioDocument>("create_portfolio", { name, templateId, pageSize, start }),
+	/**
+	 *  A new document: blank, sample, a one-time copy of the Custom Profile, or
+	 *  reviewed content from an import.
+	 */
+	createPortfolio: (request: PortfolioCreate) => __TAURI_INVOKE<PortfolioDocument>("create_portfolio", { request }),
+	getPortfolio: (id: number) => __TAURI_INVOKE<PortfolioDocument>("get_portfolio", { id }),
+	renamePortfolio: (id: number, name: string) => __TAURI_INVOKE<PortfolioDocument>("rename_portfolio", { id, name }),
+	/**
+	 *  Lets the user pick a CV or cover letter file, stores it as a Profile
+	 *  document (the original is never changed) and reads it into editable
+	 *  parts for review. `None` if the user cancelled.
+	 */
+	importPortfolioFile: (kind: PortfolioKind) => __TAURI_INVOKE<{
+	/**  The stored Profile document (the original file, kept as is). */
+	documentId: number,
+	documentName: string,
+	kind: PortfolioKind,
+	content: PortfolioContent,
+	letter: CoverLetter,
+	/**  The model that read the text, if one was used. */
+	model: string | null,
+	/**  What could not be read, and why. */
+	notes: string[],
+	/**  Entry or field ids the model was unsure about. */
+	uncertain: string[],
+	/**  The original file has readable text (a scanned file has none). */
+	hasText: boolean,
+} | null>("import_portfolio_file", { kind }),
+	/**  Reads a document already in the Profile (an older CV) for review. */
+	importPortfolioDocument: (documentId: number, kind: PortfolioKind) => __TAURI_INVOKE<PortfolioImport>("import_portfolio_document", { documentId, kind }),
+	/**  One AI assistant request; the answer is a proposal for review. */
+	portfolioAiAssist: (request: AiRequest) => __TAURI_INVOKE<AiProposal>("portfolio_ai_assist", { request }),
 	savePortfolio: (id: number, input: PortfolioInput) => __TAURI_INVOKE<PortfolioDocument>("save_portfolio", { id, input }),
 	duplicatePortfolio: (id: number) => __TAURI_INVOKE<PortfolioDocument>("duplicate_portfolio", { id }),
 	deletePortfolio: (id: number) => __TAURI_INVOKE<null>("delete_portfolio", { id }),
@@ -490,6 +520,55 @@ export type AgentInput = {
 
 /**  Agents were created, changed or deleted. */
 export type AgentsChanged = null;
+
+/**  What the AI assistant is asked to do. */
+export type AiAction = "improve" | "shorten" | "expand" | "achievements" | "tailor" | "translate" | "tone" | "suggest_missing" | "populate" | "custom";
+
+/**  A proposed change, shown for review; nothing is applied by ReMa. */
+export type AiProposal = {
+	scope: AiScope,
+	/**  Scope `Selection`: the replacement text. */
+	text: string | null,
+	/**  Scope `Section`: the replacement section (same id). */
+	section: PortfolioSection | null,
+	/**  Scope `Document`: the replacement content (CV) … */
+	content: PortfolioContent | null,
+	/**  … or letter (cover letter). */
+	letter: CoverLetter | null,
+	/**  What the model suggests adding or says is missing. */
+	notes: string[],
+	/**  Facts in the proposal that the source material does not contain. */
+	warnings: string[],
+	model: string,
+};
+
+export type AiRequest = {
+	kind: PortfolioKind,
+	content: PortfolioContent,
+	letter: CoverLetter,
+	action: AiAction,
+	scope: AiScope,
+	/**  A free-text instruction (required for `Custom`, optional otherwise). */
+	instruction?: string,
+	/**  The selected text (scope `Selection`). */
+	selection?: string,
+	/**  The section (scope `Section`), or the section the selection is in. */
+	sectionId?: string,
+	/**  The job posting to tailor to (`Tailor`). */
+	jobText?: string,
+	/**  Target language (`Translate`) or tone (`Tone`). */
+	target?: string,
+	/**  `Populate`: where the facts come from. */
+	source?: AiSource | null,
+	sourceDocumentId?: number | null,
+};
+
+export type AiScope = "selection" | "section" | "document";
+
+/**  Where a `Populate` request takes its facts from. */
+export type AiSource = "profile" | 
+/**  A Profile document (an older CV) by id. */
+"document";
 
 export type Alternative = {
 	name: string,
@@ -1433,6 +1512,23 @@ export type Correspondence = {
 	webLink: string | null,
 	/**  processed | ambiguous | failed | pending */
 	status: string,
+};
+
+/**  A cover letter's own parts (the sender comes from the header). */
+export type CoverLetter = {
+	recipientName?: string,
+	recipientTitle?: string,
+	company?: string,
+	/**  Multi-line address. */
+	address?: string,
+	position?: string,
+	date?: string,
+	subject?: string,
+	greeting?: string,
+	/**  Paragraphs separated by blank lines. */
+	body?: string,
+	closing?: string,
+	signature?: string,
 };
 
 export type CoverageCounts = {
@@ -2730,14 +2826,32 @@ export type PortfolioContent = {
 	sections: PortfolioSection[],
 };
 
+/**  What a new document is made from. */
+export type PortfolioCreate = {
+	name?: string,
+	kind?: PortfolioKind,
+	templateId?: string,
+	pageSize?: PageSize | null,
+	start?: PortfolioStart | null,
+	/**  Reviewed content from an import (`start` is then ignored). */
+	content?: PortfolioContent | null,
+	letter?: CoverLetter | null,
+	sourceDocumentId?: number | null,
+};
+
 export type PortfolioDocument = {
 	id: number,
 	name: string,
+	kind?: PortfolioKind,
 	templateId: string,
 	pageSize: PageSize,
 	/**  `#rrggbb`, or empty for the template's own color. */
 	accent: string,
+	style?: PortfolioStyle,
 	content: PortfolioContent,
+	letter?: CoverLetter,
+	/**  The Profile document this was rebuilt from, if any (kept as is). */
+	sourceDocumentId?: number | null,
 	createdAt: number,
 	updatedAt: number,
 };
@@ -2771,16 +2885,49 @@ export type PortfolioHeader = {
 	website: string,
 	linkedin: string,
 	github: string,
+	/**
+	 *  An optional photo as a `data:image/…;base64,…` URL (templates that
+	 *  place one show it; the others leave it out).
+	 */
+	photo?: string,
+};
+
+/**  What an import read from a file, for review before a document is made. */
+export type PortfolioImport = {
+	/**  The stored Profile document (the original file, kept as is). */
+	documentId: number,
+	documentName: string,
+	kind: PortfolioKind,
+	content: PortfolioContent,
+	letter: CoverLetter,
+	/**  The model that read the text, if one was used. */
+	model: string | null,
+	/**  What could not be read, and why. */
+	notes: string[],
+	/**  Entry or field ids the model was unsure about. */
+	uncertain: string[],
+	/**  The original file has readable text (a scanned file has none). */
+	hasText: boolean,
 };
 
 /**  What the editor saves. */
 export type PortfolioInput = {
 	name: string,
+	kind?: PortfolioKind,
 	templateId: string,
 	pageSize: PageSize,
 	accent: string,
+	style?: PortfolioStyle,
 	content: PortfolioContent,
+	letter?: CoverLetter,
+	sourceDocumentId?: number | null,
 };
+
+/**
+ *  What a Portfolio Studio document is: a CV, or a cover letter (the same
+ *  header, a letter body instead of sections).
+ */
+export type PortfolioKind = "cv" | "cover_letter";
 
 export type PortfolioSection = {
 	id: string,
@@ -2798,7 +2945,49 @@ export type PortfolioStart =
 /**  Empty standard sections. */
 "blank" | 
 /**  A one-time copy of the Custom Profile and credentials. */
-"custom_profile";
+"custom_profile" | 
+/**  Sample content, to see a template with text in it. */
+"sample";
+
+/**
+ *  The user's design choices on top of a template. Every field is empty
+ *  (or 0) for "the template's own"; the interface knows the allowed values
+ *  and the layout engine applies them. Kept as JSON so older documents
+ *  read as "template defaults".
+ */
+export type PortfolioStyle = {
+	/**  A curated palette id, or empty. */
+	palette?: string,
+	/**  `#rrggbb` overrides, or empty. */
+	headingColor?: string,
+	textColor?: string,
+	backgroundColor?: string,
+	panelColor?: string,
+	/**  A font pairing id, or empty. */
+	fontPairing?: string,
+	/**  Type scale multiplier (0 = the template's). */
+	scale?: number | null,
+	/**  `narrow`, `normal`, `wide`, or empty. */
+	margins?: string,
+	/**  `tight`, `normal`, `relaxed`, or empty. */
+	lineSpacing?: string,
+	/**  `tight`, `normal`, `relaxed`, or empty. */
+	sectionSpacing?: string,
+	/**  `single`, `sidebar_left`, `sidebar_right`, `columns_right`, or empty. */
+	columns?: string,
+	/**  `none`, `dots`, `grid`, `diagonal`, or empty. */
+	pattern?: string,
+	/**  `none`, `hairline`, `dotted`, `thick`, or empty. */
+	dividers?: string,
+	/**  `left`, `center`, `band`, `split`, `stacked`, or empty. */
+	header?: string,
+	/**  `tinted`, `plain`, `outlined`, or empty. */
+	sidebar?: string,
+	/**  `left`, `justify`, or empty. */
+	textAlign?: string,
+	/**  Show the header photo when there is one. */
+	showPhoto?: boolean,
+};
 
 export type PricePoint = {
 	/**  "49", "700–900", "from 1,200". */
@@ -3418,7 +3607,7 @@ export type ScopeKind =
 /**  Every stored job search (the default). */
 "all" | "searches" | "jobs";
 
-export type SectionKind = "summary" | "experience" | "projects" | "education" | "skills" | "languages" | "certifications" | "links" | "custom";
+export type SectionKind = "summary" | "experience" | "projects" | "education" | "skills" | "languages" | "certifications" | "publications" | "links" | "custom";
 
 export type Segment = {
 	id: string,

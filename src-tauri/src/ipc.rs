@@ -149,6 +149,11 @@ pub fn builder() -> Builder<tauri::Wry> {
             // Portfolio Studio
             commands::portfolio::list_portfolios,
             commands::portfolio::create_portfolio,
+            commands::portfolio::get_portfolio,
+            commands::portfolio::rename_portfolio,
+            commands::portfolio::import_portfolio_file,
+            commands::portfolio::import_portfolio_document,
+            commands::portfolio::portfolio_ai_assist,
             commands::portfolio::save_portfolio,
             commands::portfolio::duplicate_portfolio,
             commands::portfolio::delete_portfolio,
