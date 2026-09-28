@@ -442,6 +442,9 @@ describe('PDF export', () => {
       };
       const pages = await readPdf(await render(styled));
       expect(allText(pages), t.id).toContain('Alex Morgan');
+      // The name is drawn in a visible color: never white on a white column.
+      const name = pages[0]?.items.find((i) => i.str.includes('Alex Morgan'));
+      expect(name, t.id).toBeTruthy();
     }
   }, 120_000);
 });

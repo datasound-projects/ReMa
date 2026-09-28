@@ -1114,7 +1114,9 @@ export function buildDocument(input: LayoutInput): TDocumentDefinitions {
     const sideStyle = t.sidebar.style ?? (panel ? 'tinted' : 'plain');
     const tinted = panel && sideStyle === 'tinted';
     const sideTheme: Theme = tinted ? th : { ...th, panelText: t.colors.text, panelMuted: t.colors.muted, panel: t.colors.background ?? '#ffffff' };
-    const headerResult = header(input, th, panel ? mainWidth : fullWidth, !panel);
+    // A color band cannot bleed across a side panel: the header sits in the main column.
+    const headerTheme: Theme = panel && t.header === 'band' ? { ...th, t: { ...t, header: 'left' } } : th;
+    const headerResult = header(input, headerTheme, panel ? mainWidth : fullWidth, !panel);
     const contact = panel ? sideContact(input, sideTheme, sideWidth) : [];
     const sideStack: Content[] = [
       ...contact,
