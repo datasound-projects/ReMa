@@ -34,10 +34,12 @@ use crate::{
     models::mcp::{McpAuth, McpToolInfo, McpTransport},
 };
 
-/// How long starting a server and listing its tools may take.
-pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(45);
-/// How long one tool call may take.
-pub const CALL_TIMEOUT: Duration = Duration::from_secs(180);
+/// How long starting a server and listing its tools may take (a first
+/// `npx -y` or `uvx` run downloads the server).
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(90);
+/// How long one tool call may take. Long-running tools (builds, crawls)
+/// are common; the user can stop an answer at any time.
+pub const CALL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// Largest tool result given to a model (characters).
 const MAX_RESULT_CHARS: usize = 40_000;
 
@@ -186,32 +188,6 @@ fn lifecycle() -> ClientLifecycleMode {
     }
 }
 
-/// Environment variables passed on from ReMa (like the official MCP SDKs'
-/// default environment); everything else a server needs is configured.
-const INHERITED_ENV: &[&str] = if cfg!(windows) {
-    &[
-        "APPDATA",
-        "HOMEDRIVE",
-        "HOMEPATH",
-        "LOCALAPPDATA",
-        "PATHEXT",
-        "PROCESSOR_ARCHITECTURE",
-        "PROGRAMDATA",
-        "PROGRAMFILES",
-        "SYSTEMDRIVE",
-        "SYSTEMROOT",
-        "TEMP",
-        "TMP",
-        "USERNAME",
-        "USERPROFILE",
-        "WINDIR",
-    ]
-} else {
-    &[
-        "HOME", "LOGNAME", "SHELL", "TERM", "USER", "LANG", "LC_ALL", "TMPDIR",
-    ]
-};
-
 /// The last lines a local server printed on stderr (to explain failures).
 #[derive(Clone, Default)]
 pub struct StderrTail(Arc<Mutex<VecDeque<String>>>);
@@ -259,14 +235,30 @@ async fn spawn_local(
         )));
     };
 
+    // Like Claude Code: the server gets ReMa's whole environment, plus what
+    // the user's login shell sets up (an app opened from the Finder or the
+    // Dock does not have it), then its own variables.
     let mut command = tokio::process::Command::new(&located.path);
-    command.args(&config.args).env_clear();
-    for name in INHERITED_ENV {
-        if let Some(value) = std::env::var_os(name) {
-            command.env(name, value);
+    command.args(&config.args);
+    let login = locate::login_environment().await;
+    for (name, value) in login {
+        command.env(name, value);
+    }
+    // ReMa's own settings (debug and test overrides) stay with ReMa.
+    for (name, _) in std::env::vars_os().chain(login.clone()) {
+        if name.to_string_lossy().starts_with("REMA_") {
+            command.env_remove(name);
         }
     }
-    command.env("PATH", locate::extended_path(&located.path_dirs));
+    command.env(
+        "PATH",
+        locate::extended_path_with(
+            &located.path_dirs,
+            login
+                .get(std::ffi::OsStr::new("PATH"))
+                .map(|p| p.as_os_str()),
+        ),
+    );
     for (name, value) in &config.env {
         command.env(name, value);
     }

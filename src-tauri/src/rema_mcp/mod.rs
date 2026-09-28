@@ -25,6 +25,7 @@ pub mod filter;
 pub mod host;
 pub mod server;
 pub mod sources;
+pub mod stdio;
 pub mod store;
 #[cfg(test)]
 mod tests;

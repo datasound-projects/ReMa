@@ -15,6 +15,10 @@ use crate::{
     mcp::{
         client::{self, ConnectError, ServerConfig},
         config::{self, env_account, oauth_account, secret_account},
+        import::{
+            self, McpImportCandidate, McpImportRequest, McpImportResult, McpImportSkip,
+            McpImportSource,
+        },
         oauth::{self, KeychainCredentials},
     },
     models::mcp::{
@@ -159,6 +163,94 @@ pub async fn save(
     state.mcp.disconnect(id);
     state.events.mcp_changed();
     get(state, id)
+}
+
+/// The apps on this computer with MCP servers ReMa can add (Claude
+/// Desktop, Claude Code, Cursor, VS Code, Windsurf). Names and programs
+/// only; values stay in Rust.
+pub async fn import_sources(state: &AppState) -> AppResult<Vec<McpImportSource>> {
+    let env = import::environment().await;
+    let existing = server_names(state)?;
+    let lookup = move |name: &str| env.get(name).cloned();
+    tokio::task::spawn_blocking(move || import::sources(&lookup, &existing))
+        .await
+        .map_err(|e| AppError::internal(e.to_string()))
+}
+
+/// The servers in pasted JSON, as `import_sources` shows them.
+pub async fn preview_import(state: &AppState, json: &str) -> AppResult<Vec<McpImportCandidate>> {
+    let value = import::request_config(&McpImportRequest {
+        app: None,
+        json: Some(json.to_string()),
+        names: Vec::new(),
+    })?;
+    let env = import::environment().await;
+    let lookup = |name: &str| env.get(name).cloned();
+    let found = import::candidates(&value, &lookup, &server_names(state)?);
+    if found.is_empty() {
+        return Err(AppError::validation(
+            "No MCP servers were found. Paste an mcpServers block, e.g. from              claude_desktop_config.json.",
+        ));
+    }
+    Ok(found)
+}
+
+/// Adds the chosen servers, turned on unless they were off in the other
+/// app. Servers whose name is already in ReMa are left alone.
+pub async fn import(state: &AppState, request: McpImportRequest) -> AppResult<McpImportResult> {
+    let value = import::request_config(&request)?;
+    let env = import::environment().await;
+    let lookup = |name: &str| env.get(name).cloned();
+    let servers = import::servers_in(&value);
+    let mut existing = server_names(state)?;
+    let mut result = McpImportResult {
+        added: Vec::new(),
+        skipped: Vec::new(),
+    };
+    for name in &request.names {
+        let skip = |reason: String| McpImportSkip {
+            name: name.clone(),
+            reason,
+        };
+        let Some((_, config)) = servers.iter().find(|(n, _)| n == name) else {
+            result
+                .skipped
+                .push(skip("It is no longer in that configuration.".into()));
+            continue;
+        };
+        if existing.iter().any(|e| e.eq_ignore_ascii_case(name.trim())) {
+            result
+                .skipped
+                .push(skip("A server with this name is already in ReMa.".into()));
+            continue;
+        }
+        let (input, disabled) = match import::to_input(name, config, &lookup) {
+            Ok(found) => found,
+            Err(reason) => {
+                result.skipped.push(skip(reason));
+                continue;
+            }
+        };
+        let server = match save(state, None, input).await {
+            Ok(server) => server,
+            Err(error) => {
+                result.skipped.push(skip(error.to_string()));
+                continue;
+            }
+        };
+        existing.push(server.name.clone());
+        let server = if disabled {
+            server
+        } else {
+            set_enabled(state, server.id, true)?
+        };
+        result.added.push(server);
+    }
+    Ok(result)
+}
+
+fn server_names(state: &AppState) -> AppResult<Vec<String>> {
+    Ok(list(state)?.into_iter().map(|s| s.name).collect())
 }
 
 pub async fn delete(state: &AppState, id: i64) -> AppResult<()> {
@@ -616,6 +708,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn adds_servers_from_another_apps_configuration() {
+        let state = state();
+        std::env::set_var("MCP_IMPORT_TEST_TOKEN", "tok-123");
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/mcp_test_server.mjs"
+        );
+        let json = serde_json::json!({ "mcpServers": {
+            "Fixture": {
+                "command": "node",
+                "args": [fixture],
+                "env": { "FAKE_MCP_ERA": "modern", "FAKE_MCP_TOKEN": "${MCP_IMPORT_TEST_TOKEN}" }
+            },
+            "Remote": {
+                "type": "http",
+                "url": "https://mcp.example.com/mcp",
+                "headers": { "Authorization": "Bearer ${MCP_IMPORT_TEST_TOKEN}" },
+                "disabled": true
+            },
+            "Shell": { "command": "bash", "args": ["-c", "x"] }
+        }})
+        .to_string();
+
+        let preview = preview_import(&state, &json).await.unwrap();
+        assert_eq!(preview.len(), 3);
+        assert!(preview[2].problem.is_some());
+        assert!(!serde_json::to_string(&preview).unwrap().contains("tok-123"));
+
+        let request = |names: &[&str]| McpImportRequest {
+            app: None,
+            json: Some(json.clone()),
+            names: names.iter().map(|n| n.to_string()).collect(),
+        };
+        let result = import(&state, request(&["Fixture", "Remote", "Shell"]))
+            .await
+            .unwrap();
+        let added: Vec<(&str, bool)> = result
+            .added
+            .iter()
+            .map(|s| (s.name.as_str(), s.enabled))
+            .collect();
+        // Turned on unless it was off in the other app.
+        assert_eq!(added, [("Fixture", true), ("Remote", false)]);
+        assert_eq!(result.skipped.len(), 1);
+        assert!(result.skipped[0].reason.contains("shell"));
+        let remote = &result.added[1];
+        assert_eq!((remote.auth, remote.has_secret), (McpAuth::Bearer, true));
+        assert_eq!(
+            state
+                .vault
+                .get_text(&secret_account(remote.id))
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("tok-123")
+        );
+
+        // The imported local server works, with its variables filled in.
+        if which_node().is_some() {
+            let conn = connect_server(&state, result.added[0].id).await.unwrap();
+            let (text, _) = conn
+                .call(
+                    "env",
+                    Default::default(),
+                    &tokio_util::sync::CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+            let seen: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(seen["token"], "tok-123");
+        }
+
+        // Importing again leaves the servers alone.
+        let again = import(&state, request(&["Fixture"])).await.unwrap();
+        assert!(again.added.is_empty());
+        assert!(again.skipped[0].reason.contains("already"));
+    }
+
+    fn which_node() -> Option<std::path::PathBuf> {
+        std::env::var_os("PATH").and_then(|path| {
+            std::env::split_paths(&path)
+                .map(|d| d.join("node"))
+                .find(|p| p.is_file())
+        })
+    }
+
+    #[tokio::test]
     async fn tests_modern_and_legacy_servers_over_stdio() {
         let state = state();
         for (era, version) in [("modern", "2026-07-28"), ("legacy", "2025-11-25")] {
@@ -637,10 +816,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_servers_get_only_their_own_environment() {
+    async fn local_servers_get_the_users_environment_and_their_own() {
         let state = state();
-        // A variable ReMa itself has must not leak into servers.
+        // Like Claude Code: the user's environment reaches the server (a
+        // token or proxy set in a shell profile), ReMa's own settings do not.
         std::env::set_var("REMA_PARENT_SECRET", "parent-only");
+        std::env::set_var("MCP_FIXTURE_USER_SETTING", "from-the-user");
         let Some(input) = fixture(
             "modern",
             vec![McpEnvVar {
@@ -665,6 +846,7 @@ mod tests {
         let seen: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(seen["token"], "server-token");
         assert_eq!(seen["parentSecret"], serde_json::Value::Null);
+        assert_eq!(seen["userSetting"], "from-the-user");
         assert_eq!(seen["hasPath"], true);
         assert_eq!(
             get(&state, server.id).unwrap().status.state,

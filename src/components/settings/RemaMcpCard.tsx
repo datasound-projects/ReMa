@@ -13,6 +13,7 @@ import { ChevronDownIcon, ChevronRightIcon, SearchIcon } from '../icons';
 import { Dialog } from '../ui/Dialog';
 import { StatusIndicator, type StatusTone } from '../ui/StatusIndicator';
 import { Switch } from '../ui/Switch';
+import { RemaMcpElsewhere } from './RemaMcpElsewhere';
 
 const READINESS: Record<Readiness, { tone: StatusTone; label: string }> = {
   ready: { tone: 'ready', label: 'Ready' },
@@ -41,6 +42,7 @@ export function RemaMcpCard() {
   const [error, setError] = useState<string | null>(null);
   const [showSources, setShowSources] = useState(false);
   const [checked, setChecked] = useState<string | null>(null);
+  const [elsewhere, setElsewhere] = useState(false);
 
   const status = override && override.after === latest ? override.status : (latest ?? override?.status ?? null);
 
@@ -131,6 +133,11 @@ export function RemaMcpCard() {
                 Check
               </button>
             )}
+            {status.enabled && (
+              <button type="button" className="button button--ghost button--small" onClick={() => setElsewhere(true)}>
+                Use in other apps…
+              </button>
+            )}
             <button
               type="button"
               className="button button--ghost button--small"
@@ -168,6 +175,8 @@ export function RemaMcpCard() {
           {error}
         </p>
       )}
+
+      {elsewhere && <RemaMcpElsewhere onClose={() => setElsewhere(false)} />}
 
       {step === 'warning' && (
         <Dialog

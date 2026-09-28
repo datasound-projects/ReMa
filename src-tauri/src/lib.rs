@@ -79,6 +79,10 @@ const BACKGROUND_ARG: &str = "--background";
 
 /// Builds and runs the desktop application.
 pub fn run() {
+    // `ReMa mcp`: ReMa MCP for other apps over stdio, without a window.
+    if rema_mcp::stdio::requested() {
+        std::process::exit(rema_mcp::stdio::run());
+    }
     let ipc = ipc::builder();
 
     // Keep the frontend bindings in sync while developing.
@@ -249,22 +253,36 @@ fn create_tray(app: &App) -> tauri::Result<()> {
 
 fn init_state(app: &App) -> Result<AppState, Box<dyn std::error::Error>> {
     let data_dir = app.path().app_data_dir()?;
-    std::fs::create_dir_all(&data_dir)?;
-    let db = Database::open(&data_dir.join("rema.db"))?;
+    let state = build_state(
+        data_dir,
+        AppInfo::from_package(app.package_info()),
+        Arc::new(TauriEvents(app.handle().clone())),
+    )?;
 
     // Work interrupted by the last shutdown is marked as such, never resumed.
     let now = time::now_ms();
-    db.call(|conn| {
+    state.db.call(|conn| {
         db::conversations::mark_interrupted(conn)?;
         db::runs::mark_interrupted(conn, now)?;
         db::analytics::mark_interrupted_research(conn)?;
         business::store::reconcile_interrupted(conn, now)?;
         Ok(())
     })?;
+    Ok(state)
+}
+
+/// ReMa's state over its data folder, reporting changes to `events` (the
+/// window, or nothing for `ReMa mcp`).
+pub(crate) fn build_state(
+    data_dir: std::path::PathBuf,
+    info: AppInfo,
+    events: Arc<dyn events::EventSink>,
+) -> Result<AppState, Box<dyn std::error::Error>> {
+    std::fs::create_dir_all(&data_dir)?;
+    let db = Database::open(&data_dir.join("rema.db"))?;
 
     // The providers' official runtimes, each with a ReMa-private home: the
     // user's own Codex and Anthropic CLI settings are neither read nor changed.
-    let info = AppInfo::from_package(app.package_info());
     let runtimes = data_dir.join("runtimes");
     let codex = Arc::new(CodexRuntime::new(
         runtimes.join("codex"),
@@ -280,7 +298,7 @@ fn init_state(app: &App) -> Result<AppState, Box<dyn std::error::Error>> {
         vault: SecretVault::new(Arc::new(KeyringStore)),
         accounts: Accounts::new(codex.clone(), claude_console.clone()),
         llm: Arc::new(ProviderLanguageModel::new(Some(codex)).with_console(claude_console)),
-        events: Arc::new(TauriEvents(app.handle().clone())),
+        events,
         generations: Generations::default(),
         scheduler: SchedulerHandle::default(),
         connectors: ConnectorsContext::new(

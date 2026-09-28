@@ -2,9 +2,32 @@ use tauri::State;
 
 use crate::{
     error::AppResult,
-    rema_mcp::host::{self, RemaMcpStatus},
+    mcp::import::McpImportApp,
+    rema_mcp::{
+        host::{self, RemaMcpStatus},
+        stdio::{self, RemaMcpLaunch},
+    },
     state::AppState,
 };
+
+/// How another app (Claude Desktop, Claude Code, Codex, Cursor) starts
+/// ReMa MCP: this ReMa's program with the `mcp` argument.
+#[tauri::command]
+#[specta::specta]
+pub async fn rema_mcp_launch(state: State<'_, AppState>) -> AppResult<Option<RemaMcpLaunch>> {
+    Ok(stdio::launch(&state))
+}
+
+/// Adds ReMa MCP to another app's MCP settings file; the file's path.
+#[tauri::command]
+#[specta::specta]
+pub async fn add_rema_mcp_to(state: State<'_, AppState>, app: McpImportApp) -> AppResult<String> {
+    let state = state.inner().clone();
+    tokio::task::spawn_blocking(move || stdio::add_to(&state, app))
+        .await
+        .map_err(|e| crate::error::AppError::internal(e.to_string()))?
+        .map(|path| path.to_string_lossy().into_owned())
+}
 
 /// ReMa MCP's card in Settings → MCP → Built-in. `check` also lists its
 /// tools over MCP (nothing is searched).

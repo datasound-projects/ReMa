@@ -131,6 +131,8 @@ pub const APP_COMMANDS: &[&str] = &[
     "rema_mcp_status",
     "set_rema_mcp_enabled",
     "clear_rema_mcp_cache",
+    "rema_mcp_launch",
+    "add_rema_mcp_to",
     // MCP servers
     "list_mcp_servers",
     "save_mcp_server",
@@ -142,6 +144,9 @@ pub const APP_COMMANDS: &[&str] = &[
     "sign_in_mcp_server",
     "cancel_mcp_sign_in",
     "sign_out_mcp_server",
+    "mcp_import_sources",
+    "preview_mcp_import",
+    "import_mcp_servers",
     // Browser workspace & Auto Fill
     "get_browser_status",
     "open_in_browser",

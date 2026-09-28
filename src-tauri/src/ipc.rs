@@ -165,6 +165,8 @@ pub fn builder() -> Builder<tauri::Wry> {
             commands::rema_mcp::rema_mcp_status,
             commands::rema_mcp::set_rema_mcp_enabled,
             commands::rema_mcp::clear_rema_mcp_cache,
+            commands::rema_mcp::rema_mcp_launch,
+            commands::rema_mcp::add_rema_mcp_to,
             // MCP servers
             commands::mcp::list_mcp_servers,
             commands::mcp::save_mcp_server,
@@ -176,6 +178,9 @@ pub fn builder() -> Builder<tauri::Wry> {
             commands::mcp::sign_in_mcp_server,
             commands::mcp::cancel_mcp_sign_in,
             commands::mcp::sign_out_mcp_server,
+            commands::mcp::mcp_import_sources,
+            commands::mcp::preview_mcp_import,
+            commands::mcp::import_mcp_servers,
             // Browser workspace & Auto Fill
             commands::browser::get_browser_status,
             commands::browser::open_in_browser,

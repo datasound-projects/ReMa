@@ -3,6 +3,7 @@ use tauri_plugin_opener::OpenerExt;
 
 use crate::{
     error::{AppError, AppResult},
+    mcp::import::{McpImportCandidate, McpImportRequest, McpImportResult, McpImportSource},
     models::mcp::{McpServer, McpServerInput, McpTestResult},
     services::mcp,
     state::AppState,
@@ -25,6 +26,34 @@ pub async fn save_mcp_server(
     input: McpServerInput,
 ) -> AppResult<McpServer> {
     mcp::save(&state, id, input).await
+}
+
+/// MCP servers configured in other apps on this computer (Claude Desktop,
+/// Claude Code, Cursor, VS Code, Windsurf): names and programs only.
+#[tauri::command]
+#[specta::specta]
+pub async fn mcp_import_sources(state: State<'_, AppState>) -> AppResult<Vec<McpImportSource>> {
+    mcp::import_sources(&state).await
+}
+
+/// The servers in pasted JSON (an `mcpServers` block or one server).
+#[tauri::command]
+#[specta::specta]
+pub async fn preview_mcp_import(
+    state: State<'_, AppState>,
+    json: String,
+) -> AppResult<Vec<McpImportCandidate>> {
+    mcp::preview_import(&state, &json).await
+}
+
+/// Adds the chosen servers from another app or pasted JSON.
+#[tauri::command]
+#[specta::specta]
+pub async fn import_mcp_servers(
+    state: State<'_, AppState>,
+    request: McpImportRequest,
+) -> AppResult<McpImportResult> {
+    mcp::import(&state, request).await
 }
 
 /// Removes a server, its secrets and its selection in every chat.

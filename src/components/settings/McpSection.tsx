@@ -21,6 +21,7 @@ import { HelpTip } from '../ui/HelpTip';
 import { Menu, type MenuItem } from '../ui/Menu';
 import { StatusIndicator, type StatusTone } from '../ui/StatusIndicator';
 import { Switch } from '../ui/Switch';
+import { McpImportDialog } from './McpImportDialog';
 import { McpServerDialog } from './McpServerDialog';
 import { RemaMcpCard } from './RemaMcpCard';
 
@@ -39,6 +40,7 @@ const STATUS: Record<McpServer['status']['state'], { tone: StatusTone; label: st
 export function McpSection({ focus = false }: { focus?: boolean }) {
   const servers = useMcpServers();
   const [editing, setEditing] = useState<McpServer | 'new' | null>(null);
+  const [importing, setImporting] = useState(false);
   const ref = useRef<HTMLElement>(null);
 
   // Opened from the chat's + menu.
@@ -88,8 +90,13 @@ export function McpSection({ focus = false }: { focus?: boolean }) {
             <PlusIcon className="button__icon" />
             Add MCP server
           </button>
+          <button type="button" className="button button--ghost entries__add" onClick={() => setImporting(true)}>
+            Import from other apps…
+          </button>
         </div>
       </div>
+
+      {importing && <McpImportDialog onClose={() => setImporting(false)} />}
 
       {editing !== null && (
         <McpServerDialog

@@ -11,7 +11,9 @@
 //! macOS and Linux, asks the login shell.
 
 use std::{
+    collections::HashMap,
     env,
+    ffi::{OsStr, OsString},
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -102,6 +104,96 @@ pub fn extended_path(first: &[PathBuf]) -> std::ffi::OsString {
         .chain(install_dirs().into_iter().filter(|d| d.is_dir()))
         .collect();
     env::join_paths(dirs).unwrap_or_default()
+}
+
+/// Like [`extended_path`], with the login shell's `PATH` right after
+/// `first` (see [`login_environment`]).
+pub fn extended_path_with(first: &[PathBuf], login_path: Option<&OsStr>) -> OsString {
+    let dirs: Vec<PathBuf> = first
+        .iter()
+        .cloned()
+        .chain(
+            login_path
+                .map(|p| env::split_paths(p).collect::<Vec<_>>())
+                .unwrap_or_default(),
+        )
+        .chain(path_dirs())
+        .chain(install_dirs().into_iter().filter(|d| d.is_dir()))
+        .fold(Vec::new(), |mut seen, dir| {
+            if !seen.contains(&dir) {
+                seen.push(dir);
+            }
+            seen
+        });
+    env::join_paths(dirs).unwrap_or_default()
+}
+
+/// Variables of the shell session itself, not of the user's setup.
+const SHELL_SESSION_VARS: &[&str] = &["PWD", "OLDPWD", "SHLVL", "_", "PS1", "PS2"];
+
+static LOGIN_ENV: tokio::sync::OnceCell<HashMap<OsString, OsString>> =
+    tokio::sync::OnceCell::const_new();
+
+/// The environment the user's login shell sets up (variables exported in
+/// shell profiles: API keys, proxies, version managers, `PATH`), asked once
+/// per run, as VS Code and Zed do. Apps opened from the Finder, the Dock or
+/// a desktop launcher do not inherit it. Empty on Windows (programs there
+/// get the user's environment from the system) or when the shell does not
+/// answer in time.
+pub async fn login_environment() -> &'static HashMap<OsString, OsString> {
+    LOGIN_ENV.get_or_init(read_login_environment).await
+}
+
+async fn read_login_environment() -> HashMap<OsString, OsString> {
+    const START: &str = "__REMA_ENV_START__";
+    const END: &str = "__REMA_ENV_END__";
+    if cfg!(windows) {
+        return HashMap::new();
+    }
+    let Some(shell) = env::var_os("SHELL")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+    else {
+        return HashMap::new();
+    };
+    // Interactive and login, so both kinds of profile files are read; the
+    // markers keep what the profiles print out of the result.
+    let script = format!("printf '%s' {START}; command env -0; printf '%s' {END}");
+    let output = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::process::Command::new(shell)
+            .args(["-i", "-l", "-c", &script])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await;
+    match output {
+        Ok(Ok(output)) => parse_env_block(&output.stdout, START, END),
+        _ => HashMap::new(),
+    }
+}
+
+/// The `NAME=value` entries (NUL-separated) between the two markers.
+fn parse_env_block(stdout: &[u8], start: &str, end: &str) -> HashMap<OsString, OsString> {
+    let text = String::from_utf8_lossy(stdout);
+    let Some(from) = text.find(start).map(|i| i + start.len()) else {
+        return HashMap::new();
+    };
+    let Some(to) = text[from..].rfind(end).map(|i| from + i) else {
+        return HashMap::new();
+    };
+    text[from..to]
+        .split('\0')
+        .filter_map(|entry| entry.split_once('='))
+        .filter(|(name, _)| {
+            !name.is_empty()
+                && !SHELL_SESSION_VARS.contains(name)
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+        .map(|(name, value)| (OsString::from(name), OsString::from(value)))
+        .collect()
 }
 
 /// Whether `path` is an executable file.
@@ -314,6 +406,40 @@ async fn login_shell_lookup(name: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use crate::state::testing::temp_dir;
+
+    #[test]
+    fn reads_the_login_environment_between_its_markers() {
+        let stdout = b"Welcome to fish\n__S__HOME=/Users/ana\0PATH=/opt/homebrew/bin:/usr/bin\0OPENAI_API_KEY=sk-x=y\0PWD=/tmp\0SHLVL=2\0__E__";
+        let env = parse_env_block(stdout, "__S__", "__E__");
+        assert_eq!(
+            env.get(OsStr::new("HOME")),
+            Some(&OsString::from("/Users/ana"))
+        );
+        assert_eq!(
+            env.get(OsStr::new("OPENAI_API_KEY")),
+            Some(&OsString::from("sk-x=y"))
+        );
+        assert!(env.contains_key(OsStr::new("PATH")));
+        assert!(!env.contains_key(OsStr::new("PWD")));
+        assert!(!env.contains_key(OsStr::new("SHLVL")));
+        assert!(parse_env_block(b"no markers", "__S__", "__E__").is_empty());
+    }
+
+    #[test]
+    fn the_login_path_comes_right_after_the_programs_own_folder() {
+        let first = [PathBuf::from("/opt/node/bin")];
+        let joined = extended_path_with(&first, Some(OsStr::new("/login/bin:/opt/node/bin")));
+        let dirs: Vec<PathBuf> = env::split_paths(&joined).collect();
+        assert_eq!(dirs[0], PathBuf::from("/opt/node/bin"));
+        assert_eq!(dirs[1], PathBuf::from("/login/bin"));
+        assert_eq!(
+            dirs.iter()
+                .filter(|d| d.as_path() == Path::new("/opt/node/bin"))
+                .count(),
+            1,
+            "no folder twice"
+        );
+    }
 
     fn executable(dir: &Path, name: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;

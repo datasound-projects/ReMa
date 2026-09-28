@@ -103,6 +103,7 @@ lines.on('line', (line) => {
           JSON.stringify({
             token: process.env.FAKE_MCP_TOKEN ?? null,
             parentSecret: process.env.REMA_PARENT_SECRET ?? null,
+            userSetting: process.env.MCP_FIXTURE_USER_SETTING ?? null,
             hasPath: Boolean(process.env.PATH),
           }),
         );

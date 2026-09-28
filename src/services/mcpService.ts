@@ -1,8 +1,22 @@
-import { commands, type McpServer, type McpServerInput, type McpTestResult } from '../generated/bindings';
+import {
+  commands,
+  type McpImportCandidate,
+  type McpImportRequest,
+  type McpImportResult,
+  type McpImportSource,
+  type McpServer,
+  type McpServerInput,
+  type McpTestResult,
+} from '../generated/bindings';
 import { callBackend } from './ipc';
 
 export type {
   McpAuth,
+  McpImportApp,
+  McpImportCandidate,
+  McpImportRequest,
+  McpImportResult,
+  McpImportSource,
   McpEnvVar,
   McpServer,
   McpServerInput,
@@ -56,4 +70,22 @@ export function cancelMcpSignIn(id: number): Promise<McpServer> {
 
 export function signOutMcpServer(id: number): Promise<McpServer> {
   return callBackend(() => commands.signOutMcpServer(id));
+}
+
+/**
+ * MCP servers configured in other apps on this computer (Claude Desktop,
+ * Claude Code, Cursor, VS Code, Windsurf). Names and programs only.
+ */
+export function mcpImportSources(): Promise<McpImportSource[]> {
+  return callBackend(() => commands.mcpImportSources());
+}
+
+/** The servers in pasted JSON (an `mcpServers` block or one server). */
+export function previewMcpImport(json: string): Promise<McpImportCandidate[]> {
+  return callBackend(() => commands.previewMcpImport(json));
+}
+
+/** Adds the chosen servers; values go straight to the keychain. */
+export function importMcpServers(request: McpImportRequest): Promise<McpImportResult> {
+  return callBackend(() => commands.importMcpServers(request));
 }

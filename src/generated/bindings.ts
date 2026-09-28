@@ -265,6 +265,16 @@ export const commands = {
 	setRemaMcpEnabled: (enabled: boolean) => __TAURI_INVOKE<RemaMcpStatus>("set_rema_mcp_enabled", { enabled }),
 	/**  Clears ReMa MCP's cached jobs and searches (nothing else). */
 	clearRemaMcpCache: () => __TAURI_INVOKE<RemaMcpStatus>("clear_rema_mcp_cache"),
+	/**
+	 *  How another app (Claude Desktop, Claude Code, Codex, Cursor) starts
+	 *  ReMa MCP: this ReMa's program with the `mcp` argument.
+	 */
+	remaMcpLaunch: () => __TAURI_INVOKE<{
+	command: string,
+	args: string[],
+} | null>("rema_mcp_launch"),
+	/**  Adds ReMa MCP to another app's MCP settings file; the file's path. */
+	addRemaMcpTo: (app: McpImportApp) => __TAURI_INVOKE<string>("add_rema_mcp_to", { app }),
 	/**  Configured servers. Secret values never leave Rust (`hasSecret` only). */
 	listMcpServers: () => __TAURI_INVOKE<McpServer[]>("list_mcp_servers"),
 	/**
@@ -284,6 +294,15 @@ export const commands = {
 	signInMcpServer: (id: number) => __TAURI_INVOKE<McpServer>("sign_in_mcp_server", { id }),
 	cancelMcpSignIn: (id: number) => __TAURI_INVOKE<McpServer>("cancel_mcp_sign_in", { id }),
 	signOutMcpServer: (id: number) => __TAURI_INVOKE<McpServer>("sign_out_mcp_server", { id }),
+	/**
+	 *  MCP servers configured in other apps on this computer (Claude Desktop,
+	 *  Claude Code, Cursor, VS Code, Windsurf): names and programs only.
+	 */
+	mcpImportSources: () => __TAURI_INVOKE<McpImportSource[]>("mcp_import_sources"),
+	/**  The servers in pasted JSON (an `mcpServers` block or one server). */
+	previewMcpImport: (json: string) => __TAURI_INVOKE<McpImportCandidate[]>("preview_mcp_import", { json }),
+	/**  Adds the chosen servers from another app or pasted JSON. */
+	importMcpServers: (request: McpImportRequest) => __TAURI_INVOKE<McpImportResult>("import_mcp_servers", { request }),
 	getBrowserStatus: () => __TAURI_INVOKE<BrowserStatus>("get_browser_status"),
 	/**  Opens a web page in the browser workspace at `bounds`. */
 	openInBrowser: (url: string, bounds: BrowserBounds) => __TAURI_INVOKE<BrowserStatus>("open_in_browser", { url, bounds }),
@@ -2148,6 +2167,50 @@ export type McpEnvVar = {
 	value: string | null,
 };
 
+/**  Apps whose MCP configuration ReMa can read. */
+export type McpImportApp = "claude_desktop" | "claude_code" | "cursor" | "vs_code" | "windsurf";
+
+/**  A server found in a configuration (no secret values). */
+export type McpImportCandidate = {
+	name: string,
+	/**  `None` when ReMa cannot add it (see `problem`). */
+	transport: McpTransport | null,
+	/**  The program and arguments, or the address. */
+	summary: string,
+	envNames: string[],
+	/**  A server with this name is already in ReMa. */
+	alreadyAdded: boolean,
+	/**  Why it cannot be added. */
+	problem: string | null,
+	/**  Turned off in the other app (added turned off). */
+	disabled: boolean,
+};
+
+/**  What to add: servers by name from an app's file, or from pasted JSON. */
+export type McpImportRequest = {
+	app: McpImportApp | null,
+	json: string | null,
+	names: string[],
+};
+
+export type McpImportResult = {
+	added: McpServer[],
+	skipped: McpImportSkip[],
+};
+
+export type McpImportSkip = {
+	name: string,
+	reason: string,
+};
+
+/**  One app's configuration file and its servers. */
+export type McpImportSource = {
+	app: McpImportApp,
+	label: string,
+	path: string,
+	servers: McpImportCandidate[],
+};
+
 /**  A configured server, as the interface sees it (no secret values). */
 export type McpServer = {
 	id: number,
@@ -2955,6 +3018,15 @@ export type RelevanceType =
 "executive" | 
 /**  Relevant for another stated reason. */
 "relevant_contact";
+
+/**
+ *  How another app starts ReMa MCP (Settings shows it, with copies for
+ *  Claude Desktop, Claude Code, Codex and Cursor).
+ */
+export type RemaMcpLaunch = {
+	command: string,
+	args: string[],
+};
 
 export type RemaMcpStatus = {
 	enabled: boolean,

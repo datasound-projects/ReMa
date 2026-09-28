@@ -24,6 +24,30 @@ use crate::models::{
 };
 use crate::network::model::NetworkProgress;
 
+/// Reports nowhere: ReMa MCP running for another app has no window.
+pub struct NullEvents;
+
+impl EventSink for NullEvents {
+    fn chat(&self, _: ChatEvent) {}
+    fn conversations_changed(&self) {}
+    fn providers_changed(&self) {}
+    fn tasks_changed(&self) {}
+    fn task_run_changed(&self, _: i64, _: i64) {}
+    fn connectors_changed(&self) {}
+    fn applications_changed(&self) {}
+    fn notifications_changed(&self) {}
+    fn notify(&self, _: &str, _: &str) {}
+    fn profile_changed(&self) {}
+    fn browser_changed(&self, _: BrowserStatus) {}
+    fn analytics_changed(&self) {}
+    fn portfolio_changed(&self) {}
+    fn agents_changed(&self) {}
+    fn mcp_changed(&self) {}
+    fn network_progress(&self, _: &str, _: &str) {}
+    fn business_progress(&self, _: &str, _: &str) {}
+    fn business_changed(&self) {}
+}
+
 pub trait EventSink: Send + Sync {
     fn chat(&self, event: ChatEvent);
     fn conversations_changed(&self);
