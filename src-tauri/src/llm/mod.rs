@@ -275,6 +275,10 @@ impl fmt::Debug for ToolBox {
 pub const PRIVATE_WEB_OFF: &str = "this answer read your mail, calendar or applications, so web \
 access is off for the rest of this chat. Start a new chat for answers from the web.";
 
+/// Why a search asked for in the same step as a private-data tool did not
+/// run.
+pub const PRIVATE_WEB_NOT_RUN: &str = "Not run: this answer read your private data first.";
+
 /// Most model calls in one answer when tools are used. After this many
 /// rounds the model answers once more with tools switched off.
 pub const MAX_TOOL_ROUNDS: usize = 8;
@@ -309,6 +313,10 @@ pub struct ChatRequest {
     /// calendar, applications): the provider's web search is switched off
     /// for the rest of the answer, so nothing read there can reach it.
     pub private: Option<Arc<AtomicBool>>,
+    /// The provider's web tools were switched off after this answer's first
+    /// step: later steps go out with a different tool list than the one the
+    /// model's earlier steps were written with.
+    pub web_dropped: bool,
 }
 
 impl ChatRequest {
@@ -812,6 +820,18 @@ impl LanguageModel for ProviderLanguageModel {
                     .is_some_and(|p| p.load(Ordering::SeqCst))
                 {
                     if let Some(web) = request.web.take() {
+                        request.web_dropped = true;
+                        // A search Claude asked for next to the tool that
+                        // read the data has not run, and now never will.
+                        for (id, kind, target) in anthropic::unresolved_web_calls(&request.rounds) {
+                            web.report(WebEvent::Finished {
+                                id,
+                                kind,
+                                target,
+                                sources: Vec::new(),
+                                error: Some(PRIVATE_WEB_NOT_RUN.into()),
+                            });
+                        }
                         web.report(WebEvent::Unavailable {
                             reason: PRIVATE_WEB_OFF.into(),
                         });

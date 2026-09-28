@@ -1093,3 +1093,97 @@ async fn web_search_stops_once_a_tool_returned_private_data() {
         .iter()
         .any(|e| matches!(e, WebEvent::Unavailable { reason } if reason.contains("mail"))));
 }
+
+/// Claude asks for a search and ReMa's mail tool in the same step (the API
+/// holds the search until the next request). Once the mail tool returns,
+/// the next request has no web tools, so the held search is left out and
+/// shown as not run; the thinking written with the web tools declared is
+/// dropped by the API instead of the request being refused.
+#[tokio::test]
+async fn a_search_held_next_to_a_private_tool_is_dropped_with_the_web() {
+    let (base_url, mut received) = serve_sequence(vec![
+        (
+            200,
+            vec![
+                "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}\n\n",
+                "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"Mail and web.\"}}\n\n",
+                "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig\"}}\n\n",
+                "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+                "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"server_tool_use\",\"id\":\"srvtoolu_1\",\"name\":\"web_search\",\"input\":{}}}\n\n",
+                "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"query\\\":\\\"Acme GmbH\\\"}\"}}\n\n",
+                "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+                "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"mail_search\",\"input\":{}}}\n\n",
+                "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{}\"}}\n\n",
+                "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":2}\n\n",
+                "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n",
+                "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+            ],
+        ),
+        (
+            200,
+            vec![
+                "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+                "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Acme wrote.\"}}\n\n",
+                "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+                "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+            ],
+        ),
+    ])
+    .await;
+    let endpoint = endpoint(ProviderKind::Anthropic, base_url, "sk-ant-test");
+    let private = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let web = Arc::new(RecordingWeb::default());
+    let mut request = request();
+    request.tools = Some(tool_box(
+        "mail_search",
+        Arc::new(PrivateTools(private.clone())),
+    ));
+    request.web = Some(WebSearch {
+        observer: Some(web.clone()),
+        ..WebSearch::default()
+    });
+    request.private = Some(private);
+    let (result, text) = run(
+        &endpoint,
+        "claude-opus-5-5",
+        &request,
+        &ProviderLanguageModel::new(None),
+    )
+    .await;
+    assert_eq!(result.unwrap(), Finish::Complete);
+    assert_eq!(text, "Acme wrote.");
+
+    let first = received.recv().await.unwrap();
+    assert!(!first.to_ascii_lowercase().contains("anthropic-beta"));
+    assert!(body_of(&first).get("thinking").is_none());
+
+    let second = received.recv().await.unwrap();
+    assert!(second
+        .to_ascii_lowercase()
+        .contains("anthropic-beta: thinking-binding-controls-2026-08-01"));
+    let body = body_of(&second);
+    assert_eq!(
+        body["thinking"]["block_binding"]["prefix_mismatch_behavior"],
+        "drop_block"
+    );
+    let tools = body["tools"].as_array().unwrap();
+    assert!(tools.iter().all(|t| t.get("type").is_none()), "{tools:?}");
+    // The step goes back without the held search; the mail call and its
+    // result stay.
+    let step: Vec<&str> = body["messages"][1]["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(step, ["thinking", "tool_use"]);
+    assert_eq!(body["messages"][2]["content"][0]["tool_use_id"], "toolu_1");
+
+    let events = web.0.lock().unwrap();
+    assert!(events.iter().any(|e| matches!(e,
+        WebEvent::Finished { id, error: Some(_), target, .. }
+            if id == "srvtoolu_1" && target == "Acme GmbH")));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, WebEvent::Unavailable { .. })));
+}

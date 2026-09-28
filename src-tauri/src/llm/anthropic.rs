@@ -6,14 +6,16 @@
 //! did, and the response's content blocks are kept so a `pause_turn` can
 //! be resumed exactly as the API expects.
 
+use std::collections::HashSet;
+
 use reqwest::RequestBuilder;
 use serde_json::{json, Value};
 
 use super::{
     http::{error_message, join_url, send_json},
     sse::SseEvent,
-    ChatRequest, Endpoint, FetchedModel, Finish, StreamPiece, StreamState, ToolDelta, WebEvent,
-    WebKind, WebSearch, WebSource,
+    ChatRequest, Endpoint, FetchedModel, Finish, StreamPiece, StreamState, ToolDelta, ToolRound,
+    WebEvent, WebKind, WebSearch, WebSource,
 };
 use crate::{
     error::{AppError, AppResult},
@@ -25,6 +27,10 @@ pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com/v1";
 const API_VERSION: &str = "2023-06-01";
 /// Required with OAuth access tokens (a Claude Console sign-in).
 const OAUTH_BETA: &str = "oauth-2025-04-20";
+/// Lets a request ask the API to drop thinking written with an earlier
+/// tool list instead of rejecting it (Claude 5 models bind each thinking
+/// block to the system prompt, tools and messages before it).
+const BINDING_BETA: &str = "thinking-binding-controls-2026-08-01";
 
 /// Output cap for streaming requests when the model allows at least this much.
 const STREAMING_MAX_TOKENS: u32 = 64_000;
@@ -40,15 +46,23 @@ const MAX_WEB_USES: u32 = 8;
 /// Most of one fetched page given to the model (the API sets no limit).
 const MAX_FETCH_TOKENS: u32 = 20_000;
 
-fn authorize(endpoint: &Endpoint, request: RequestBuilder) -> RequestBuilder {
+fn authorize(endpoint: &Endpoint, request: RequestBuilder, betas: &[&str]) -> RequestBuilder {
     let request = request.header("anthropic-version", API_VERSION);
-    match &endpoint.credential {
+    let mut beta = Vec::new();
+    let request = match &endpoint.credential {
         Some(Credential::ApiKey { key }) => request.header("x-api-key", key),
-        Some(Credential::OAuth { access_token, .. }) => request
-            .bearer_auth(access_token)
-            .header("anthropic-beta", OAUTH_BETA),
+        Some(Credential::OAuth { access_token, .. }) => {
+            beta.push(OAUTH_BETA);
+            request.bearer_auth(access_token)
+        }
         // Connector grants never belong to a model provider.
         Some(Credential::RefreshToken { .. }) | None => request,
+    };
+    beta.extend_from_slice(betas);
+    if beta.is_empty() {
+        request
+    } else {
+        request.header("anthropic-beta", beta.join(","))
     }
 }
 
@@ -67,7 +81,7 @@ pub async fn list_models(
         if let Some(after_id) = &after {
             request = request.query(&[("after_id", after_id.as_str())]);
         }
-        let body = send_json(authorize(endpoint, request), &endpoint.name, &secrets).await?;
+        let body = send_json(authorize(endpoint, request, &[]), &endpoint.name, &secrets).await?;
         entries.extend(
             body.get("data")
                 .and_then(Value::as_array)
@@ -293,11 +307,18 @@ pub fn request_body(model_id: &str, request: &ChatRequest) -> Value {
     // Steps so far in this answer: the assistant's content (as Anthropic
     // sent it when known), then the results of ReMa-run tools. A paused
     // step has no results; the next step continues the same message.
+    let resolved = resolved_server_calls(&request.rounds);
     for round in &request.rounds {
         let content = match &round.content {
-            Some(Value::Array(blocks)) => {
-                blocks.iter().filter(|b| is_sendable(b)).cloned().collect()
-            }
+            Some(Value::Array(blocks)) => blocks
+                .iter()
+                .filter(|b| is_sendable(b))
+                // Web tools switched off: a call they would still run is
+                // left out (the API rejects a pending call whose tool is no
+                // longer declared).
+                .filter(|b| request.web.is_some() || !is_unresolved(b, &resolved))
+                .cloned()
+                .collect(),
             _ => {
                 let mut content = Vec::new();
                 if !round.text.trim().is_empty() {
@@ -372,7 +393,67 @@ pub fn request_body(model_id: &str, request: &ChatRequest) -> Value {
             body["tool_choice"] = json!({ "type": "none" });
         }
     }
+    // The tool list changed mid-answer: the thinking of earlier steps was
+    // written with the old one. The API drops it (the steps' calls and
+    // results stay) rather than refusing the request.
+    if drops_stale_thinking(model_id, request) {
+        body["thinking"] = json!({
+            "type": "adaptive",
+            "block_binding": { "prefix_mismatch_behavior": "drop_block" },
+        });
+    }
     body
+}
+
+/// Web tools were switched off mid-answer on a model that thinks by
+/// default, so earlier steps carry thinking bound to the old tool list.
+fn drops_stale_thinking(model_id: &str, request: &ChatRequest) -> bool {
+    request.web_dropped && thinks_by_default(model_id)
+}
+
+/// Ids of the server tool calls whose result is in this answer (a deferred
+/// call's result opens the step after it).
+fn resolved_server_calls(rounds: &[ToolRound]) -> HashSet<&str> {
+    rounds
+        .iter()
+        .filter_map(|r| r.content.as_ref()?.as_array())
+        .flatten()
+        .filter(|b| {
+            b.get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|t| t.ends_with("_tool_result"))
+        })
+        .filter_map(|b| b.get("tool_use_id").and_then(Value::as_str))
+        .collect()
+}
+
+/// A server tool call without its result: Claude made it next to a ReMa
+/// tool, and the API runs it with the next request, while the tool is
+/// still declared.
+fn is_unresolved(block: &Value, resolved: &HashSet<&str>) -> bool {
+    block.get("type").and_then(Value::as_str) == Some("server_tool_use")
+        && block
+            .get("id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !resolved.contains(id))
+}
+
+/// Searches and page visits Claude asked for in this answer that have not
+/// run (id, kind, query or URL). Other providers' steps have none.
+pub fn unresolved_web_calls(rounds: &[ToolRound]) -> Vec<(String, WebKind, String)> {
+    let resolved = resolved_server_calls(rounds);
+    rounds
+        .iter()
+        .filter_map(|r| r.content.as_ref()?.as_array())
+        .flatten()
+        .filter(|b| is_unresolved(b, &resolved))
+        .filter(|b| web_kind(b.get("name").and_then(Value::as_str).unwrap_or("")).is_some())
+        .map(|b| {
+            let (kind, target) = web_call(b);
+            let id = b.get("id").and_then(Value::as_str).unwrap_or_default();
+            (id.to_string(), kind, target)
+        })
+        .collect()
 }
 
 pub fn chat_request(
@@ -381,10 +462,16 @@ pub fn chat_request(
     model_id: &str,
     request: &ChatRequest,
 ) -> RequestBuilder {
+    let betas: &[&str] = if drops_stale_thinking(model_id, request) {
+        &[BINDING_BETA]
+    } else {
+        &[]
+    };
     authorize(
         endpoint,
         http.post(join_url(&endpoint.base_url, "messages"))
             .json(&request_body(model_id, request)),
+        betas,
     )
 }
 
@@ -984,5 +1071,145 @@ mod tests {
         assert_eq!(body["messages"][2]["content"][0]["tool_use_id"], "toolu_1");
         assert_eq!(body["messages"][2]["content"][0]["is_error"], true);
         assert!(body.get("tools").is_none(), "no tools unless offered");
+    }
+
+    /// A step in which Claude thought, searched once (done), asked for a
+    /// second search (not run yet) and called a ReMa tool.
+    fn mixed_step() -> crate::llm::ToolRound {
+        use crate::llm::{ToolCall, ToolOutput, ToolRound};
+        ToolRound {
+            content: Some(json!([
+                { "type": "thinking", "thinking": "Check mail.", "signature": "sig" },
+                { "type": "server_tool_use", "id": "srvtoolu_done", "name": "web_search",
+                  "input": { "query": "Acme GmbH" } },
+                { "type": "web_search_tool_result", "tool_use_id": "srvtoolu_done", "content": [] },
+                { "type": "server_tool_use", "id": "srvtoolu_open", "name": "web_search",
+                  "input": { "query": "Acme GmbH interview" } },
+                { "type": "tool_use", "id": "toolu_1", "name": "mail_search", "input": {} },
+            ])),
+            calls: vec![ToolCall {
+                id: "toolu_1".into(),
+                name: "mail_search".into(),
+                arguments: json!({}),
+                provider_data: None,
+            }],
+            outputs: vec![ToolOutput {
+                content: "One email from Acme.".into(),
+                is_error: false,
+            }],
+            ..ToolRound::default()
+        }
+    }
+
+    fn sent_types(body: &Value) -> Vec<&str> {
+        body["messages"][1]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["type"].as_str().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn a_search_that_has_not_run_is_left_out_once_the_web_is_off() {
+        let request = ChatRequest {
+            turns: vec![Turn {
+                role: MessageRole::User,
+                content: "Did Acme write?".into(),
+            }],
+            rounds: vec![mixed_step()],
+            web_dropped: true,
+            ..ChatRequest::default()
+        };
+        let body = request_body("claude-opus-5-5", &request);
+        assert_eq!(
+            sent_types(&body),
+            [
+                "thinking",
+                "server_tool_use",
+                "web_search_tool_result",
+                "tool_use"
+            ]
+        );
+        assert_eq!(body["messages"][1]["content"][1]["id"], "srvtoolu_done");
+        assert_eq!(
+            unresolved_web_calls(&request.rounds),
+            [(
+                "srvtoolu_open".to_string(),
+                WebKind::Search,
+                "Acme GmbH interview".to_string()
+            )]
+        );
+        // The earlier thinking was written with the web tools declared: the
+        // API is asked to drop it rather than refuse the request.
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert_eq!(
+            body["thinking"]["block_binding"]["prefix_mismatch_behavior"],
+            "drop_block"
+        );
+    }
+
+    #[test]
+    fn a_search_that_has_not_run_is_kept_while_the_web_is_on() {
+        let request = ChatRequest {
+            turns: vec![Turn {
+                role: MessageRole::User,
+                content: "Did Acme write?".into(),
+            }],
+            rounds: vec![mixed_step()],
+            web: Some(WebSearch::default()),
+            ..ChatRequest::default()
+        };
+        let body = request_body("claude-opus-5-5", &request);
+        assert_eq!(sent_types(&body).len(), 5);
+        assert!(body.get("thinking").is_none(), "the model's default");
+    }
+
+    #[test]
+    fn a_claude_sign_in_sends_every_beta_in_one_header() {
+        use crate::llm::{ConnectionMethod, ProviderKind};
+        let endpoint = Endpoint {
+            kind: ProviderKind::Anthropic,
+            name: "Anthropic".into(),
+            connection: ConnectionMethod::ApiKey,
+            base_url: DEFAULT_BASE_URL.into(),
+            credential: Some(Credential::OAuth {
+                access_token: "at".into(),
+                refresh_token: None,
+                expires_at: None,
+            }),
+            server_web_search: false,
+        };
+        let http = reqwest::Client::new();
+        let built = authorize(&endpoint, http.post(DEFAULT_BASE_URL), &[BINDING_BETA])
+            .build()
+            .unwrap();
+        let betas: Vec<_> = built.headers().get_all("anthropic-beta").iter().collect();
+        assert_eq!(betas.len(), 1);
+        assert_eq!(
+            betas[0],
+            "oauth-2025-04-20,thinking-binding-controls-2026-08-01"
+        );
+        let plain = authorize(&endpoint, http.post(DEFAULT_BASE_URL), &[])
+            .build()
+            .unwrap();
+        assert_eq!(plain.headers()["anthropic-beta"], OAUTH_BETA);
+    }
+
+    #[test]
+    fn models_without_default_thinking_need_no_thinking_controls() {
+        let request = ChatRequest {
+            turns: vec![Turn {
+                role: MessageRole::User,
+                content: "Did Acme write?".into(),
+            }],
+            rounds: vec![mixed_step()],
+            web_dropped: true,
+            ..ChatRequest::default()
+        };
+        let body = request_body("claude-sonnet-4-6", &request);
+        assert!(body.get("thinking").is_none());
+        assert!(!drops_stale_thinking("claude-sonnet-4-6", &request));
+        assert!(drops_stale_thinking("claude-opus-5-5", &request));
     }
 }

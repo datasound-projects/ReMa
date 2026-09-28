@@ -2003,6 +2003,7 @@ async fn generate(
             rounds: Vec::new(),
             tools_off: false,
             private: connectors_on.then(|| private.clone()),
+            web_dropped: false,
         };
         let first = state
             .llm
