@@ -1690,9 +1690,14 @@ async fn generate(
 
         // ReMa MCP (built in) joins every chat while it is enabled; the
         // session ends with this answer. Nothing runs until a tool is called.
+        // It searches the web, so a chat that read private data has it off,
+        // like the web itself.
         let mut notices = Vec::new();
         let model_key = format!("{}/{}", model.provider_id, model.model_id);
-        let builtin = if crate::rema_mcp::is_enabled(state) && !cannot_use_tools(&model_key) {
+        let builtin = if crate::rema_mcp::is_enabled(state)
+            && !cannot_use_tools(&model_key)
+            && !private_history
+        {
             // Next to the model's own search, ReMa MCP searches ReMa's
             // sources, not the same provider a second time.
             let discovery = if own_search {
@@ -2633,6 +2638,153 @@ mod tests {
         }
 
         /// A small job site: one current posting, one old, one gone.
+        /// Secrets planted everywhere ReMa keeps private data: none may reach a
+        /// request that can search (the model's own search, ReMa's verified
+        /// search, company research, Network Connect) or ReMa's sources; the
+        /// credentials and imported contacts reach no model at all.
+        #[tokio::test]
+        async fn nothing_private_reaches_a_search() {
+            const CONNECTOR: &str = "CANARY-MAIL-5521";
+            const CONTACT: &str = "Canarina Kontaktova";
+            const CONNECTION: &str = "Kanarek Linkedinski";
+            const OAUTH: &str = "CANARY-OAUTH-9911";
+            const MCP_SECRET: &str = "CANARY-MCP-4455";
+            const LOCAL_KEY: &str = "CANARY-KEY-3377";
+            let sources = MockServer::start(|_| Some((404, "{}".into()))).await;
+            let llm = FakeLanguageModel::replying(&["Noted."])
+                .calling(vec![crate::llm::ToolCall {
+                    id: "c1".into(),
+                    name: connector_tools::APPLICATIONS_FIND_MATCH.into(),
+                    arguments: json!({ "section": "needs_action" }),
+                    provider_data: None,
+                }])
+                .then_reply(&format!("Your Acme interview code is {CONNECTOR}."));
+            let (mut state, _, llm) = setup(llm).await;
+            state.rema_mcp = crate::rema_mcp::RemaMcp::with(
+                crate::rema_mcp::adapters::Apis::local(&sources.base_url),
+                true,
+            );
+            state
+                .career
+                .use_discovery_base(&format!("{}/ddg/html/", sources.base_url));
+            state
+                .db
+                .call(|c| {
+                    crate::db::jobs::insert_application(
+                        c,
+                        &crate::db::jobs::ApplicationRecord::new(
+                            "Acme",
+                            crate::models::jobs::ApplicationStatus::InProcess,
+                            now_ms(),
+                        ),
+                    )
+                })
+                .unwrap();
+            // An imported contact, a connector's refresh token, an MCP
+            // server's secret and a provider key.
+            let vcard = testing::temp_dir().join("contacts.vcf");
+            std::fs::write(
+                &vcard,
+                format!("BEGIN:VCARD\r\nVERSION:3.0\r\nFN:{CONTACT}\r\nORG:Donau Data GmbH\r\nEMAIL:canarina@example.com\r\nEND:VCARD\r\n"),
+            )
+            .unwrap();
+            crate::network::contacts::import(
+                &state,
+                crate::network::contacts::ContactSource::Vcard,
+                &[vcard],
+            )
+            .unwrap();
+            let export = testing::temp_dir().join("Connections.csv");
+            std::fs::write(
+                &export,
+                format!("First Name,Last Name,URL,Email Address,Company,Position,Connected On\n{},https://www.linkedin.com/in/kanarek,kanarek@example.com,Donau Data GmbH,CTO,01 Jan 2024\n", CONNECTION.replace(' ', ",")),
+            )
+            .unwrap();
+            crate::network::contacts::import(
+                &state,
+                crate::network::contacts::ContactSource::LinkedinExport,
+                &[export],
+            )
+            .unwrap();
+            for (key, secret) in [
+                ("connector:google:g-1", OAUTH),
+                ("mcp:1:env:API_TOKEN", MCP_SECRET),
+                ("provider:canary", LOCAL_KEY),
+            ] {
+                state
+                    .vault
+                    .set(
+                        key,
+                        crate::secrets::Credential::ApiKey { key: secret.into() },
+                    )
+                    .await
+                    .unwrap();
+            }
+
+            // A chat that read private data, then asks for jobs, a company
+            // and people.
+            let first = send_message(
+                &state,
+                send(None, "What happened with my Acme application?"),
+            )
+            .await
+            .unwrap();
+            let read = finished(&state, first.assistant_message.id).await;
+            assert!(read.content.contains(CONNECTOR), "{}", read.content);
+            let chat = Some(first.conversation.id);
+            for question in [
+                REQUEST,
+                "Tell me about Donau Data GmbH",
+                "Who do I know at Donau Data GmbH?",
+            ] {
+                let sent = send_message(&state, send(chat, question)).await.unwrap();
+                finished(&state, sent.assistant_message.id).await;
+            }
+            // New chats, in both answer modes.
+            for mode in [
+                career_search::mode::AnswerMode::ModelSearch,
+                career_search::mode::AnswerMode::Verified,
+            ] {
+                career_search::mode::set(&state, mode).unwrap();
+                for question in [REQUEST, "Who do I know at Donau Data GmbH?"] {
+                    let sent = send_message(&state, send(None, question)).await.unwrap();
+                    finished(&state, sent.assistant_message.id).await;
+                }
+            }
+
+            let requests = llm.requests.lock().unwrap().clone();
+            assert!(requests.len() >= 6, "{} requests", requests.len());
+            let mut searching = 0;
+            for (_, request) in &requests {
+                let seen = format!("{request:?}");
+                for secret in [CONTACT, CONNECTION, OAUTH, MCP_SECRET, LOCAL_KEY] {
+                    assert!(!seen.contains(secret), "{secret} reached a model: {seen}");
+                }
+                let can_search = request.web.is_some()
+                    || request
+                        .tool_specs()
+                        .iter()
+                        .any(|t| t.name.contains("search") || t.name.contains("web"));
+                if can_search {
+                    searching += 1;
+                    assert!(
+                        !seen.contains(CONNECTOR),
+                        "private mail reached a search: {seen}"
+                    );
+                }
+            }
+            assert!(searching >= 3, "only {searching} requests could search");
+            for recorded in sources.requests.lock().unwrap().iter() {
+                let seen = format!("{} {}", recorded.target, recorded.body);
+                for secret in [CONNECTOR, CONTACT, CONNECTION, OAUTH, MCP_SECRET, LOCAL_KEY] {
+                    assert!(
+                        !seen.contains(secret),
+                        "{secret} reached ReMa's sources: {seen}"
+                    );
+                }
+            }
+        }
+
         async fn job_site() -> MockServer {
             crate::analytics::ALLOW_LOCAL_PAGES_IN_TESTS.store(true, Ordering::Relaxed);
             let recent = days_ago(2);
@@ -4188,6 +4340,79 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("no approval request for {call_id}");
+    }
+
+    #[tokio::test]
+    async fn rema_mcp_is_off_once_an_answer_read_private_data() {
+        let search = crate::llm::ToolCall {
+            id: "r1".into(),
+            name: "mcp_rema_search_jobs".into(),
+            arguments: serde_json::json!({ "query": "Acme interview code" }),
+            provider_data: None,
+        };
+        let llm = FakeLanguageModel::replying(&["Done."]).calling(vec![
+            crate::llm::ToolCall {
+                id: "c1".into(),
+                name: connector_tools::APPLICATIONS_FIND_MATCH.into(),
+                arguments: serde_json::json!({ "section": "needs_action" }),
+                provider_data: None,
+            },
+            search.clone(),
+        ]);
+        let (state, _, llm) = setup(llm).await;
+        state
+            .db
+            .call(|c| {
+                crate::db::jobs::insert_application(
+                    c,
+                    &crate::db::jobs::ApplicationRecord::new(
+                        "Acme",
+                        crate::models::jobs::ApplicationStatus::InProcess,
+                        now_ms(),
+                    ),
+                )
+            })
+            .unwrap();
+        let sent = send_message(
+            &state,
+            send(None, "What happened with my Acme application?"),
+        )
+        .await
+        .unwrap();
+        let message = wait_until_done(&state, sent.assistant_message.id).await;
+        // The search after the private read did not run, and no approval
+        // was asked for: refused outright.
+        let outputs = llm.tool_outputs.lock().unwrap().clone();
+        assert!(!outputs[0].is_error, "{}", outputs[0].content);
+        assert!(outputs[1].is_error);
+        assert!(
+            outputs[1].content.contains("web access is off"),
+            "{}",
+            outputs[1].content
+        );
+        let refused = message
+            .activity
+            .iter()
+            .find(|a| a.server == "ReMa MCP")
+            .unwrap();
+        assert_eq!(refused.status, ToolStatus::Failed);
+        assert!(refused.detail.as_deref().unwrap().starts_with("Not run"));
+
+        // The same chat later: ReMa MCP is not offered at all.
+        let before = llm.requests.lock().unwrap().len();
+        let later = send_message(&state, send(Some(sent.conversation.id), "Anything else?"))
+            .await
+            .unwrap();
+        wait_until_done(&state, later.assistant_message.id).await;
+        let (_, request) = llm.requests.lock().unwrap()[before].clone();
+        assert!(request
+            .tool_specs()
+            .iter()
+            .all(|t| !t.name.starts_with("mcp_rema_")));
+        assert!(!request
+            .system
+            .unwrap()
+            .contains("ReMa MCP, ReMa's built-in"));
     }
 
     #[tokio::test]

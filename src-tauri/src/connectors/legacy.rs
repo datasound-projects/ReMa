@@ -125,6 +125,7 @@ pub async fn migrate(state: &AppState) -> AppResult<()> {
                         "ReMa now connects with its own Google sign-in. Reconnect to continue."
                             .to_string()
                     }),
+                    status_cause: None,
                     connected_at: now,
                     updated_at: now,
                 },

@@ -122,6 +122,7 @@ async fn setup(connect_gmail: bool) -> Option<Setup> {
                         granted_scopes: connectors::google::scopes(&[ConnectorId::Gmail]),
                         status: AccountStatus::Connected,
                         status_reason: None,
+                        status_cause: None,
                         connected_at: now,
                         updated_at: now,
                     },
@@ -424,4 +425,202 @@ async fn chat_reads_the_same_application_state_by_section() {
         ))
         .await;
     assert!(bad.is_error, "sections are validated");
+}
+
+// ── Connect once, choose per chat ──────────────────────────────────
+
+/// A state over the database at `db` and the credential store `store`:
+/// building it again over the same two is a restart of ReMa.
+fn state_over(db: &std::path::Path, store: Arc<crate::secrets::MemoryStore>) -> AppState {
+    let (mut state, _) = testing::state(Arc::new(FakeLanguageModel::replying(&[])));
+    state.db = crate::db::Database::open(db).unwrap();
+    state.vault = crate::secrets::SecretVault::new(store);
+    let app = || {
+        Some(OAuthApp {
+            client_id: "client".into(),
+            client_secret: None,
+        })
+    };
+    state.connectors = connectors::ConnectorsContext::new(
+        GoogleEndpoints::at("http://127.0.0.1:9/google"),
+        MicrosoftEndpoints::at("http://127.0.0.1:9/login", "http://127.0.0.1:9/graph/v1.0"),
+        Apps {
+            google: app(),
+            microsoft: app(),
+            linkedin: None,
+        },
+    );
+    state
+}
+
+/// Signs `provider` in for `ids`, as a finished sign-in leaves it.
+async fn sign_in(state: &AppState, provider: ProviderId, ids: &[ConnectorId]) {
+    let account = format!("{}-1", provider.as_str());
+    state
+        .vault
+        .set(
+            &connectors::tokens::vault_key(provider, &account),
+            Credential::OAuth {
+                access_token: "at".into(),
+                refresh_token: Some("rt".into()),
+                expires_at: Some(now_ms() + 3_600_000),
+            },
+        )
+        .await
+        .unwrap();
+    let scopes = match provider {
+        ProviderId::Google => connectors::google::scopes(ids),
+        _ => connectors::microsoft::scopes(ids),
+    };
+    let ids = ids.to_vec();
+    state
+        .db
+        .call(move |c| {
+            let now = now_ms();
+            crate::db::connectors::save_account(
+                c,
+                &AccountRecord {
+                    provider,
+                    account_id: Some(account),
+                    email: Some("ana@example.com".into()),
+                    display_name: None,
+                    granted_scopes: scopes,
+                    status: AccountStatus::Connected,
+                    status_reason: None,
+                    status_cause: None,
+                    connected_at: now,
+                    updated_at: now,
+                },
+            )?;
+            for id in ids {
+                crate::db::connectors::set_enabled(c, id, true, now)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+}
+
+/// The mail and calendar connectors a chat's answer is given tools for.
+async fn offered(state: &AppState, conversation: i64) -> (Vec<ConnectorId>, Vec<ConnectorId>) {
+    let chosen = state
+        .db
+        .call(|c| crate::db::conversations::get(c, conversation))
+        .unwrap()
+        .connectors;
+    match ConnectorTools::prepare(
+        state,
+        conversation,
+        1,
+        CancellationToken::new(),
+        Arc::new(AtomicBool::new(false)),
+        chosen.as_deref(),
+    )
+    .await
+    {
+        Some((_, tools)) => (tools.mail, tools.calendars),
+        None => (Vec::new(), Vec::new()),
+    }
+}
+
+#[tokio::test]
+async fn each_chat_chooses_its_connectors_across_restart_reauth_disconnect_and_reconnect() {
+    use ConnectorId::*;
+    let dir = testing::temp_dir();
+    let db = dir.join("rema.db");
+    let store = Arc::new(crate::secrets::MemoryStore::default());
+    let state = state_over(&db, store.clone());
+    sign_in(&state, ProviderId::Google, &[Gmail, GoogleCalendar]).await;
+    sign_in(
+        &state,
+        ProviderId::Microsoft,
+        &[OutlookMail, OutlookCalendar],
+    )
+    .await;
+    let model = crate::models::provider::ModelRef {
+        provider_id: "anthropic".into(),
+        model_id: "claude-opus-5-5".into(),
+    };
+    let (fresh, picky) = state
+        .db
+        .call(|c| {
+            let now = now_ms();
+            Ok((
+                crate::db::conversations::create(c, "New chat", &model, now)?.id,
+                crate::db::conversations::create(c, "Older chat", &model, now)?.id,
+            ))
+        })
+        .unwrap();
+    // One chat keeps the default (every connected one); in the other the
+    // user turned Gmail and Outlook Calendar off in the + menu.
+    let chosen = [
+        ChatConnector::OutlookMail,
+        ChatConnector::GoogleCalendar,
+        ChatConnector::Applications,
+    ];
+    crate::services::chat::set_selections(&state, picky, &[], &[], Some(&chosen)).unwrap();
+    let all = (
+        vec![Gmail, OutlookMail],
+        vec![GoogleCalendar, OutlookCalendar],
+    );
+    let picked = (vec![OutlookMail], vec![GoogleCalendar]);
+    assert_eq!(offered(&state, fresh).await, all);
+    assert_eq!(offered(&state, picky).await, picked);
+    // A toggle is the chat's choice, not the account's: every card stays
+    // connected.
+    for card in connectors::overview(&state).await.unwrap().connectors {
+        if matches!(
+            card.id,
+            Gmail | GoogleCalendar | OutlookMail | OutlookCalendar
+        ) {
+            assert_eq!(
+                card.state,
+                crate::models::connectors::ConnectorState::Connected
+            );
+        }
+    }
+
+    // Restart: the same database and credential store, nothing in memory.
+    drop(state);
+    let state = state_over(&db, store.clone());
+    assert_eq!(offered(&state, fresh).await, all);
+    assert_eq!(offered(&state, picky).await, picked);
+
+    // Google refuses a renewal: its tools leave every chat, the chats'
+    // choices stay as they were.
+    connectors::tokens::mark_reauth_required(
+        &state,
+        ProviderId::Google,
+        "invalid_grant: Token has been expired or revoked.",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        offered(&state, fresh).await,
+        (vec![OutlookMail], vec![OutlookCalendar])
+    );
+    assert_eq!(offered(&state, picky).await, (vec![OutlookMail], vec![]));
+
+    // Reconnecting brings them back as each chat had them.
+    sign_in(&state, ProviderId::Google, &[Gmail, GoogleCalendar]).await;
+    assert_eq!(offered(&state, fresh).await, all);
+    assert_eq!(offered(&state, picky).await, picked);
+
+    // Disconnecting Outlook Mail removes it everywhere; Outlook Calendar,
+    // the same account, keeps working.
+    connectors::disconnect(&state, OutlookMail).await.unwrap();
+    assert_eq!(
+        offered(&state, fresh).await,
+        (vec![Gmail], vec![GoogleCalendar, OutlookCalendar])
+    );
+    assert_eq!(offered(&state, picky).await, (vec![], vec![GoogleCalendar]));
+    let kept = state
+        .db
+        .call(|c| crate::db::conversations::get(c, picky))
+        .unwrap()
+        .connectors;
+    assert_eq!(
+        kept.as_deref(),
+        Some(&chosen[..]),
+        "the chat's choice is kept"
+    );
 }

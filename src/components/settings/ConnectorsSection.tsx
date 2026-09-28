@@ -1,4 +1,5 @@
 import { useRef, useState } from 'react';
+import { testingNote } from '../../lib/connectorNotes';
 
 import { useNavigation } from '../../app/navigation';
 import { useAction } from '../../hooks/useAction';
@@ -44,6 +45,7 @@ function useMailTracking(): boolean | null {
 }
 
 /** A sign-in or connection check failed (Retry), as opposed to a sync. */
+
 const signInFailed = (c: ConnectorStatus) =>
   c.state === 'error' && c.errorCode !== null && c.errorCode !== 'CREDENTIAL_STORE_UNAVAILABLE';
 
@@ -248,6 +250,9 @@ function ConnectorCard({ connector: c, onOpen }: { connector: ConnectorStatus; o
           {c.accountEmail && <span>{c.accountEmail}</span>}
           {c.lastSyncAt !== null && <span>Synced {formatRelative(c.lastSyncAt)}</span>}
         </p>
+      )}
+      {c.signInEndsAt !== null && !attention && (
+        <p className="connector-card__note connector-card__note--muted">{testingNote(c.signInEndsAt)}</p>
       )}
       {/* A network with no API for ReMa (XING) is a fact, not a fault. */}
       {c.kind === 'network' && c.state === 'unavailable' && c.errorCode === null && c.message && (

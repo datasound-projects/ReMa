@@ -37,6 +37,7 @@ pub mod health;
 pub mod jobs;
 pub mod mode;
 pub mod plan;
+pub mod proof;
 pub mod registry;
 pub mod requirement;
 pub mod research;

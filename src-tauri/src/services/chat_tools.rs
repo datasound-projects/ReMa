@@ -339,6 +339,20 @@ impl ChatTools {
 
         let approvals = &self.state.approvals;
         let private = self.private.load(Ordering::SeqCst);
+        // ReMa MCP searches the web and opens pages: once this answer has
+        // read private data it is off, like the web, whatever an approval
+        // would say (the user's own servers still ask).
+        if private && tool.builtin {
+            activity.status = ToolStatus::Failed;
+            activity.detail = Some(
+                "Not run: this answer read your mail, calendar or applications, so ReMa MCP's                  web search is off for the rest of this chat."
+                    .into(),
+            );
+            self.report(&activity);
+            return ToolOutput::error(
+                "ReMa MCP searches the web, and web access is off: this answer has read the                  user's private data. Do not call its tools again; answer from what you have.",
+            );
+        }
         if private
             || (!tool.read_only
                 && !approvals.allowed(self.conversation_id, tool.server_id, &tool.tool))

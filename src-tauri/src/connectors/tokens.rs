@@ -14,7 +14,11 @@
 //! the user clicks Reconnect: ReMa never opens a sign-in on its own. A
 //! provider that cannot be reached leaves the grant alone.
 
-use super::{failure::TokenPhase, oauth, oauth::TokenResponse};
+use super::{
+    failure::{self, TokenPhase},
+    oauth,
+    oauth::TokenResponse,
+};
 use crate::{
     db::connectors::{self as repo, AccountStatus},
     error::{AppError, AppResult},
@@ -379,14 +383,18 @@ pub async fn mark_reauth_required(
     provider: ProviderId,
     reason: &str,
 ) -> AppResult<()> {
-    let account_id = state
-        .db
-        .call(|c| repo::account(c, provider))?
-        .and_then(|a| a.account_id);
+    let account = state.db.call(|c| repo::account(c, provider))?;
+    let account_id = account.as_ref().and_then(|a| a.account_id.clone());
     forget_account(state, provider, account_id.as_deref()).await?;
     if provider == ProviderId::Linkedin {
         state.network.forget_provider_data();
     }
+    // Why the provider ended it, for a card that says so (and whose setting
+    // it is) instead of a generic "revoked or expired".
+    let now = now_ms();
+    let age = account.as_ref().map(|a| now - a.connected_at);
+    let testing = state.connectors.google_in_testing();
+    let cause = failure::reauth_cause(provider, reason, age, testing);
     let reason: String = reason.chars().take(200).collect();
     state.db.call(|c| {
         repo::set_account_status(
@@ -394,12 +402,14 @@ pub async fn mark_reauth_required(
             provider,
             AccountStatus::ReauthRequired,
             Some(&reason),
-            now_ms(),
+            cause,
+            now,
         )
     })?;
     super::diag(format!(
-        "[connector] provider={} state=reauth_required",
-        provider.as_str()
+        "[connector] provider={} state=reauth_required cause={}",
+        provider.as_str(),
+        cause.map_or("unknown", |c| c.as_str())
     ));
     crate::services::notifications::add(
         state,
@@ -407,9 +417,8 @@ pub async fn mark_reauth_required(
             kind: "connector",
             title: format!("Reconnect {}", provider.name()),
             body: format!(
-                "{} access was revoked or has expired. Open Settings → Connectors and click \
-                 Reconnect to continue syncing.",
-                provider.name()
+                "{} Open Settings → Connectors and click Reconnect.",
+                failure::reauth_message(provider, cause, age, testing)
             ),
             application_id: None,
             interview_id: None,

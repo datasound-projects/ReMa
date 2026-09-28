@@ -19,6 +19,10 @@
 # OAuth client of type "Desktop app" in ReMa's Google Cloud project.
 desktop_client_id = ""        # GOOGLE_DESKTOP_CLIENT_ID
 desktop_client_secret = ""    # GOOGLE_DESKTOP_CLIENT_SECRET
+# The app's publishing status in Google Auth Platform → Audience: "testing"
+# (Google ends every sign-in 7 days after it is made; ReMa says when) or
+# "production". Empty: not said, and ReMa infers it when Google ends one.
+publishing_status = ""        # GOOGLE_PUBLISHING_STATUS
 
 [microsoft]
 # Application (client) ID of ReMa's Microsoft Entra registration: public

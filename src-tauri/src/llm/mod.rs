@@ -1034,4 +1034,7 @@ mod tests {
 mod tests_http;
 
 #[cfg(test)]
+mod live_tests;
+
+#[cfg(test)]
 pub mod fake;

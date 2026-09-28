@@ -3,7 +3,11 @@
 //! appear only in `detail` (for "Show details"), scrubbed of every value
 //! ReMa sent and cut short; codes, tokens and verifiers never appear.
 
-use crate::{error::AppError, models::connectors::ConnectorErrorCode};
+use crate::{
+    db::connectors::ReauthCause,
+    error::AppError,
+    models::connectors::{ConnectorErrorCode, ProviderId},
+};
 
 /// A failed sign-in or connection check.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -273,6 +277,129 @@ pub const GOOGLE_TESTING_HINT: &str = " (If this happens about 7 days after conn
 Google app is still in testing: Google ends its access weekly until the publisher moves it to \
 production.)";
 
+/// Google ends a grant this long after sign-in while the app is in Testing.
+pub const GOOGLE_TESTING_GRANT_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+/// Slack for clocks and for a refresh that runs just before the limit.
+const GOOGLE_TESTING_SLACK_MS: i64 = 10 * 60 * 1000;
+
+/// Why a provider ended a connection, from what it said when a renewal was
+/// refused (`reason`: its error code and text, or ReMa's own note), how long
+/// ago the user signed in, and what this build says about its Google app
+/// (`google_testing`: in Testing, in production, or not said).
+pub fn reauth_cause(
+    provider: ProviderId,
+    reason: &str,
+    grant_age_ms: Option<i64>,
+    google_testing: Option<bool>,
+) -> Option<ReauthCause> {
+    let r = reason.to_ascii_lowercase();
+    let any = |codes: &[&str]| codes.iter().any(|c| r.contains(c));
+    match provider {
+        ProviderId::Microsoft => {
+            if any(&["aadsts700082", "aadsts70008", "expired due to inactivity"]) {
+                Some(ReauthCause::Inactive)
+            } else if any(&["aadsts50057", "aadsts50053", "aadsts50034", "aadsts50064"]) {
+                Some(ReauthCause::AccountBlocked)
+            } else if any(&[
+                "aadsts50076",
+                "aadsts50079",
+                "aadsts50078",
+                "aadsts50072",
+                "aadsts50158",
+                "aadsts53003",
+                "aadsts50055",
+                "aadsts530003",
+            ]) {
+                Some(ReauthCause::SecurityPolicy)
+            } else if any(&["aadsts50173", "aadsts50133", "aadsts65001", "revoked"]) {
+                Some(ReauthCause::Revoked)
+            } else {
+                None
+            }
+        }
+        ProviderId::Google => {
+            if any(&[
+                "account has been deleted",
+                "account disabled",
+                "account_disabled",
+            ]) {
+                return Some(ReauthCause::AccountBlocked);
+            }
+            if !r.contains("invalid_grant") {
+                return None;
+            }
+            let week_old = grant_age_ms
+                .is_some_and(|age| age >= GOOGLE_TESTING_GRANT_MS - GOOGLE_TESTING_SLACK_MS);
+            match google_testing {
+                // A production app's grants do not end after a week.
+                Some(false) => Some(ReauthCause::Revoked),
+                _ if week_old => Some(ReauthCause::GoogleTesting),
+                _ => Some(ReauthCause::Revoked),
+            }
+        }
+        ProviderId::Linkedin => Some(ReauthCause::TokenLifetime),
+        ProviderId::Xing => None,
+    }
+}
+
+/// What a connector card says when its connection must be renewed. It says
+/// whose setting caused it: Google's rule for apps in Testing is not a fault
+/// in ReMa or in the user's account.
+pub fn reauth_message(
+    provider: ProviderId,
+    cause: Option<ReauthCause>,
+    grant_age_ms: Option<i64>,
+    google_testing: Option<bool>,
+) -> String {
+    let name = provider.name();
+    match cause {
+        Some(ReauthCause::GoogleTesting) if google_testing == Some(true) => {
+            "Google ended this connection 7 days after you signed in, because ReMa's Google app \
+             is in Testing: Google limits every sign-in to such apps to 7 days. This is a setting \
+             of the Google app, not a fault in ReMa or your account. Reconnect to continue; the \
+             app's owner stops the weekly sign-outs by publishing it (Google Auth Platform → \
+             Audience → Publish app)."
+                .to_string()
+        }
+        Some(ReauthCause::GoogleTesting) => {
+            let days = grant_age_ms.map_or(7, |age| (age / (24 * 60 * 60 * 1000)).max(7));
+            format!(
+                "Google ended this connection {days} days after you signed in. Google does this \
+                 7 days after sign-in while an app is in Testing; if it happens every week, the \
+                 owner of ReMa's Google app must publish it (Google Auth Platform → Audience → \
+                 Publish app). ReMa cannot change this. Reconnect to continue."
+            )
+        }
+        Some(ReauthCause::Revoked) if provider == ProviderId::Google => {
+            "Google withdrew ReMa's access: it was removed in your Google Account (Security → \
+             Your connections to third-party apps & services), ended by a password change, or \
+             blocked by an administrator. Reconnect to allow it again."
+                .to_string()
+        }
+        Some(ReauthCause::Revoked) => format!(
+            "{name} ended this connection: the account's password was changed or reset, its \
+             sign-ins were revoked, or ReMa's access was removed. Reconnect to continue."
+        ),
+        Some(ReauthCause::Inactive) => format!(
+            "{name} ended this connection because it was not used for 90 days (ReMa renews it \
+             daily while ReMa runs). Reconnect to continue."
+        ),
+        Some(ReauthCause::SecurityPolicy) => format!(
+            "Your organization's security policy asks you to sign in to {name} again (for \
+             example for multi-factor authentication). Reconnect to continue."
+        ),
+        Some(ReauthCause::AccountBlocked) => format!(
+            "This {name} account is disabled, locked or no longer exists, so ReMa cannot use \
+             it. Reconnect with an account that works."
+        ),
+        Some(ReauthCause::TokenLifetime) => format!(
+            "{name} access lasts a limited time and cannot be renewed without you. Reconnect to \
+             continue."
+        ),
+        None => format!("Reconnect required: {name} access was revoked or has expired."),
+    }
+}
+
 /// What a provider API said to a connection check (`connector` is the
 /// card's name, e.g. "Gmail").
 pub fn from_api(provider: &str, connector: &str, status: u16, body: &str) -> Failure {
@@ -445,6 +572,59 @@ mod tests {
         );
         assert_eq!(from_api("Google", "Gmail", 401, "{}").code, ReauthRequired);
         assert_eq!(from_api("Google", "Gmail", 503, "").code, NetworkError);
+    }
+
+    #[test]
+    fn a_refused_renewal_is_traced_to_its_cause() {
+        use ReauthCause::*;
+        const DAY: i64 = 24 * 60 * 60 * 1000;
+        let google = "invalid_grant: Token has been expired or revoked.";
+        type Case<'a> = (
+            ProviderId,
+            &'a str,
+            Option<i64>,
+            Option<bool>,
+            Option<ReauthCause>,
+        );
+        let cases: &[Case] = &[
+            (ProviderId::Google, google, Some(8 * DAY), Some(true), Some(GoogleTesting)),
+            (ProviderId::Google, google, Some(7 * DAY - 60_000), None, Some(GoogleTesting)),
+            (ProviderId::Google, google, Some(8 * DAY), Some(false), Some(Revoked)),
+            (ProviderId::Google, google, Some(DAY), Some(true), Some(Revoked)),
+            (ProviderId::Google, google, None, None, Some(Revoked)),
+            (ProviderId::Google, "invalid_grant: Account has been deleted", Some(DAY), None, Some(AccountBlocked)),
+            (ProviderId::Google, "HTTP 503", Some(DAY), None, None),
+            (ProviderId::Microsoft, "invalid_grant: AADSTS700082: The refresh token has expired due to inactivity.", None, None, Some(Inactive)),
+            (ProviderId::Microsoft, "invalid_grant: AADSTS50173: The provided grant has expired due to it being revoked.", None, None, Some(Revoked)),
+            (ProviderId::Microsoft, "interaction_required: AADSTS50076: Due to a configuration change made by your administrator, you must use multi-factor authentication.", None, None, Some(SecurityPolicy)),
+            (ProviderId::Microsoft, "invalid_grant: AADSTS50057: The user account is disabled.", None, None, Some(AccountBlocked)),
+            (ProviderId::Microsoft, "invalid_grant: something else", None, None, None),
+            (ProviderId::Linkedin, "LinkedIn rejected the access token", None, None, Some(TokenLifetime)),
+        ];
+        for (provider, reason, age, testing, cause) in cases {
+            assert_eq!(
+                reauth_cause(*provider, reason, *age, *testing),
+                *cause,
+                "{provider:?} {reason} {age:?} {testing:?}"
+            );
+        }
+        // Every cause has its own words; only the unknown one is generic.
+        let mut seen = std::collections::HashSet::new();
+        for cause in [
+            GoogleTesting,
+            Revoked,
+            Inactive,
+            SecurityPolicy,
+            AccountBlocked,
+            TokenLifetime,
+        ] {
+            let text = reauth_message(ProviderId::Microsoft, Some(cause), Some(8 * DAY), None);
+            assert!(!text.starts_with("Reconnect required"), "{text}");
+            assert!(seen.insert(text));
+        }
+        assert!(
+            reauth_message(ProviderId::Google, None, None, None).starts_with("Reconnect required")
+        );
     }
 
     #[test]

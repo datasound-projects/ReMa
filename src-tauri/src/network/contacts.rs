@@ -601,6 +601,39 @@ mod tests {
         assert!(members_empty(&state));
     }
 
+    #[test]
+    fn the_same_export_imported_twice_or_twice_at_once_is_kept_once() {
+        let (state, _) = testing::state(Arc::new(FakeLanguageModel::replying(&[])));
+        let dir = testing::temp_dir();
+        let csv = dir.join("Connections.csv");
+        std::fs::write(&csv, CONNECTIONS_CSV).unwrap();
+        let zip_path = dir.join("Basic_LinkedInDataExport.zip");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&zip_path).unwrap());
+        zip.start_file("Connections.csv", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(CONNECTIONS_CSV.as_bytes()).unwrap();
+        zip.finish().unwrap();
+
+        for _ in 0..2 {
+            let result = import(
+                &state,
+                ContactSource::LinkedinExport,
+                std::slice::from_ref(&csv),
+            )
+            .unwrap();
+            assert_eq!(result.summary.linkedin, 3);
+        }
+        // The ZIP and the CSV taken out of it, picked together.
+        let both = import(&state, ContactSource::LinkedinExport, &[zip_path, csv]).unwrap();
+        assert_eq!(both.read, 6);
+        assert_eq!(both.summary.linkedin, 3);
+        let rows: i64 = state
+            .db
+            .call(|c| Ok(c.query_row("SELECT count(*) FROM network_contacts", [], |r| r.get(0))?))
+            .unwrap();
+        assert_eq!(rows, 3);
+    }
+
     fn members_empty(state: &AppState) -> bool {
         members(state).unwrap().is_empty()
     }

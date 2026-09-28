@@ -249,11 +249,37 @@ pub async fn check(state: &AppState) -> AppResult<CareerSearchStatus> {
     });
     let default = default_model(state).await;
     checked.push(match &default {
-        Some((name, endpoint, _)) if native::supported(endpoint) => CheckResult {
-            name: "Model web search".into(),
-            ok: true,
-            detail: format!("{name} has {}.", native::engine_name(endpoint)),
-        },
+        // Proven by running it: the provider's own search events, the pages
+        // they returned and one of them opened, not the model's say-so.
+        Some((name, endpoint, model)) if native::supported(endpoint) => {
+            let run = super::proof::prove(
+                state.llm.as_ref(),
+                state.rema_mcp.fetcher(&state.info.version),
+                endpoint,
+                model,
+                cancel.clone(),
+            );
+            let outcome = tokio::time::timeout(Duration::from_secs(120), run).await;
+            let (ok, detail) = match outcome {
+                Ok(Ok(proof)) => match proof.verdict() {
+                    Ok(evidence) => (
+                        true,
+                        format!("{name}, {}: {evidence}", native::engine_name(endpoint)),
+                    ),
+                    Err(problem) => (false, format!("{name}: {problem}")),
+                },
+                Ok(Err(error)) => (false, format!("{name} could not search: {error}")),
+                Err(_) => (
+                    false,
+                    format!("{name} did not finish a search within 2 minutes."),
+                ),
+            };
+            CheckResult {
+                name: "Model web search".into(),
+                ok,
+                detail,
+            }
+        }
         Some((name, _, _)) => CheckResult {
             name: "Model web search".into(),
             ok: true,

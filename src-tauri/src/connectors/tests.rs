@@ -1111,7 +1111,11 @@ async fn a_revoked_grant_requires_reconnecting_and_never_retries_on_its_own() {
     let gmail = card(&state, ConnectorId::Gmail).await;
     assert_eq!(gmail.state, ConnectorState::ReauthRequired);
     assert_eq!(gmail.error_code, Some(ConnectorErrorCode::ReauthRequired));
-    assert!(gmail.message.unwrap().starts_with("Reconnect required"));
+    // Refused minutes after sign-in: access was withdrawn, not a weekly limit.
+    assert!(gmail
+        .message
+        .unwrap()
+        .starts_with("Google withdrew ReMa's access"));
     assert_eq!(
         gmail.account_email.as_deref(),
         Some("ana@gmail.com"),
@@ -1149,6 +1153,138 @@ async fn a_revoked_grant_requires_reconnecting_and_never_retries_on_its_own() {
         card(&state, ConnectorId::Gmail).await.state,
         ConnectorState::Connected
     );
+}
+
+/// Moves the sign-in of `provider` back by `days`.
+fn signed_in_days_ago(state: &AppState, provider: ProviderId, days: i64) -> i64 {
+    let at = now_ms() - days * 24 * 60 * 60 * 1000;
+    state
+        .db
+        .call(|c| {
+            c.execute(
+                "UPDATE connector_accounts SET connected_at = ?2 WHERE provider = ?1",
+                rusqlite::params![provider.as_str(), at],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    at
+}
+
+/// Connects Gmail, dates the sign-in `days` back and lets Google refuse
+/// the renewal: the card's message.
+async fn google_refused_after(days: i64, testing: Option<bool>) -> (String, Vec<String>) {
+    let providers = providers().await;
+    let (mut state, events) = state_for(&providers, apps());
+    state.connectors = state.connectors.clone().with_google_in_testing(testing);
+    connect(
+        &state,
+        ConnectorId::Gmail,
+        Browser::default().open(Consent::Allow),
+    )
+    .await
+    .unwrap();
+    signed_in_days_ago(&state, ProviderId::Google, days);
+    *providers.grants.refresh_ok.lock().unwrap() = false;
+    expire(&state, ProviderId::Google).await;
+    assert!(tokens::get_valid_access_token(&state, ProviderId::Google)
+        .await
+        .is_err());
+    let gmail = card(&state, ConnectorId::Gmail).await;
+    assert_eq!(gmail.state, ConnectorState::ReauthRequired);
+    assert_eq!(gmail.sign_in_ends_at, None);
+    let notices = events
+        .shown
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, body)| body.clone())
+        .collect();
+    (gmail.message.unwrap(), notices)
+}
+
+#[tokio::test]
+async fn a_reconnect_says_why_google_ended_the_connection_and_whose_setting_it_is() {
+    // The build says its Google app is in Testing: certain, and not ReMa's
+    // or the account's fault.
+    let (message, notices) = google_refused_after(8, Some(true)).await;
+    assert!(
+        message.contains("because ReMa's Google app is in Testing"),
+        "{message}"
+    );
+    assert!(message.contains("not a fault in ReMa or your account"));
+    assert!(message.contains("Publish app"));
+    assert!(
+        notices.iter().any(|n| n.contains("in Testing")),
+        "{notices:?}"
+    );
+
+    // Not said: inferred from the 7-day limit, and said as such.
+    let (message, _) = google_refused_after(8, None).await;
+    assert!(
+        message.starts_with("Google ended this connection 8 days after you signed in"),
+        "{message}"
+    );
+    assert!(message.contains("ReMa cannot change this"));
+
+    // A production app, or a refusal within the week: access was withdrawn.
+    for (days, testing) in [(8, Some(false)), (2, Some(true)), (2, None)] {
+        let (message, _) = google_refused_after(days, testing).await;
+        assert!(
+            message.starts_with("Google withdrew ReMa's access"),
+            "{days} {testing:?}: {message}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_testing_google_app_says_when_the_sign_in_ends() {
+    let providers = providers().await;
+    let (mut state, _) = state_for(&providers, apps());
+    state.connectors = state.connectors.clone().with_google_in_testing(Some(true));
+    connect(
+        &state,
+        ConnectorId::Gmail,
+        Browser::default().open(Consent::Allow),
+    )
+    .await
+    .unwrap();
+    let at = signed_in_days_ago(&state, ProviderId::Google, 3);
+    let gmail = card(&state, ConnectorId::Gmail).await;
+    assert_eq!(gmail.state, ConnectorState::Connected);
+    assert_eq!(
+        gmail.sign_in_ends_at,
+        Some(at + failure::GOOGLE_TESTING_GRANT_MS)
+    );
+    // In production (or not said) there is no such date.
+    state.connectors = state.connectors.clone().with_google_in_testing(Some(false));
+    assert_eq!(card(&state, ConnectorId::Gmail).await.sign_in_ends_at, None);
+}
+
+#[tokio::test]
+async fn an_unused_microsoft_connection_says_it_expired_after_90_days() {
+    let providers = providers().await;
+    let (state, _) = state_for(&providers, apps());
+    connect(
+        &state,
+        ConnectorId::OutlookMail,
+        Browser::default().open(Consent::Allow),
+    )
+    .await
+    .unwrap();
+    *providers.grants.refresh_ok.lock().unwrap() = false;
+    expire(&state, ProviderId::Microsoft).await;
+    assert!(
+        tokens::get_valid_access_token(&state, ProviderId::Microsoft)
+            .await
+            .is_err()
+    );
+    let outlook = card(&state, ConnectorId::OutlookMail).await;
+    assert_eq!(outlook.state, ConnectorState::ReauthRequired);
+    let message = outlook.message.unwrap();
+    assert!(message.contains("not used for 90 days"), "{message}");
+    // The provider's own words stay under "Show details".
+    assert!(outlook.detail.unwrap().contains("AADSTS70008"));
 }
 
 // ── Disconnect ──────────────────────────────────────────────────────
@@ -1543,6 +1679,7 @@ async fn grants_move_from_the_provider_key_to_the_account_key() {
                     granted_scopes: google::scopes(&[ConnectorId::Gmail]),
                     status: AccountStatus::Connected,
                     status_reason: None,
+                    status_cause: None,
                     connected_at: now,
                     updated_at: now,
                 },

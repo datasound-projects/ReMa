@@ -472,6 +472,7 @@ async fn connect_linkedin(state: &AppState, scopes: &[&str]) {
                     granted_scopes: scopes.iter().map(|s| s.to_string()).collect(),
                     status: AccountStatus::Connected,
                     status_reason: None,
+                    status_cause: None,
                     connected_at: now,
                     updated_at: now,
                 },

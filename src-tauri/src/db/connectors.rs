@@ -19,6 +19,35 @@ crate::models::text_enum!(AccountStatus {
     ReauthRequired => "reauth_required",
 });
 
+/// Why a provider ended a connection that now needs a reconnect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReauthCause {
+    /// Google ended the sign-in 7 days after it was made: the Google app is
+    /// in Testing (a setting of the app, not of ReMa or the account).
+    GoogleTesting,
+    /// Access was removed: in the account's settings, by a password change
+    /// or reset, or by an administrator.
+    Revoked,
+    /// The grant went unused too long (Microsoft: 90 days).
+    Inactive,
+    /// A security policy asks for a new sign-in (multi-factor, device).
+    SecurityPolicy,
+    /// The account is disabled, locked or deleted.
+    AccountBlocked,
+    /// The provider's access cannot be renewed without the user (LinkedIn's
+    /// 60-day tokens).
+    TokenLifetime,
+}
+
+crate::models::text_enum!(ReauthCause {
+    GoogleTesting => "google_testing",
+    Revoked => "revoked",
+    Inactive => "inactive",
+    SecurityPolicy => "security_policy",
+    AccountBlocked => "account_blocked",
+    TokenLifetime => "token_lifetime",
+});
+
 /// A connected provider account (`ProviderAccount`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountRecord {
@@ -29,6 +58,8 @@ pub struct AccountRecord {
     pub granted_scopes: Vec<String>,
     pub status: AccountStatus,
     pub status_reason: Option<String>,
+    /// Set with `ReauthRequired` when the cause is known.
+    pub status_cause: Option<ReauthCause>,
     pub connected_at: i64,
     pub updated_at: i64,
 }
@@ -37,6 +68,7 @@ fn account_from_row(row: &Row) -> rusqlite::Result<AccountRecord> {
     let provider: String = row.get(0)?;
     let scopes: String = row.get(4)?;
     let status: String = row.get(5)?;
+    let cause: Option<String> = row.get(9)?;
     Ok(AccountRecord {
         provider: ProviderId::parse(&provider).unwrap_or(ProviderId::Google),
         account_id: row.get(1)?,
@@ -47,11 +79,12 @@ fn account_from_row(row: &Row) -> rusqlite::Result<AccountRecord> {
         status_reason: row.get(6)?,
         connected_at: row.get(7)?,
         updated_at: row.get(8)?,
+        status_cause: cause.as_deref().and_then(ReauthCause::parse),
     })
 }
 
 const ACCOUNT_COLUMNS: &str = "provider, account_id, email, display_name, granted_scopes, status,
-    status_reason, connected_at, updated_at";
+    status_reason, connected_at, updated_at, status_cause";
 
 pub fn account(conn: &Connection, provider: ProviderId) -> AppResult<Option<AccountRecord>> {
     Ok(conn
@@ -66,13 +99,14 @@ pub fn account(conn: &Connection, provider: ProviderId) -> AppResult<Option<Acco
 pub fn save_account(conn: &Connection, account: &AccountRecord) -> AppResult<()> {
     conn.execute(
         "INSERT INTO connector_accounts (provider, account_id, email, display_name, granted_scopes,
-             status, status_reason, connected_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             status, status_reason, connected_at, updated_at, status_cause)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
          ON CONFLICT (provider) DO UPDATE SET
              account_id = excluded.account_id, email = excluded.email,
              display_name = excluded.display_name, granted_scopes = excluded.granted_scopes,
              status = excluded.status, status_reason = excluded.status_reason,
-             connected_at = excluded.connected_at, updated_at = excluded.updated_at",
+             connected_at = excluded.connected_at, updated_at = excluded.updated_at,
+             status_cause = excluded.status_cause",
         params![
             account.provider.as_str(),
             account.account_id,
@@ -83,6 +117,7 @@ pub fn save_account(conn: &Connection, account: &AccountRecord) -> AppResult<()>
             account.status_reason,
             account.connected_at,
             account.updated_at,
+            account.status_cause.map(|c| c.as_str()),
         ],
     )?;
     Ok(())
@@ -93,12 +128,20 @@ pub fn set_account_status(
     provider: ProviderId,
     status: AccountStatus,
     reason: Option<&str>,
+    cause: Option<ReauthCause>,
     now: i64,
 ) -> AppResult<()> {
     conn.execute(
-        "UPDATE connector_accounts SET status = ?2, status_reason = ?3, updated_at = ?4
+        "UPDATE connector_accounts SET status = ?2, status_reason = ?3, status_cause = ?4,
+             updated_at = ?5
          WHERE provider = ?1",
-        params![provider.as_str(), status.as_str(), reason, now],
+        params![
+            provider.as_str(),
+            status.as_str(),
+            reason,
+            cause.map(|c| c.as_str()),
+            now
+        ],
     )?;
     Ok(())
 }
@@ -301,6 +344,7 @@ mod tests {
                 granted_scopes: vec!["openid".into(), "email".into()],
                 status: AccountStatus::Connected,
                 status_reason: None,
+                status_cause: None,
                 connected_at: 1,
                 updated_at: 1,
             };

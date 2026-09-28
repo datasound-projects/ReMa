@@ -8,6 +8,7 @@ import { NavigationContext, type View } from '../../app/navigation';
 import type { ConnectorStatus, ConnectorsOverview } from '../../services/connectorService';
 import type { ScheduledTask } from '../../services/taskService';
 import { ConnectorsSection as Section } from './ConnectorsSection';
+import { testingNote } from '../../lib/connectorNotes';
 
 const mocks = vi.hoisted(() => ({
   getConnectors: vi.fn(),
@@ -43,6 +44,7 @@ const base = {
   message: null,
   detail: null,
   errorCode: null,
+  signInEndsAt: null,
 };
 
 function card(patch: Partial<ConnectorStatus> & Pick<ConnectorStatus, 'id'>): ConnectorStatus {
@@ -167,6 +169,22 @@ describe('Settings → Connectors', () => {
     mocks.connectConnector.mockResolvedValue(disconnected);
     fireEvent.click(screen.getByRole('button', { name: 'Reconnect' }));
     expect(mocks.connectConnector).toHaveBeenCalledWith('gmail');
+  });
+
+  it('says in advance when Google ends a sign-in while its app is in Testing', async () => {
+    const endsAt = new Date(2026, 9, 5, 12).getTime();
+    mocks.getConnectors.mockResolvedValue(overview([{ ...gmailConnected, signInEndsAt: endsAt }]));
+    render(<ConnectorsSection />);
+    expect(await screen.findByText(testingNote(endsAt))).toBeTruthy();
+    expect(testingNote(endsAt)).toContain('in Testing');
+    expect(testingNote(endsAt)).toContain('publishing the app removes the limit');
+  });
+
+  it('shows no such date for a working connection otherwise', async () => {
+    mocks.getConnectors.mockResolvedValue(overview([gmailConnected]));
+    render(<ConnectorsSection />);
+    await screen.findByText('ana@gmail.com');
+    expect(screen.queryByText(/in Testing/)).toBeNull();
   });
 
   it('opens details and disconnects only after confirming', async () => {

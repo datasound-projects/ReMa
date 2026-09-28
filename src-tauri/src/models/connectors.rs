@@ -309,6 +309,10 @@ pub struct ConnectorStatus {
     /// Why the last sign-in or connection check failed (none for a failed
     /// sync or a working connector).
     pub error_code: Option<ConnectorErrorCode>,
+    /// When Google will end this sign-in (ms since the epoch): set while
+    /// ReMa's Google app is in Testing, where Google ends every sign-in 7
+    /// days after it was made.
+    pub sign_in_ends_at: Option<i64>,
 }
 
 /// Explicit background execution options. Nothing runs once ReMa quits.

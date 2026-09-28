@@ -43,6 +43,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0013_connector_checks.sql"),
     include_str!("migrations/0014_chat_connectors.sql"),
     include_str!("migrations/0015_network_contacts.sql"),
+    include_str!("migrations/0016_reauth_cause.sql"),
 ];
 
 #[derive(Clone)]

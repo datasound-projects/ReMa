@@ -1246,6 +1246,12 @@ export type ConnectorStatus = {
 	 *  sync or a working connector).
 	 */
 	errorCode: ConnectorErrorCode | null,
+	/**
+	 *  When Google will end this sign-in (ms since the epoch): set while
+	 *  ReMa's Google app is in Testing, where Google ends every sign-in 7
+	 *  days after it was made.
+	 */
+	signInEndsAt: number | null,
 };
 
 /**  Connectors changed (state, account, sync). */

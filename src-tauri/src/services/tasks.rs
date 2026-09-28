@@ -644,6 +644,7 @@ mod tests {
                         granted_scopes: crate::connectors::google::scopes(&[ConnectorId::Gmail]),
                         status: AccountStatus::Connected,
                         status_reason: None,
+                        status_cause: None,
                         connected_at: now,
                         updated_at: now,
                     },

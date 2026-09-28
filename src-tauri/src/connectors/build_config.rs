@@ -29,6 +29,13 @@ pub const GOOGLE_CLIENT_SECRET: Key = Key {
     name: "desktop_client_secret",
     env: "GOOGLE_DESKTOP_CLIENT_SECRET",
 };
+/// Whether the Google app is in Testing (Google ends every sign-in after 7
+/// days) or in production: "testing", "production" or empty (not said).
+pub const GOOGLE_PUBLISHING_STATUS: Key = Key {
+    table: "google",
+    name: "publishing_status",
+    env: "GOOGLE_PUBLISHING_STATUS",
+};
 pub const MICROSOFT_CLIENT_ID: Key = Key {
     table: "microsoft",
     name: "public_client_id",
@@ -50,9 +57,10 @@ pub const LINKEDIN_APPROVED_SCOPES: Key = Key {
     env: "LINKEDIN_APPROVED_SCOPES",
 };
 
-pub const KEYS: [Key; 6] = [
+pub const KEYS: [Key; 7] = [
     GOOGLE_CLIENT_ID,
     GOOGLE_CLIENT_SECRET,
+    GOOGLE_PUBLISHING_STATUS,
     MICROSOFT_CLIENT_ID,
     MICROSOFT_TENANT,
     LINKEDIN_CLIENT_ID,
@@ -72,6 +80,8 @@ pub const MULTI_TENANT_AUTHORITIES: [&str; 3] = ["common", "organizations", "con
 pub struct ConnectorConfig {
     pub google_client_id: Option<String>,
     pub google_client_secret: Option<String>,
+    /// "testing", "production" or "" (not said).
+    pub google_publishing_status: String,
     pub microsoft_client_id: Option<String>,
     pub microsoft_tenant: String,
     pub linkedin_client_id: Option<String>,
@@ -105,6 +115,9 @@ pub fn resolve(
     };
     let google_client_id = value(GOOGLE_CLIENT_ID);
     let google_client_secret = value(GOOGLE_CLIENT_SECRET);
+    let google_publishing_status = value(GOOGLE_PUBLISHING_STATUS)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     let microsoft_client_id = value(MICROSOFT_CLIENT_ID);
     let microsoft_tenant = value(MICROSOFT_TENANT).unwrap_or_else(|| "common".to_string());
     let linkedin_client_id = value(LINKEDIN_CLIENT_ID);
@@ -142,6 +155,12 @@ pub fn resolve(
         valid_linkedin_client_id,
         "a LinkedIn client ID",
     );
+    if !["", "testing", "production"].contains(&google_publishing_status.as_str()) {
+        errors.push(format!(
+            "{} must be testing or production (or empty when not known)",
+            describe(GOOGLE_PUBLISHING_STATUS)
+        ));
+    }
     if !valid_tenant(&microsoft_tenant) {
         errors.push(format!(
             "{} must be common, organizations, consumers, a tenant ID or a tenant domain",
@@ -195,6 +214,7 @@ pub fn resolve(
     Ok(ConnectorConfig {
         google_client_id,
         google_client_secret,
+        google_publishing_status,
         microsoft_client_id,
         microsoft_tenant,
         linkedin_client_id,
@@ -220,6 +240,7 @@ pub fn to_rust(config: &ConnectorConfig) -> String {
          // Public OAuth client configuration: nothing here is a secret.\n\
          pub const GOOGLE_CLIENT_ID: Option<&str> = {};\n\
          pub const GOOGLE_CLIENT_SECRET: Option<&str> = {};\n\
+         pub const GOOGLE_PUBLISHING_STATUS: &str = {:?};\n\
          pub const MICROSOFT_CLIENT_ID: Option<&str> = {};\n\
          pub const MICROSOFT_TENANT: &str = {:?};\n\
          pub const LINKEDIN_CLIENT_ID: Option<&str> = {};\n\
@@ -227,6 +248,7 @@ pub fn to_rust(config: &ConnectorConfig) -> String {
          pub const SOURCE: &str = {:?};\n",
         opt(&config.google_client_id),
         opt(&config.google_client_secret),
+        config.google_publishing_status,
         opt(&config.microsoft_client_id),
         config.microsoft_tenant,
         opt(&config.linkedin_client_id),
@@ -422,6 +444,27 @@ mod tests {
         assert!(
             source.contains("pub const LINKEDIN_APPROVED_SCOPES: &str = \"r_1st_connections\";")
         );
+    }
+
+    #[test]
+    fn the_google_apps_publishing_status_is_testing_production_or_unsaid() {
+        for (given, kept) in [
+            ("Testing", "testing"),
+            ("production", "production"),
+            ("", ""),
+        ] {
+            let mut env = complete();
+            env.insert("GOOGLE_PUBLISHING_STATUS", given.into());
+            let config = run(&HashMap::new(), &env, true).unwrap();
+            assert_eq!(config.google_publishing_status, kept);
+            assert!(to_rust(&config).contains(&format!(
+                "pub const GOOGLE_PUBLISHING_STATUS: &str = {kept:?};"
+            )));
+        }
+        let mut env = complete();
+        env.insert("GOOGLE_PUBLISHING_STATUS", "beta".into());
+        let errors = run(&HashMap::new(), &env, true).unwrap_err();
+        assert!(errors[0].contains("GOOGLE_PUBLISHING_STATUS"), "{errors:?}");
     }
 
     #[test]

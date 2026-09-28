@@ -357,6 +357,7 @@ mod tests {
             granted_scopes: scopes.iter().map(|s| s.to_string()).collect(),
             status,
             status_reason: None,
+            status_cause: None,
             connected_at: 1,
             updated_at: 1,
         }

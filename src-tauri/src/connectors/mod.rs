@@ -142,6 +142,9 @@ pub struct ConnectorsContext {
     /// Running syncs (at most one per connector).
     pub(crate) syncs: Arc<Mutex<HashMap<ConnectorId, CancellationToken>>>,
     pub(crate) shutdown: CancellationToken,
+    /// What this build says about its Google app: in Testing (sign-ins end
+    /// after 7 days), in production, or not said.
+    google_in_testing: Option<bool>,
 }
 
 impl ConnectorsContext {
@@ -159,7 +162,18 @@ impl ConnectorsContext {
             refresh_locks: Arc::default(),
             syncs: Arc::default(),
             shutdown: CancellationToken::new(),
+            google_in_testing: config::google_in_testing(),
         }
+    }
+
+    /// Another Google publishing status than the build's (tests).
+    pub fn with_google_in_testing(mut self, testing: Option<bool>) -> Self {
+        self.google_in_testing = testing;
+        self
+    }
+
+    pub fn google_in_testing(&self) -> Option<bool> {
+        self.google_in_testing
     }
 
     /// LinkedIn at other endpoints (tests).
@@ -862,6 +876,7 @@ async fn finish_sign_in(
                     granted_scopes: granted.clone(),
                     status: AccountStatus::Connected,
                     status_reason: None,
+                    status_cause: None,
                     connected_at: now,
                     updated_at: now,
                 },
@@ -1000,7 +1015,7 @@ pub async fn overview(state: &AppState) -> AppResult<ConnectorsOverview> {
         } else {
             Ok(false)
         };
-        connectors.push(status_of(
+        let mut status = status_of(
             &record,
             account.as_ref(),
             has_token,
@@ -1008,7 +1023,14 @@ pub async fn overview(state: &AppState) -> AppResult<ConnectorsOverview> {
             state.connectors.is_syncing(record.id),
             state.connectors.app(provider).is_some(),
             state.connectors.failure(record.id),
-        ));
+        );
+        explain_sign_in(
+            &mut status,
+            account.as_ref(),
+            state.connectors.google_in_testing(),
+            now_ms(),
+        );
+        connectors.push(status);
     }
     Ok(ConnectorsOverview {
         connectors,
@@ -1217,6 +1239,40 @@ pub fn status_of(
         message,
         detail,
         error_code,
+        sign_in_ends_at: None,
+    }
+}
+
+/// Says why a connection must be renewed (the cause the provider gave, and
+/// whose setting it is), and when Google will end a sign-in while ReMa's
+/// Google app is in Testing.
+pub fn explain_sign_in(
+    status: &mut ConnectorStatus,
+    account: Option<&AccountRecord>,
+    google_in_testing: Option<bool>,
+    now: i64,
+) {
+    let Some(account) = account else {
+        return;
+    };
+    let age = now - account.connected_at;
+    match status.state {
+        ConnectorState::ReauthRequired if account.status == AccountStatus::ReauthRequired => {
+            status.message = Some(failure::reauth_message(
+                status.provider,
+                account.status_cause,
+                Some(age),
+                google_in_testing,
+            ));
+        }
+        ConnectorState::Connected | ConnectorState::Syncing | ConnectorState::Error
+            if status.provider == ProviderId::Google
+                && google_in_testing == Some(true)
+                && account.status == AccountStatus::Connected =>
+        {
+            status.sign_in_ends_at = Some(account.connected_at + failure::GOOGLE_TESTING_GRANT_MS);
+        }
+        _ => {}
     }
 }
 

@@ -66,6 +66,7 @@ const status = (
   message: null,
   detail: null,
   errorCode: null,
+  signInEndsAt: null,
 });
 
 const overview = (connectors: ConnectorStatus[]): ConnectorsOverview =>
