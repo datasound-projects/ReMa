@@ -1,4 +1,4 @@
-import type { PageSize } from '../../services/portfolioService';
+import type { CoverLetter, PageSize, PortfolioContent, PortfolioKind, PortfolioStyle } from '../../services/portfolioService';
 import type { LayoutInput } from './layout';
 import { SAMPLE_CONTENT, SAMPLE_LETTER } from './sample';
 import { templateById } from './templates';
@@ -32,4 +32,49 @@ export function templateThumbnail(templateId: string, pageSize: PageSize, width 
   cache.set(key, next);
   next.catch(() => cache.delete(key));
   return next;
+}
+
+const documents = new Map<string, Promise<string>>();
+
+/**
+ * A picture of a document's own first page, cached by `key` (the document
+ * id and its last update), rendered one at a time like the templates.
+ */
+export function documentThumbnail(key: string, input: LayoutInput, width = 240): Promise<string> {
+  const cacheKey = `${key}:${width}`;
+  const cached = documents.get(cacheKey);
+  if (cached) return cached;
+  const next = queue.then(async () => {
+    const [{ renderPdf }, { firstPageImage }] = await Promise.all([import('./pdf'), import('../pdf/thumbnail')]);
+    const bytes = await renderPdf(input);
+    return firstPageImage(bytes, width);
+  });
+  queue = next.catch(() => undefined);
+  if (documents.size > 60) documents.clear();
+  documents.set(cacheKey, next);
+  next.catch(() => documents.delete(cacheKey));
+  return next;
+}
+
+/** The layout input of a stored document (its own content and design). */
+export function documentInput(doc: {
+  name: string;
+  kind?: PortfolioKind;
+  templateId: string;
+  pageSize: PageSize;
+  accent: string;
+  style?: PortfolioStyle;
+  content: PortfolioContent;
+  letter?: CoverLetter;
+}): LayoutInput {
+  return {
+    name: doc.name,
+    kind: doc.kind ?? 'cv',
+    templateId: doc.templateId,
+    pageSize: doc.pageSize,
+    accent: doc.accent,
+    style: doc.style ?? null,
+    content: doc.content,
+    letter: doc.letter ?? null,
+  };
 }
