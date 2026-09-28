@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use super::*;
 use crate::{
-    db::{jobs as jobs_repo, providers as settings_repo},
+    db::{connectors::ReauthCause, jobs as jobs_repo, providers as settings_repo},
     events::RecordingEvents,
     llm::fake::FakeLanguageModel,
     models::jobs::ApplicationStatus,
@@ -40,6 +40,11 @@ struct Grants {
     refresh_ok: Mutex<bool>,
     /// The token endpoints cannot be reached (offline).
     token_down: Mutex<bool>,
+    /// Passing trouble at the token endpoints: how many requests still get
+    /// this status before they work again.
+    token_trouble: Mutex<(u32, u16)>,
+    /// How long a Google refresh takes to answer.
+    refresh_delay: Mutex<Duration>,
     /// Overrides the Google code exchange (status, body).
     google_exchange: Mutex<Option<(u16, String)>>,
     gmail_profile: Mutex<(u16, String)>,
@@ -72,6 +77,8 @@ async fn providers() -> Providers {
         linkedin_scope: Mutex::new("email,openid,profile".into()),
         refresh_ok: Mutex::new(true),
         token_down: Mutex::new(false),
+        token_trouble: Mutex::new((0, 503)),
+        refresh_delay: Mutex::new(Duration::ZERO),
         google_exchange: Mutex::new(None),
         gmail_profile: Mutex::new((
             200,
@@ -103,6 +110,17 @@ async fn providers() -> Providers {
         }
         if *g.token_down.lock().unwrap() && req.target.contains("token") {
             return Some((503, "Service Unavailable".into()));
+        }
+        if req.target.contains("token") {
+            let mut trouble = g.token_trouble.lock().unwrap();
+            if trouble.0 > 0 {
+                trouble.0 -= 1;
+                return Some((trouble.1, "{}".into()));
+            }
+            if !exchange && req.target == "/token" {
+                // The handler runs off the runtime: sleeping here is fine.
+                std::thread::sleep(*g.refresh_delay.lock().unwrap());
+            }
         }
         if exchange && req.target == "/token" {
             if let Some(answer) = g.google_exchange.lock().unwrap().clone() {
@@ -1016,7 +1034,7 @@ async fn access_tokens_are_refreshed_silently_before_they_expire() {
 #[tokio::test]
 async fn connected_accounts_are_kept_signed_in_without_reading_anything() {
     let providers = providers().await;
-    let (state, _) = state_for(&providers, apps());
+    let (state, events) = state_for(&providers, apps());
     connect(
         &state,
         ConnectorId::Gmail,
@@ -1032,10 +1050,36 @@ async fn connected_accounts_are_kept_signed_in_without_reading_anything() {
 
     // After a restart (no token in memory) the grant is renewed once: a
     // grant that is used does not expire. No mailbox request is made.
+    let before = providers.server.requests().len();
+    let logged_before = diag_lines().lock().unwrap().len();
     expire(&state, ProviderId::Google).await;
     tokens::keep_alive(&state).await;
     assert_eq!(providers.requests("/token").len(), 2);
     assert_eq!(providers.requests("/gmail").len(), mailbox);
+    // Everything the renewal sent: one POST to the token endpoint of the
+    // provider, answered 200, and nothing else (no API, no Authorization
+    // header, since the refresh token is the credential).
+    let sent: Vec<(String, String)> = providers.server.requests()[before..]
+        .iter()
+        .map(|r| (r.method.clone(), r.target.clone()))
+        .collect();
+    assert_eq!(sent, [("POST".to_string(), "/token".to_string())]);
+    let renewal = &providers.server.requests()[before];
+    assert!(
+        !renewal.headers.contains("authorization"),
+        "{}",
+        renewal.headers
+    );
+    assert!(renewal.body.contains("grant_type=refresh_token"));
+    let logs = diag_lines().lock().unwrap()[logged_before..].join("\n");
+    assert!(logs.contains("phase=token_refreshed") && logs.contains("keep_alive=ok"));
+    let notices = events.shown.lock().unwrap().clone();
+    let notice_text = format!("{notices:?}");
+    for secret in ["g-rt-1", "g-at-1", "g-at-2", "Bearer", "Authorization"] {
+        assert!(!logs.contains(secret), "{secret} in the log: {logs}");
+        assert!(!notice_text.contains(secret), "{secret} in a notification");
+    }
+    assert!(notices.is_empty(), "a renewal notifies nobody: {notices:?}");
 
     // An account that needs reconnecting is left alone.
     state
@@ -1111,11 +1155,13 @@ async fn a_revoked_grant_requires_reconnecting_and_never_retries_on_its_own() {
     let gmail = card(&state, ConnectorId::Gmail).await;
     assert_eq!(gmail.state, ConnectorState::ReauthRequired);
     assert_eq!(gmail.error_code, Some(ConnectorErrorCode::ReauthRequired));
-    // Refused minutes after sign-in: access was withdrawn, not a weekly limit.
-    assert!(gmail
-        .message
-        .unwrap()
-        .starts_with("Google withdrew ReMa's access"));
+    // Google does not say why it refused; the card says so.
+    let message = gmail.message.unwrap();
+    assert!(
+        message.starts_with("Google ended this sign-in"),
+        "{message}"
+    );
+    assert!(message.contains("Google does not say why"), "{message}");
     assert_eq!(
         gmail.account_email.as_deref(),
         Some("ana@gmail.com"),
@@ -1171,9 +1217,9 @@ fn signed_in_days_ago(state: &AppState, provider: ProviderId, days: i64) -> i64 
     at
 }
 
-/// Connects Gmail, dates the sign-in `days` back and lets Google refuse
-/// the renewal: the card's message.
-async fn google_refused_after(days: i64, testing: Option<bool>) -> (String, Vec<String>) {
+/// Connects Gmail and lets Google refuse the renewal: the card's message
+/// and the notifications shown.
+async fn google_refused(testing: Option<bool>) -> (String, Vec<String>) {
     let providers = providers().await;
     let (mut state, events) = state_for(&providers, apps());
     state.connectors = state.connectors.clone().with_google_in_testing(testing);
@@ -1184,7 +1230,8 @@ async fn google_refused_after(days: i64, testing: Option<bool>) -> (String, Vec<
     )
     .await
     .unwrap();
-    signed_in_days_ago(&state, ProviderId::Google, days);
+    // However old the sign-in is, nothing is read into the refusal.
+    signed_in_days_ago(&state, ProviderId::Google, 8);
     *providers.grants.refresh_ok.lock().unwrap() = false;
     expire(&state, ProviderId::Google).await;
     assert!(tokens::get_valid_access_token(&state, ProviderId::Google)
@@ -1193,6 +1240,13 @@ async fn google_refused_after(days: i64, testing: Option<bool>) -> (String, Vec<
     let gmail = card(&state, ConnectorId::Gmail).await;
     assert_eq!(gmail.state, ConnectorState::ReauthRequired);
     assert_eq!(gmail.sign_in_ends_at, None);
+    let cause = state
+        .db
+        .call(|c| repo::account(c, ProviderId::Google))
+        .unwrap()
+        .unwrap()
+        .status_cause;
+    assert_eq!(cause, Some(ReauthCause::Revoked), "{testing:?}");
     let notices = events
         .shown
         .lock()
@@ -1205,36 +1259,47 @@ async fn google_refused_after(days: i64, testing: Option<bool>) -> (String, Vec<
 
 #[tokio::test]
 async fn a_reconnect_says_why_google_ended_the_connection_and_whose_setting_it_is() {
-    // The build says its Google app is in Testing: certain, and not ReMa's
-    // or the account's fault.
-    let (message, notices) = google_refused_after(8, Some(true)).await;
+    // Google's refusal never says why: the card says that, whatever the
+    // sign-in's age, and never invents a Testing limit.
+    for testing in [None, Some(false)] {
+        let (message, notices) = google_refused(testing).await;
+        assert!(
+            message.starts_with("Google ended this sign-in; reconnect"),
+            "{testing:?}: {message}"
+        );
+        assert!(message.contains("Google does not say why"), "{message}");
+        assert!(
+            message.contains("Testing"),
+            "the possible causes are listed"
+        );
+        assert!(
+            !message.contains("ReMa's Google app is in Testing"),
+            "{testing:?}: {message}"
+        );
+        assert!(
+            notices
+                .iter()
+                .all(|n| !n.contains("ReMa's Google app is in Testing")),
+            "{notices:?}"
+        );
+    }
+
+    // The build says its Google app is in Testing: that context is added,
+    // as "about 7 days", and it is the Google app's setting, not a fault in
+    // ReMa or the account.
+    let (message, notices) = google_refused(Some(true)).await;
+    assert!(message.contains("Google does not say why"), "{message}");
     assert!(
-        message.contains("because ReMa's Google app is in Testing"),
+        message.contains("ReMa's Google app is in Testing"),
         "{message}"
     );
+    assert!(message.contains("about 7 days"), "{message}");
     assert!(message.contains("not a fault in ReMa or your account"));
     assert!(message.contains("Publish app"));
     assert!(
         notices.iter().any(|n| n.contains("in Testing")),
         "{notices:?}"
     );
-
-    // Not said: inferred from the 7-day limit, and said as such.
-    let (message, _) = google_refused_after(8, None).await;
-    assert!(
-        message.starts_with("Google ended this connection 8 days after you signed in"),
-        "{message}"
-    );
-    assert!(message.contains("ReMa cannot change this"));
-
-    // A production app, or a refusal within the week: access was withdrawn.
-    for (days, testing) in [(8, Some(false)), (2, Some(true)), (2, None)] {
-        let (message, _) = google_refused_after(days, testing).await;
-        assert!(
-            message.starts_with("Google withdrew ReMa's access"),
-            "{days} {testing:?}: {message}"
-        );
-    }
 }
 
 #[tokio::test]
@@ -1252,17 +1317,20 @@ async fn a_testing_google_app_says_when_the_sign_in_ends() {
     let at = signed_in_days_ago(&state, ProviderId::Google, 3);
     let gmail = card(&state, ConnectorId::Gmail).await;
     assert_eq!(gmail.state, ConnectorState::Connected);
+    // An estimate: about 7 days after the sign-in (the frontend says so).
     assert_eq!(
         gmail.sign_in_ends_at,
         Some(at + failure::GOOGLE_TESTING_GRANT_MS)
     );
     // In production (or not said) there is no such date.
-    state.connectors = state.connectors.clone().with_google_in_testing(Some(false));
-    assert_eq!(card(&state, ConnectorId::Gmail).await.sign_in_ends_at, None);
+    for testing in [Some(false), None] {
+        state.connectors = state.connectors.clone().with_google_in_testing(testing);
+        assert_eq!(card(&state, ConnectorId::Gmail).await.sign_in_ends_at, None);
+    }
 }
 
 #[tokio::test]
-async fn an_unused_microsoft_connection_says_it_expired_after_90_days() {
+async fn an_unused_microsoft_connection_says_it_expired_from_inactivity() {
     let providers = providers().await;
     let (state, _) = state_for(&providers, apps());
     connect(
@@ -1282,9 +1350,262 @@ async fn an_unused_microsoft_connection_says_it_expired_after_90_days() {
     let outlook = card(&state, ConnectorId::OutlookMail).await;
     assert_eq!(outlook.state, ConnectorState::ReauthRequired);
     let message = outlook.message.unwrap();
-    assert!(message.contains("not used for 90 days"), "{message}");
+    // No exact lifetime is promised: Microsoft does not state one.
+    assert!(message.contains("not used for a while"), "{message}");
+    assert!(!message.contains("90"), "{message}");
     // The provider's own words stay under "Show details".
     assert!(outlook.detail.unwrap().contains("AADSTS70008"));
+}
+
+// ── Renewal hardening ───────────────────────────────────────────────
+
+#[tokio::test]
+async fn passing_trouble_at_the_token_endpoint_is_retried_and_never_ends_the_connection() {
+    let providers = providers().await;
+    let (state, events) = state_for(&providers, apps());
+    connect(
+        &state,
+        ConnectorId::Gmail,
+        Browser::default().open(Consent::Allow),
+    )
+    .await
+    .unwrap();
+    let key = tokens::vault_key(ProviderId::Google, "g-123");
+
+    // Two failures, then success: the caller never notices.
+    for status in [503, 429, 500] {
+        expire(&state, ProviderId::Google).await;
+        let before = providers.requests("/token").len();
+        *providers.grants.token_trouble.lock().unwrap() = (2, status);
+        assert_eq!(
+            tokens::get_valid_access_token(&state, ProviderId::Google)
+                .await
+                .unwrap(),
+            "g-at-2",
+            "{status}"
+        );
+        assert_eq!(providers.requests("/token").len() - before, 3, "{status}");
+    }
+
+    // Trouble that outlasts the attempts: a network error, the grant kept,
+    // the card connected, no notification. The attempts are bounded.
+    expire(&state, ProviderId::Google).await;
+    let before = providers.requests("/token").len();
+    *providers.grants.token_trouble.lock().unwrap() = (10, 503);
+    let error = tokens::get_valid_access_token(&state, ProviderId::Google)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, AppError::Network(_)), "{error}");
+    assert_eq!(
+        providers.requests("/token").len() - before,
+        tokens::REFRESH_ATTEMPTS as usize
+    );
+    assert!(matches!(
+        stored(&state, ProviderId::Google).await,
+        Some(Credential::RefreshToken { ref refresh_token }) if refresh_token == "g-rt-1"
+    ));
+    assert!(state.connectors.cached_access(&key).is_none());
+    let account = state
+        .db
+        .call(|c| repo::account(c, ProviderId::Google))
+        .unwrap()
+        .unwrap();
+    assert_eq!(account.status, AccountStatus::Connected);
+    assert_eq!(
+        card(&state, ConnectorId::Gmail).await.state,
+        ConnectorState::Connected
+    );
+    assert!(
+        events.shown.lock().unwrap().is_empty(),
+        "nobody is asked to reconnect"
+    );
+    // The diagnostic log is shared by every test in the process, so only a
+    // line this test must have written is looked for.
+    let logs = diag_lines().lock().unwrap().join("\n");
+    assert!(logs.contains("phase=refresh_retry attempt=1 wait_ms=20"));
+
+    // Only the provider's own refusal ends it (and does so without retries).
+    *providers.grants.token_trouble.lock().unwrap() = (0, 503);
+    *providers.grants.refresh_ok.lock().unwrap() = false;
+    let before = providers.requests("/token").len();
+    assert!(tokens::get_valid_access_token(&state, ProviderId::Google)
+        .await
+        .is_err());
+    assert_eq!(providers.requests("/token").len() - before, 1);
+    assert!(stored(&state, ProviderId::Google).await.is_none());
+}
+
+#[tokio::test]
+async fn a_refresh_in_flight_during_a_disconnect_restores_nothing() {
+    let providers = providers().await;
+    let (state, _) = state_for(&providers, apps());
+    connect(
+        &state,
+        ConnectorId::Gmail,
+        Browser::default().open(Consent::Allow),
+    )
+    .await
+    .unwrap();
+    expire(&state, ProviderId::Google).await;
+    *providers.grants.refresh_delay.lock().unwrap() = Duration::from_millis(400);
+    let renewing = {
+        let state = state.clone();
+        tokio::spawn(
+            async move { tokens::get_valid_access_token(&state, ProviderId::Google).await },
+        )
+    };
+    // The refresh is on its way to Google when the user disconnects.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    disconnect(&state, ConnectorId::Gmail).await.unwrap();
+    assert!(stored(&state, ProviderId::Google).await.is_none());
+
+    // Google answers with a token: it is thrown away.
+    let error = renewing.await.unwrap().unwrap_err();
+    assert!(matches!(error, AppError::Authentication(_)), "{error}");
+    assert!(
+        stored(&state, ProviderId::Google).await.is_none(),
+        "the grant stays deleted"
+    );
+    let key = tokens::vault_key(ProviderId::Google, "g-123");
+    assert!(state.connectors.cached_access(&key).is_none());
+    assert!(state
+        .vault
+        .get_text(&tokens::legacy_key(ProviderId::Google))
+        .await
+        .unwrap()
+        .is_none());
+    assert!(state
+        .db
+        .call(|c| repo::account(c, ProviderId::Google))
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        card(&state, ConnectorId::Gmail).await.state,
+        ConnectorState::Disconnected
+    );
+    assert!(diag_lines()
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|l| l.contains("phase=refresh_discarded")));
+    // A later request finds nothing to renew and asks for no token.
+    let before = providers.requests("/token").len();
+    assert!(tokens::get_valid_access_token(&state, ProviderId::Google)
+        .await
+        .is_err());
+    assert_eq!(providers.requests("/token").len(), before);
+}
+
+#[tokio::test]
+async fn reconnecting_the_same_account_keeps_its_identity_and_choices() {
+    use crate::{db::conversations, models::chat::ChatConnector};
+    let providers = providers().await;
+    let (state, _) = state_for(&providers, apps());
+    connect(
+        &state,
+        ConnectorId::Gmail,
+        Browser::default().open(Consent::Allow),
+    )
+    .await
+    .unwrap();
+    let now = now_ms();
+    let conversation = state
+        .db
+        .call(|c| {
+            repo::save_cursor(c, ProviderId::Google, "g-123", "mail:inbox", "42", now)?;
+            let conversation = conversations::create(
+                c,
+                "Chat",
+                &crate::models::provider::ModelRef {
+                    provider_id: "p".into(),
+                    model_id: "m".into(),
+                },
+                now,
+            )?;
+            conversations::set_connectors(
+                c,
+                conversation.id,
+                Some(&[ChatConnector::Gmail, ChatConnector::Applications]),
+            )?;
+            Ok(conversation.id)
+        })
+        .unwrap();
+
+    // Google refuses the renewal; the user reconnects the same account.
+    *providers.grants.refresh_ok.lock().unwrap() = false;
+    expire(&state, ProviderId::Google).await;
+    assert!(tokens::get_valid_access_token(&state, ProviderId::Google)
+        .await
+        .is_err());
+    *providers.grants.refresh_ok.lock().unwrap() = true;
+    connect(
+        &state,
+        ConnectorId::Gmail,
+        Browser::default().open(Consent::Allow),
+    )
+    .await
+    .unwrap();
+    let account = state
+        .db
+        .call(|c| repo::account(c, ProviderId::Google))
+        .unwrap()
+        .unwrap();
+    assert_eq!(account.account_id.as_deref(), Some("g-123"));
+    assert_eq!(account.status, AccountStatus::Connected);
+    assert_eq!(account.status_cause, None);
+    // The same account: where mail reading left off is kept …
+    assert_eq!(
+        state
+            .db
+            .call(|c| repo::cursor(c, ProviderId::Google, "g-123", "mail:inbox"))
+            .unwrap()
+            .as_deref(),
+        Some("42")
+    );
+    // … and a chat's connector choice (stored by connector id, not by
+    // account or sign-in) is untouched.
+    let chat = state
+        .db
+        .call(|c| conversations::get(c, conversation))
+        .unwrap();
+    assert_eq!(
+        chat.connectors,
+        Some(vec![ChatConnector::Gmail, ChatConnector::Applications])
+    );
+    assert_eq!(
+        card(&state, ConnectorId::Gmail).await.state,
+        ConnectorState::Connected
+    );
+}
+
+#[tokio::test]
+async fn google_refreshes_without_a_client_secret_when_the_build_has_none() {
+    let providers = providers().await;
+    let mut without_secret = apps();
+    without_secret.google = Some(OAuthApp {
+        client_id: GOOGLE_CLIENT.into(),
+        client_secret: None,
+    });
+    let (state, _) = state_for(&providers, without_secret);
+    connect(
+        &state,
+        ConnectorId::Gmail,
+        Browser::default().open(Consent::Allow),
+    )
+    .await
+    .unwrap();
+    expire(&state, ProviderId::Google).await;
+    assert_eq!(
+        tokens::get_valid_access_token(&state, ProviderId::Google)
+            .await
+            .unwrap(),
+        "g-at-2"
+    );
+    for request in providers.requests("/token") {
+        let fields = form(&request.body);
+        assert_eq!(fields["client_id"], GOOGLE_CLIENT);
+        assert!(!fields.contains_key("client_secret"), "{}", request.body);
+    }
 }
 
 // ── Disconnect ──────────────────────────────────────────────────────
@@ -1368,6 +1689,51 @@ async fn disconnecting_revokes_the_grant_once_the_last_connector_is_removed() {
 }
 
 #[tokio::test]
+async fn disconnecting_one_google_connector_keeps_the_grant_the_other_still_uses() {
+    let providers = providers().await;
+    let (state, _) = state_for(&providers, apps());
+    let browser = Browser::default();
+    providers.grant_google(
+        &google::scopes(&[ConnectorId::Gmail, ConnectorId::GoogleCalendar])
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+    );
+    connect(&state, ConnectorId::Gmail, browser.open(Consent::Allow))
+        .await
+        .unwrap();
+    connect(
+        &state,
+        ConnectorId::GoogleCalendar,
+        browser.open(Consent::Allow),
+    )
+    .await
+    .unwrap();
+    // Gmail and Google Calendar share one grant: removing Gmail must not
+    // revoke it at Google, or Calendar would stop working too.
+    disconnect(&state, ConnectorId::Gmail).await.unwrap();
+    assert!(providers.requests("/revoke").is_empty());
+    assert!(matches!(
+        stored(&state, ProviderId::Google).await,
+        Some(Credential::RefreshToken { ref refresh_token }) if refresh_token == "g-rt-1"
+    ));
+    // Calendar still renews with the shared grant.
+    expire(&state, ProviderId::Google).await;
+    assert_eq!(
+        tokens::get_valid_access_token(&state, ProviderId::Google)
+            .await
+            .unwrap(),
+        "g-at-2"
+    );
+    assert!(require(&state, ConnectorId::GoogleCalendar).await.is_ok());
+    assert!(require(&state, ConnectorId::Gmail).await.is_err());
+    assert_eq!(
+        card(&state, ConnectorId::GoogleCalendar).await.state,
+        ConnectorState::Connected
+    );
+}
+
+#[tokio::test]
 async fn microsoft_disconnect_deletes_local_tokens() {
     let providers = providers().await;
     let (state, _) = state_for(&providers, apps());
@@ -1378,12 +1744,24 @@ async fn microsoft_disconnect_deletes_local_tokens() {
     )
     .await
     .unwrap();
+    let before = providers.server.requests().len();
     disconnect(&state, ConnectorId::OutlookMail).await.unwrap();
     assert!(stored(&state, ProviderId::Microsoft).await.is_none());
     assert_eq!(
         card(&state, ConnectorId::OutlookMail).await.state,
         ConnectorState::Disconnected
     );
+    // A local sign-out only: no request to Microsoft, and never
+    // `revokeSignInSessions`, which would sign the user out of every app.
+    let sent: Vec<String> = providers.server.requests()[before..]
+        .iter()
+        .map(|r| r.target.clone())
+        .collect();
+    assert!(sent.is_empty(), "{sent:?}");
+    assert!(providers.server.requests().iter().all(|r| !r
+        .target
+        .to_ascii_lowercase()
+        .contains("revokesigninsessions")));
 }
 
 // ── Sync slots ──────────────────────────────────────────────────────

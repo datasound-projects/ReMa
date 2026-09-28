@@ -3,6 +3,19 @@
 //! `getSchedule` for free/busy, and the interview events ReMa manages
 //! (tagged with a single-value extended property; created with a
 //! `transactionId` so a retried request never creates a second event).
+//!
+//! Availability is the signed-in user's own, never another person's:
+//! `getSchedule` is asked for the user's mailbox only, and personal
+//! Microsoft accounts (outlook.com, hotmail.com), which cannot use it at
+//! all, get their busy periods from `calendarView` (paginated through
+//! `@odata.nextLink`, recurring instances already expanded, cancelled and
+//! "free" events left out, times in UTC through `Prefer: outlook.timezone`).
+//! ReMa does not schedule across people.
+
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use serde_json::{json, Value};
 
@@ -117,6 +130,23 @@ pub struct OutlookCalendar {
     pub api: ApiClient,
     /// The mailbox address (for getSchedule).
     pub email: String,
+    /// Set once this account is known not to have `getSchedule` (a personal
+    /// account, known from the sign-in or from its first refusal): shared
+    /// for the run of ReMa so the refusal is met once, not on every query.
+    pub schedule_unsupported: Arc<AtomicBool>,
+}
+
+/// Whether a `getSchedule` refusal means the account cannot use it (rather
+/// than a passing fault): personal accounts get 403 `ErrorAccessDenied`
+/// or a mailbox that is "not enabled for REST" (404 or 403).
+fn schedule_unavailable(status: u16, body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    (status == 403 || status == 404)
+        && (lower.contains("erroraccessdenied")
+            || lower.contains("mailboxnotenabledforrestapi")
+            || lower.contains("access is denied")
+            || lower.contains("errorinvalidrequest")
+            || lower.contains("not supported"))
 }
 
 fn event_path(id: &str) -> String {
@@ -142,6 +172,32 @@ impl OutlookCalendar {
             .flatten()
             .filter_map(parse_event)
             .collect()
+    }
+
+    /// The user's own busy periods from `calendarView`: every event in the
+    /// window that blocks time (cancelled events and events shown as free
+    /// do not). `list_events` follows `@odata.nextLink`, asks for UTC and
+    /// gets recurring events as their instances.
+    async fn availability_from_events(
+        &self,
+        time_min: i64,
+        time_max: i64,
+    ) -> AppResult<Vec<BusyBlock>> {
+        let mut busy: Vec<BusyBlock> = self
+            .list_events(time_min, time_max)
+            .await?
+            .into_iter()
+            .filter(|event| !event.transparent)
+            .filter_map(|event| {
+                Some(BusyBlock {
+                    start_at: event.start_at?,
+                    end_at: event.end_at?,
+                })
+            })
+            .filter(|block| block.end_at > block.start_at)
+            .collect();
+        busy.sort_by_key(|b| (b.start_at, b.end_at));
+        Ok(busy)
     }
 }
 
@@ -204,6 +260,9 @@ impl CalendarProvider for OutlookCalendar {
         time_max: i64,
     ) -> BoxFuture<'a, AppResult<Vec<BusyBlock>>> {
         Box::pin(async move {
+            if self.schedule_unsupported.load(Ordering::Relaxed) {
+                return self.availability_from_events(time_min, time_max).await;
+            }
             let body = json!({
                 "schedules": [self.email],
                 "startTime": graph_time(time_min),
@@ -216,6 +275,16 @@ impl CalendarProvider for OutlookCalendar {
                     r.json(&body).header("Prefer", "outlook.timezone=\"UTC\"")
                 })
                 .await?;
+            if !response.ok() && schedule_unavailable(response.status, &response.body) {
+                // A personal account: remembered, then read through the
+                // user's own calendar view.
+                self.schedule_unsupported.store(true, Ordering::Relaxed);
+                crate::connectors::diag(
+                    "[connector] provider=microsoft availability=calendar_view reason=get_schedule_unavailable"
+                        .to_string(),
+                );
+                return self.availability_from_events(time_min, time_max).await;
+            }
             let value = self.api.expect_ok(response)?;
             Ok(value
                 .pointer("/value/0/scheduleItems")
@@ -336,7 +405,87 @@ mod tests {
                 &format!("{}/graph/v1.0", server.base_url),
             ),
             email: "ana@outlook.com".into(),
+            schedule_unsupported: Arc::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn a_personal_account_gets_its_own_availability_from_the_calendar_view() {
+        let server = MockServer::start(|req| {
+            let t = req.target.as_str();
+            if req.method == "POST" && t.ends_with("/me/calendar/getSchedule") {
+                return Some((
+                    403,
+                    r#"{"error":{"code":"ErrorAccessDenied","message":"Access is denied. Check credentials and try again."}}"#.into(),
+                ));
+            }
+            if req.method == "GET" && t.starts_with("/graph/v1.0/me/calendarView?") {
+                if t.contains("skip=1") {
+                    return Some((200, json!({"value": [
+                        {"id": "e3", "subject": "Busy later", "showAs": "busy",
+                         "start": {"dateTime": "2026-09-28T12:00:00", "timeZone": "UTC"},
+                         "end": {"dateTime": "2026-09-28T13:00:00", "timeZone": "UTC"}}
+                    ]}).to_string()));
+                }
+                let next = format!("{}/graph/v1.0/me/calendarView?skip=1", req.headers
+                    .lines()
+                    .find_map(|l| l.strip_prefix("host: "))
+                    .map(|h| format!("http://{}", h.trim()))
+                    .unwrap_or_default());
+                return Some((200, json!({
+                    "value": [
+                        {"id": "e1", "subject": "Standup", "showAs": "busy",
+                         "start": {"dateTime": "2026-09-28T08:00:00", "timeZone": "UTC"},
+                         "end": {"dateTime": "2026-09-28T08:30:00", "timeZone": "UTC"}},
+                        {"id": "e2", "subject": "Focus", "showAs": "free",
+                         "start": {"dateTime": "2026-09-28T09:00:00", "timeZone": "UTC"},
+                         "end": {"dateTime": "2026-09-28T10:00:00", "timeZone": "UTC"}},
+                        {"id": "e4", "subject": "Gone", "isCancelled": true, "showAs": "busy",
+                         "start": {"dateTime": "2026-09-28T10:00:00", "timeZone": "UTC"},
+                         "end": {"dateTime": "2026-09-28T11:00:00", "timeZone": "UTC"}}
+                    ],
+                    "@odata.nextLink": next
+                }).to_string()));
+            }
+            None
+        })
+        .await;
+        let api = calendar(&server);
+        let start = jiff::Timestamp::from_second(1_790_553_600)
+            .unwrap()
+            .as_millisecond();
+        let busy = api
+            .get_availability(start, start + 24 * HOUR)
+            .await
+            .unwrap();
+        // Busy events from both pages; the free one and the cancelled one
+        // are not busy.
+        assert_eq!(busy.len(), 2, "{busy:?}");
+        assert_eq!(busy[0].end_at - busy[0].start_at, HOUR / 2);
+        assert_eq!(busy[1].end_at - busy[1].start_at, HOUR);
+        let views: Vec<_> = server
+            .requests()
+            .into_iter()
+            .filter(|r| r.target.contains("/me/calendarView"))
+            .collect();
+        assert_eq!(views.len(), 2, "both pages were read");
+        assert!(views
+            .iter()
+            .all(|r| r.headers.contains("prefer: outlook.timezone=\"utc\"")));
+        // The refusal is remembered: the next query goes straight to the
+        // calendar view.
+        api.get_availability(start, start + 24 * HOUR)
+            .await
+            .unwrap();
+        let schedules = server
+            .requests()
+            .into_iter()
+            .filter(|r| r.target.ends_with("/me/calendar/getSchedule"))
+            .count();
+        assert_eq!(schedules, 1);
+        assert!(api.schedule_unsupported.load(Ordering::Relaxed));
+        // Only the user's own calendar is ever asked about.
+        assert!(server.requests().iter().all(|r| r.target.contains("/me/")));
     }
 
     #[test]

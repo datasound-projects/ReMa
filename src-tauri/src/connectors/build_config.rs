@@ -7,8 +7,9 @@
 //!
 //! Desktop apps are public OAuth clients (RFC 8252): everything here ships in
 //! every copy of ReMa and none of it is a secret. That includes the Google
-//! "Desktop app" client secret, which Google requires at its token endpoint
-//! but does not treat as confidential for installed apps.
+//! "Desktop app" client secret, which Google does not treat as confidential
+//! for installed apps and marks optional at its token endpoint: a build may
+//! leave it out, and ReMa then sends no `client_secret` at all.
 
 /// One setting: its place in `connectors.toml` and the environment variable
 /// that overrides it.
@@ -24,13 +25,15 @@ pub const GOOGLE_CLIENT_ID: Key = Key {
     name: "desktop_client_id",
     env: "GOOGLE_DESKTOP_CLIENT_ID",
 };
+/// Optional: Google's token endpoint accepts native clients without it.
 pub const GOOGLE_CLIENT_SECRET: Key = Key {
     table: "google",
     name: "desktop_client_secret",
     env: "GOOGLE_DESKTOP_CLIENT_SECRET",
 };
-/// Whether the Google app is in Testing (Google ends every sign-in after 7
-/// days) or in production: "testing", "production" or empty (not said).
+/// Whether the Google app is in Testing (Google ends every sign-in about 7
+/// days after it is made) or in production: "testing", "production" or
+/// empty (not said).
 pub const GOOGLE_PUBLISHING_STATUS: Key = Key {
     table: "google",
     name: "publishing_status",
@@ -93,9 +96,10 @@ pub struct ConnectorConfig {
 }
 
 /// Resolves the configuration: a non-empty environment variable wins over
-/// `connectors.toml`. In a release build Google (client ID and the Desktop
-/// client's secret) and Microsoft (client ID, multi-tenant authority) are
-/// mandatory; a malformed value fails every build.
+/// `connectors.toml`. In a release build Google (client ID; the Desktop
+/// client's secret is optional) and Microsoft (client ID, multi-tenant
+/// authority) are mandatory; a malformed value fails every build. Error
+/// messages name settings by their key, never by their value.
 pub fn resolve(
     file: &dyn Fn(Key) -> Option<String>,
     env: &dyn Fn(&str) -> Option<String>,
@@ -181,19 +185,18 @@ pub fn resolve(
             ));
         }
     }
-    if google_client_id.is_some() != google_client_secret.is_some() {
+    if google_client_id.is_none() && google_client_secret.is_some() {
         errors.push(format!(
-            "{} and {} belong together: Google's token endpoint requires the Desktop client's \
-             secret",
-            describe(GOOGLE_CLIENT_ID),
-            describe(GOOGLE_CLIENT_SECRET)
+            "{} is set without {}: the secret belongs to a Desktop client ID",
+            describe(GOOGLE_CLIENT_SECRET),
+            describe(GOOGLE_CLIENT_ID)
         ));
     }
 
+    // The Google client secret is optional, so it is never "missing".
     let mut missing = Vec::new();
     for (key, present) in [
         (GOOGLE_CLIENT_ID, google_client_id.is_some()),
-        (GOOGLE_CLIENT_SECRET, google_client_secret.is_some()),
         (MICROSOFT_CLIENT_ID, microsoft_client_id.is_some()),
     ] {
         if !present {
@@ -329,12 +332,8 @@ mod tests {
     #[test]
     fn a_release_build_without_google_or_microsoft_fails() {
         let errors = run(&HashMap::new(), &HashMap::new(), true).unwrap_err();
-        assert_eq!(errors.len(), 3, "{errors:?}");
-        for name in [
-            "GOOGLE_DESKTOP_CLIENT_ID",
-            "GOOGLE_DESKTOP_CLIENT_SECRET",
-            "MICROSOFT_PUBLIC_CLIENT_ID",
-        ] {
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        for name in ["GOOGLE_DESKTOP_CLIENT_ID", "MICROSOFT_PUBLIC_CLIENT_ID"] {
             assert!(
                 errors
                     .iter()
@@ -357,11 +356,7 @@ mod tests {
         let config = run(&HashMap::new(), &HashMap::new(), false).unwrap();
         assert_eq!(
             config.missing,
-            [
-                "GOOGLE_DESKTOP_CLIENT_ID",
-                "GOOGLE_DESKTOP_CLIENT_SECRET",
-                "MICROSOFT_PUBLIC_CLIENT_ID"
-            ]
+            ["GOOGLE_DESKTOP_CLIENT_ID", "MICROSOFT_PUBLIC_CLIENT_ID"]
         );
         assert_eq!(config.google_client_id, None);
         assert_eq!(config.source, "nothing");
@@ -403,16 +398,37 @@ mod tests {
     }
 
     #[test]
-    fn google_needs_the_desktop_clients_secret() {
+    fn the_google_desktop_client_secret_is_optional() {
+        // A release with the client ID but no secret builds: Google's token
+        // endpoint accepts native clients without one.
         let file = values(&[
             ("GOOGLE_DESKTOP_CLIENT_ID", GOOGLE_ID),
             ("MICROSOFT_PUBLIC_CLIENT_ID", MICROSOFT_ID),
         ]);
-        let errors = run(&file, &HashMap::new(), false).unwrap_err();
+        let config = run(&file, &HashMap::new(), true).unwrap();
+        assert_eq!(config.google_client_id.as_deref(), Some(GOOGLE_ID));
+        assert_eq!(config.google_client_secret, None);
+        assert!(config.missing.is_empty());
+        assert!(to_rust(&config).contains("pub const GOOGLE_CLIENT_SECRET: Option<&str> = None;"));
+        // A secret without a client ID is a mistake, named by its key only.
+        let orphan = values(&[
+            ("GOOGLE_DESKTOP_CLIENT_SECRET", GOOGLE_SECRET),
+            ("MICROSOFT_PUBLIC_CLIENT_ID", MICROSOFT_ID),
+        ]);
+        let errors = run(&orphan, &HashMap::new(), false).unwrap_err();
         assert!(
-            errors.iter().any(|e| e.contains("belong together")),
+            errors
+                .iter()
+                .any(|e| e.starts_with("GOOGLE_DESKTOP_CLIENT_SECRET")),
             "{errors:?}"
         );
+        assert!(
+            errors.iter().all(|e| !e.contains(GOOGLE_SECRET)),
+            "no value is printed"
+        );
+        // Missing-setting messages name the key, never a value.
+        let errors = run(&HashMap::new(), &HashMap::new(), true).unwrap_err();
+        assert!(errors.iter().all(|e| e.contains("is missing")));
     }
 
     #[test]

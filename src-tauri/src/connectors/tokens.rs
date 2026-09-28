@@ -9,10 +9,17 @@
 //! requests for one account share a single refresh. Nothing here reaches
 //! SQLite, settings, logs, the frontend or a model's context.
 //!
-//! When a refresh is rejected (revoked consent, password change, expired
-//! refresh token) the account becomes "reauth_required" and stays so until
-//! the user clicks Reconnect: ReMa never opens a sign-in on its own. A
-//! provider that cannot be reached leaves the grant alone.
+//! When a refresh is rejected outright (`invalid_grant`: revoked consent,
+//! password change, expired refresh token) the account becomes
+//! "reauth_required" and stays so until the user clicks Reconnect: ReMa
+//! never opens a sign-in on its own. A provider that cannot be reached, is
+//! rate-limiting or is failing (connection errors, timeouts, 429, 5xx) is
+//! retried a few times with a growing pause and then leaves the grant
+//! alone: only the provider's own refusal ends a connection.
+//!
+//! A refresh that is still in flight when the user disconnects saves
+//! nothing: the grant's generation changes with every deletion, and the
+//! result is kept only if the generation is unchanged.
 
 use super::{
     failure::{self, TokenPhase},
@@ -32,8 +39,9 @@ use crate::{
 pub const EXPIRY_MARGIN_MS: i64 = 5 * 60_000;
 
 /// How often connected accounts are renewed while ReMa runs. A grant that
-/// is never used expires: Microsoft after 90 days, Google after about six
-/// months; one renewal a day (and one at start) keeps it alive.
+/// is never used expires after a while (Microsoft's refresh tokens end
+/// from inactivity, Google's after months unused); one renewal a day (and
+/// one at start) keeps it alive.
 pub const KEEP_ALIVE_EVERY: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
 /// Keeps connected Google and Microsoft accounts signed in: renews each
@@ -81,6 +89,14 @@ pub fn start_keep_alive(state: AppState) {
         }
     });
 }
+
+/// How many times a refresh is tried before ReMa gives up for now: only
+/// transient trouble (no connection, a timeout, 429, 5xx) is retried, with
+/// a pause that doubles each time.
+pub const REFRESH_ATTEMPTS: u32 = 3;
+/// The pause before the second attempt (then doubled). Short in tests.
+const REFRESH_RETRY_WAIT: std::time::Duration =
+    std::time::Duration::from_millis(if cfg!(test) { 20 } else { 1_000 });
 
 /// The credential-store key of one connected account.
 pub fn vault_key(provider: ProviderId, account_id: &str) -> String {
@@ -181,6 +197,9 @@ pub async fn store(
             expires_at: tokens.expires_in.map(|_| expires_at),
         }
     };
+    // One write of the whole credential, serialized with deletions.
+    let lock = state.connectors.grant_lock(provider);
+    let _guard = lock.lock().await;
     state.vault.set(&key, grant).await?;
     state
         .connectors
@@ -202,7 +221,7 @@ pub async fn get_valid_access_token(state: &AppState, provider: ProviderId) -> A
     if let Some(token) = state.connectors.cached_access(&key) {
         return Ok(token);
     }
-    let lock = state.connectors.refresh_lock(&key);
+    let lock = state.connectors.refresh_lock(provider);
     let _guard = lock.lock().await;
     // Another caller may have renewed it while this one waited.
     if let Some(token) = state.connectors.cached_access(&key) {
@@ -216,7 +235,7 @@ pub async fn get_valid_access_token(state: &AppState, provider: ProviderId) -> A
 pub async fn refresh_access_token(state: &AppState, provider: ProviderId) -> AppResult<String> {
     let key = key_of(state, provider)?;
     let rejected = state.connectors.cached_access(&key);
-    let lock = state.connectors.refresh_lock(&key);
+    let lock = state.connectors.refresh_lock(provider);
     let _guard = lock.lock().await;
     if let Some(token) = state.connectors.cached_access(&key) {
         if Some(&token) != rejected.as_ref() {
@@ -304,19 +323,51 @@ async fn refresh_with(
         }
         form.push(("scope", scopes.join(" ")));
     }
-    match oauth::token_request(
-        &ctx.http,
-        ctx.token_url(provider),
-        &app,
-        provider.name(),
-        TokenPhase::Refresh,
-        form,
-    )
-    .await
-    {
+    // A disconnect during the request changes the generation; the result
+    // is then thrown away instead of bringing the grant back.
+    let generation = ctx.grant_generation(provider);
+    let mut attempt = 1;
+    let result = loop {
+        let result = oauth::token_request(
+            &ctx.http,
+            ctx.token_url(provider),
+            &app,
+            provider.name(),
+            TokenPhase::Refresh,
+            form.clone(),
+        )
+        .await;
+        let transient = matches!(&result, Err(f) if f.code == ConnectorErrorCode::NetworkError);
+        if !transient || attempt >= REFRESH_ATTEMPTS {
+            break result;
+        }
+        let wait = REFRESH_RETRY_WAIT * 2u32.pow(attempt - 1);
+        oauth::log(
+            provider.name(),
+            "refresh_retry",
+            &format!("attempt={attempt} wait_ms={}", wait.as_millis()),
+        );
+        tokio::select! {
+            _ = ctx.shutdown.cancelled() => break result,
+            _ = tokio::time::sleep(wait) => {}
+        }
+        attempt += 1;
+    };
+    match result {
         Ok(tokens) => {
+            let lock = ctx.grant_lock(provider);
+            let _guard = lock.lock().await;
+            if ctx.grant_generation(provider) != generation {
+                oauth::log(provider.name(), "refresh_discarded", "reason=grant_deleted");
+                return Err(AppError::authentication(format!(
+                    "The {} sign-in changed while ReMa was renewing it. Try again.",
+                    provider.name()
+                )));
+            }
             // Microsoft rotates refresh tokens; an old-style grant becomes a
-            // refresh-token grant. Otherwise the stored grant is unchanged.
+            // refresh-token grant. Without a new refresh token the stored
+            // one stays as it is. Either way the whole credential is written
+            // at once.
             let rotated = tokens.refresh_token.clone().filter(|t| *t != refresh_token);
             let converting = matches!(state.vault.get(key).await?, Some(Credential::OAuth { .. }))
                 && super::issues_refresh_tokens(provider);
@@ -346,6 +397,9 @@ async fn refresh_with(
             mark_reauth_required(state, provider, &reason).await?;
             Err(reconnect_error(provider))
         }
+        // Anything else (the provider unreachable or failing, a
+        // configuration error) leaves the grant as it is: the next request
+        // tries again.
         Err(failure) => {
             oauth::log(
                 provider.name(),
@@ -357,7 +411,9 @@ async fn refresh_with(
     }
 }
 
-/// Deletes an account's grant and its access token in memory.
+/// Deletes an account's grant and its access token in memory. A refresh
+/// in flight for it will not save its result (the grant's generation
+/// changes).
 pub async fn forget_account(
     state: &AppState,
     provider: ProviderId,
@@ -367,6 +423,9 @@ pub async fn forget_account(
         Some(id) => vault_key(provider, id),
         None => legacy_key(provider),
     };
+    let lock = state.connectors.grant_lock(provider);
+    let _guard = lock.lock().await;
+    state.connectors.bump_grant_generation(provider);
     state.connectors.forget_access(&key);
     state.vault.delete(&key).await?;
     let legacy = legacy_key(provider);
@@ -390,11 +449,11 @@ pub async fn mark_reauth_required(
         state.network.forget_provider_data();
     }
     // Why the provider ended it, for a card that says so (and whose setting
-    // it is) instead of a generic "revoked or expired".
+    // it is) instead of a generic "revoked or expired". Only what the
+    // provider said counts: nothing is inferred from the grant's age.
     let now = now_ms();
-    let age = account.as_ref().map(|a| now - a.connected_at);
     let testing = state.connectors.google_in_testing();
-    let cause = failure::reauth_cause(provider, reason, age, testing);
+    let cause = failure::reauth_cause(provider, reason);
     let reason: String = reason.chars().take(200).collect();
     state.db.call(|c| {
         repo::set_account_status(
@@ -418,7 +477,7 @@ pub async fn mark_reauth_required(
             title: format!("Reconnect {}", provider.name()),
             body: format!(
                 "{} Open Settings → Connectors and click Reconnect.",
-                failure::reauth_message(provider, cause, age, testing)
+                failure::reauth_message(provider, cause, testing)
             ),
             application_id: None,
             interview_id: None,
@@ -436,6 +495,13 @@ pub async fn mark_reauth_required(
 /// Revokes ReMa's access at the provider (where it offers revocation) and
 /// deletes the stored grant. Local deletion happens even if the provider
 /// cannot be reached.
+///
+/// Called only once the provider's last connector is removed: Google's
+/// revocation ends the whole grant, which Gmail and Google Calendar share,
+/// so it must not run while one of them is still connected. Microsoft
+/// public clients have no token revocation, and Graph's
+/// `revokeSignInSessions` (which signs the user out of every app) is never
+/// used for a ReMa disconnect: the grant is deleted locally.
 pub async fn revoke_connection(state: &AppState, provider: ProviderId) -> AppResult<()> {
     let grant = load(state, provider).await?;
     if provider == ProviderId::Google {

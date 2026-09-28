@@ -2,13 +2,14 @@
 #
 # ReMa is a desktop app, so it is a *public* OAuth client: these identifiers
 # ship inside every copy of ReMa and are not secrets. That includes the
-# Google Desktop client secret — Google requires it at its token endpoint but
-# does not treat it as confidential for installed apps. Security comes from
-# PKCE (S256), `state` and the loopback redirect; users' tokens stay in their
-# system keychain. Users never see or enter any of this.
+# Google Desktop client secret — Google does not treat it as confidential for
+# installed apps and marks it optional at its token endpoint, so it may be
+# left empty. Security comes from PKCE (S256), `state` and the loopback
+# redirect; users' tokens stay in their system keychain. Users never see or
+# enter any of this.
 #
-# Release builds FAIL when the Google or Microsoft values are missing, so a
-# release can never ship with "sign-in is not available in this build".
+# Release builds FAIL when the Google or Microsoft client IDs are missing, so
+# a release can never ship with "sign-in is not available in this build".
 # Debug builds without them show a developer diagnostic on the cards.
 #
 # An environment variable with the name in the comment overrides a value
@@ -18,10 +19,12 @@
 [google]
 # OAuth client of type "Desktop app" in ReMa's Google Cloud project.
 desktop_client_id = ""        # GOOGLE_DESKTOP_CLIENT_ID
+# Optional: when empty, token requests send no client_secret.
 desktop_client_secret = ""    # GOOGLE_DESKTOP_CLIENT_SECRET
 # The app's publishing status in Google Auth Platform → Audience: "testing"
-# (Google ends every sign-in 7 days after it is made; ReMa says when) or
-# "production". Empty: not said, and ReMa infers it when Google ends one.
+# (Google ends every sign-in about 7 days after it is made; ReMa shows an
+# estimated date and says why a sign-in may have ended) or "production".
+# Empty: not said; ReMa then never claims a Testing limit ended a sign-in.
 publishing_status = ""        # GOOGLE_PUBLISHING_STATUS
 
 [microsoft]

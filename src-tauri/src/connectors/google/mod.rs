@@ -65,10 +65,11 @@ impl GoogleEndpoints {
 }
 
 /// ReMa's Google "Desktop app" OAuth client, compiled in from
-/// `connectors.toml` (or `GOOGLE_DESKTOP_CLIENT_ID` and
-/// `GOOGLE_DESKTOP_CLIENT_SECRET`); release builds always have it. Debug
-/// builds may override it at run time for development
-/// (`REMA_DEV_GOOGLE_CLIENT_ID`).
+/// `connectors.toml` (or `GOOGLE_DESKTOP_CLIENT_ID`, with the optional
+/// `GOOGLE_DESKTOP_CLIENT_SECRET`); release builds always have the client
+/// ID. Debug builds may override it at run time for development
+/// (`REMA_DEV_GOOGLE_CLIENT_ID`). Without a secret the token requests send
+/// none: Google marks it optional for native clients.
 pub fn app() -> Option<OAuthApp> {
     #[cfg(debug_assertions)]
     if let Some(client_id) = std::env::var("REMA_DEV_GOOGLE_CLIENT_ID")
@@ -84,7 +85,9 @@ pub fn app() -> Option<OAuthApp> {
     }
     super::config::GOOGLE_CLIENT_ID.map(|client_id| OAuthApp {
         client_id: client_id.to_string(),
-        client_secret: super::config::GOOGLE_CLIENT_SECRET.map(str::to_string),
+        client_secret: super::config::GOOGLE_CLIENT_SECRET
+            .map(str::to_string)
+            .filter(|v| !v.trim().is_empty()),
     })
 }
 

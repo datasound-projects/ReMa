@@ -137,13 +137,25 @@ pub struct ConnectorsContext {
     seq: Arc<AtomicU64>,
     /// Access tokens by credential key, with their expiry (never persisted).
     access: Arc<Mutex<HashMap<String, (String, i64)>>>,
-    /// One refresh at a time per account (credential key).
-    refresh_locks: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    /// One refresh in flight per provider: concurrent callers wait for it
+    /// and share its result.
+    refresh_locks: Arc<Mutex<HashMap<ProviderId, Arc<tokio::sync::Mutex<()>>>>>,
+    /// Held while a grant is written or deleted, so a refresh that finishes
+    /// after a disconnect cannot bring the grant back.
+    grant_locks: Arc<Mutex<HashMap<ProviderId, Arc<tokio::sync::Mutex<()>>>>>,
+    /// Counts each provider's disconnects: a refresh saves its result only
+    /// if the count is what it was when the refresh started.
+    grant_generation: Arc<Mutex<HashMap<ProviderId, u64>>>,
+    /// Microsoft accounts whose calendar cannot answer `getSchedule`
+    /// (personal accounts): availability comes from `calendarView` instead.
+    /// Learnt at sign-in or from the first refusal, for this run of ReMa.
+    microsoft_schedule_unsupported: Arc<std::sync::atomic::AtomicBool>,
     /// Running syncs (at most one per connector).
     pub(crate) syncs: Arc<Mutex<HashMap<ConnectorId, CancellationToken>>>,
     pub(crate) shutdown: CancellationToken,
-    /// What this build says about its Google app: in Testing (sign-ins end
-    /// after 7 days), in production, or not said.
+    /// What this build says about its Google app: in Testing (Google ends
+    /// sign-ins about 7 days after they are made), in production, or not
+    /// said.
     google_in_testing: Option<bool>,
 }
 
@@ -160,6 +172,9 @@ impl ConnectorsContext {
             seq: Arc::default(),
             access: Arc::default(),
             refresh_locks: Arc::default(),
+            grant_locks: Arc::default(),
+            grant_generation: Arc::default(),
+            microsoft_schedule_unsupported: Arc::default(),
             syncs: Arc::default(),
             shutdown: CancellationToken::new(),
             google_in_testing: config::google_in_testing(),
@@ -201,14 +216,52 @@ impl ConnectorsContext {
         }
     }
 
-    /// The lock that makes concurrent refreshes of one account a single one.
-    pub(crate) fn refresh_lock(&self, key: &str) -> Arc<tokio::sync::Mutex<()>> {
+    /// The lock that makes concurrent refreshes of one provider's account a
+    /// single one.
+    pub(crate) fn refresh_lock(&self, provider: ProviderId) -> Arc<tokio::sync::Mutex<()>> {
         self.refresh_locks
             .lock()
             .unwrap()
-            .entry(key.to_string())
+            .entry(provider)
             .or_default()
             .clone()
+    }
+
+    /// The lock held while a provider's grant is written or deleted.
+    pub(crate) fn grant_lock(&self, provider: ProviderId) -> Arc<tokio::sync::Mutex<()>> {
+        self.grant_locks
+            .lock()
+            .unwrap()
+            .entry(provider)
+            .or_default()
+            .clone()
+    }
+
+    /// How many times the provider's grant has been deleted so far.
+    pub(crate) fn grant_generation(&self, provider: ProviderId) -> u64 {
+        self.grant_generation
+            .lock()
+            .unwrap()
+            .get(&provider)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Records that the provider's grant was deleted: a refresh started
+    /// before this must not save what it gets back.
+    pub(crate) fn bump_grant_generation(&self, provider: ProviderId) {
+        *self
+            .grant_generation
+            .lock()
+            .unwrap()
+            .entry(provider)
+            .or_default() += 1;
+    }
+
+    /// Whether the connected Microsoft account's calendar has to be read
+    /// with `calendarView` because `getSchedule` is not available to it.
+    pub fn microsoft_schedule_unsupported(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        self.microsoft_schedule_unsupported.clone()
     }
 
     /// Keeps an access token in memory until shortly before it expires.
@@ -375,7 +428,7 @@ pub fn unavailable_reason(provider: ProviderId) -> String {
 
 /// The build settings that hold each registration (for diagnostics).
 mod build_setting {
-    pub const GOOGLE: &str = "GOOGLE_DESKTOP_CLIENT_ID and GOOGLE_DESKTOP_CLIENT_SECRET";
+    pub const GOOGLE: &str = "GOOGLE_DESKTOP_CLIENT_ID (GOOGLE_DESKTOP_CLIENT_SECRET is optional)";
     pub const MICROSOFT: &str = "MICROSOFT_PUBLIC_CLIENT_ID";
     pub const LINKEDIN: &str = "LINKEDIN_CLIENT_ID";
 }
@@ -480,6 +533,14 @@ async fn profile(state: &AppState, provider: ProviderId, tokens: &TokenResponse)
         }
     }
     if provider == ProviderId::Microsoft {
+        // A personal Microsoft account (the consumers tenant) cannot use
+        // Graph's getSchedule: its availability comes from the calendar view.
+        let personal = claim(&claims, "tid")
+            .is_some_and(|tid| tid.eq_ignore_ascii_case(microsoft::CONSUMERS_TENANT));
+        state
+            .connectors
+            .microsoft_schedule_unsupported
+            .store(personal, std::sync::atomic::Ordering::Relaxed);
         // Graph /me with the new token (User.Read): the Graph user and its
         // mail address or user principal name.
         let me = state
@@ -1028,7 +1089,6 @@ pub async fn overview(state: &AppState) -> AppResult<ConnectorsOverview> {
             &mut status,
             account.as_ref(),
             state.connectors.google_in_testing(),
-            now_ms(),
         );
         connectors.push(status);
     }
@@ -1244,24 +1304,22 @@ pub fn status_of(
 }
 
 /// Says why a connection must be renewed (the cause the provider gave, and
-/// whose setting it is), and when Google will end a sign-in while ReMa's
-/// Google app is in Testing.
+/// whose setting it is), and, while this build says ReMa's Google app is in
+/// Testing, about when Google will end a sign-in (`sign_in_ends_at`: an
+/// estimate from the sign-in time, since Google says "7 days" and no more).
 pub fn explain_sign_in(
     status: &mut ConnectorStatus,
     account: Option<&AccountRecord>,
     google_in_testing: Option<bool>,
-    now: i64,
 ) {
     let Some(account) = account else {
         return;
     };
-    let age = now - account.connected_at;
     match status.state {
         ConnectorState::ReauthRequired if account.status == AccountStatus::ReauthRequired => {
             status.message = Some(failure::reauth_message(
                 status.provider,
                 account.status_cause,
-                Some(age),
                 google_in_testing,
             ));
         }

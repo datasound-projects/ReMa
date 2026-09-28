@@ -14,6 +14,9 @@ pub const BASE_SCOPES: [&str; 5] = ["openid", "profile", "email", "offline_acces
 pub const SCOPE_MAIL_READ: &str = "Mail.Read";
 /// Read and manage the signed-in user's calendar events.
 pub const SCOPE_CALENDARS_READWRITE: &str = "Calendars.ReadWrite";
+/// The tenant id (`tid` claim) of personal Microsoft accounts (outlook.com,
+/// hotmail.com, live.com), which have no `getSchedule`.
+pub const CONSUMERS_TENANT: &str = "9188040d-6c67-4c5b-b112-36a304b66dad";
 
 /// Microsoft identity platform and Graph endpoints.
 #[derive(Debug, Clone)]

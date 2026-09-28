@@ -19,18 +19,29 @@ crate::models::text_enum!(AccountStatus {
     ReauthRequired => "reauth_required",
 });
 
-/// Why a provider ended a connection that now needs a reconnect.
+/// Why a provider ended a connection that now needs a reconnect. The stored
+/// strings never change: rows written by earlier versions still parse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReauthCause {
-    /// Google ended the sign-in 7 days after it was made: the Google app is
-    /// in Testing (a setting of the app, not of ReMa or the account).
+    /// Recorded by earlier versions that inferred, from the grant's age,
+    /// that Google ended the sign-in because the app is in Testing. Google
+    /// never says so; new rows use `Revoked`, and this reads the same way.
     GoogleTesting,
-    /// Access was removed: in the account's settings, by a password change
-    /// or reset, or by an administrator.
+    /// The provider ended the grant: revoked in the account's settings, by a
+    /// password change or by an administrator. For Google this is every
+    /// `invalid_grant` (Google does not say which cause).
     Revoked,
-    /// The grant went unused too long (Microsoft: 90 days).
+    /// Microsoft invalidated the sign-in session (AADSTS50133: a password
+    /// change or reset, a sign-out from every device): sign in again.
+    SessionEnded,
+    /// Microsoft: the user or an administrator has not consented, or the
+    /// consent was withdrawn (AADSTS65001).
+    ConsentRequired,
+    /// The grant went unused too long (Microsoft's refresh tokens expire
+    /// from inactivity; no exact lifetime is promised).
     Inactive,
-    /// A security policy asks for a new sign-in (multi-factor, device).
+    /// A security policy asks for a new sign-in (multi-factor, device,
+    /// Conditional Access sign-in frequency).
     SecurityPolicy,
     /// The account is disabled, locked or deleted.
     AccountBlocked,
@@ -42,6 +53,8 @@ pub enum ReauthCause {
 crate::models::text_enum!(ReauthCause {
     GoogleTesting => "google_testing",
     Revoked => "revoked",
+    SessionEnded => "session_ended",
+    ConsentRequired => "consent_required",
     Inactive => "inactive",
     SecurityPolicy => "security_policy",
     AccountBlocked => "account_blocked",
@@ -368,5 +381,25 @@ mod tests {
             Ok(())
         })
         .unwrap();
+    }
+
+    #[test]
+    fn reauth_causes_keep_their_stored_names() {
+        // Rows written by earlier versions (including the cause they
+        // inferred for Google) still parse, and every cause round-trips.
+        for (text, cause) in [
+            ("google_testing", ReauthCause::GoogleTesting),
+            ("revoked", ReauthCause::Revoked),
+            ("session_ended", ReauthCause::SessionEnded),
+            ("consent_required", ReauthCause::ConsentRequired),
+            ("inactive", ReauthCause::Inactive),
+            ("security_policy", ReauthCause::SecurityPolicy),
+            ("account_blocked", ReauthCause::AccountBlocked),
+            ("token_lifetime", ReauthCause::TokenLifetime),
+        ] {
+            assert_eq!(ReauthCause::parse(text), Some(cause));
+            assert_eq!(cause.as_str(), text);
+        }
+        assert_eq!(ReauthCause::parse("something_new"), None);
     }
 }

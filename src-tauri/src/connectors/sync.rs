@@ -146,6 +146,7 @@ pub async fn calendar_client(
                 &state.connectors.microsoft.graph,
             ),
             email,
+            schedule_unsupported: state.connectors.microsoft_schedule_unsupported(),
         }),
         ProviderId::Linkedin | ProviderId::Xing => {
             return Err(AppError::internal("not a calendar connector"))

@@ -32,9 +32,9 @@ pub fn log(provider: &str, phase: &str, facts: &str) {
 }
 
 /// ReMa's own app registration with a provider. Configured when ReMa is
-/// built, never entered by users. A Google "Desktop app" client comes with a
-/// secret Google does not treat as confidential; Microsoft public clients
-/// have none.
+/// built, never entered by users. A Google "Desktop app" client may come
+/// with a secret Google does not treat as confidential (and does not
+/// require of native clients); Microsoft public clients have none.
 #[derive(Clone)]
 pub struct OAuthApp {
     pub client_id: String,
@@ -247,8 +247,10 @@ pub async fn token_request(
     mut form: Vec<(&str, String)>,
 ) -> Result<TokenResponse, Failure> {
     form.push(("client_id", app.client_id.clone()));
-    if let Some(secret) = &app.client_secret {
-        form.push(("client_secret", secret.clone()));
+    // A public client without a secret sends none (an empty one would be
+    // refused as a wrong secret).
+    if let Some(secret) = app.client_secret.as_deref().filter(|s| !s.is_empty()) {
+        form.push(("client_secret", secret.to_string()));
     }
     let secrets: Vec<String> = form
         .iter()
@@ -397,6 +399,39 @@ mod tests {
             client_secret: Some("shh".into()),
         };
         assert!(!format!("{app:?}").contains("shh"));
+    }
+
+    #[tokio::test]
+    async fn token_requests_omit_an_absent_or_empty_client_secret() {
+        use crate::test_support::MockServer;
+        let server =
+            MockServer::start(|_| Some((200, r#"{"access_token":"at","expires_in":3600}"#.into())))
+                .await;
+        for secret in [None, Some(String::new()), Some("  ".to_string())] {
+            let app = OAuthApp {
+                client_id: "id".into(),
+                client_secret: secret.map(|s| s.trim().to_string()),
+            };
+            token_request(
+                &reqwest::Client::new(),
+                &format!("{}/token", server.base_url),
+                &app,
+                "Google",
+                TokenPhase::Refresh,
+                vec![
+                    ("grant_type", "refresh_token".into()),
+                    ("refresh_token", "rt".into()),
+                ],
+            )
+            .await
+            .unwrap();
+        }
+        let requests = server.requests();
+        assert_eq!(requests.len(), 3);
+        for request in &requests {
+            assert!(request.body.contains("client_id=id"));
+            assert!(!request.body.contains("client_secret"), "{}", request.body);
+        }
     }
 
     #[test]
