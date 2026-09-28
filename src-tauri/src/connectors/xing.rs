@@ -9,8 +9,8 @@ use crate::models::connectors::Capability;
 
 /// Why XING cannot be connected (shown on its card).
 pub const UNAVAILABLE: &str = "XING offers no sign-in for desktop apps and no API access for \
-    ReMa. Import contacts you saved from XING as vCards below; company, job and public people \
-    research work without it.";
+    ReMa. Import contacts you saved from XING as vCards in Settings → Connectors → Your \
+    contacts; company, job and public people research work without it.";
 
 /// No XING capability is available to ReMa.
 pub fn allows(_capability: Capability, _granted: &[String]) -> bool {

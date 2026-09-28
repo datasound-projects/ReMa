@@ -411,6 +411,10 @@ pub async fn research(
                 provider,
                 checked: members.len() as u32,
                 matched: matched.len() as u32,
+                imported: members
+                    .iter()
+                    .filter(|m| m.origin != relationships::Origin::LinkedinApi)
+                    .count() as u32,
             };
             result.connections = matched;
             outcome
@@ -458,11 +462,7 @@ pub async fn research(
             match &result.connections_outcome {
                 ConnectionsOutcome::Checked { matched, .. } => format!(
                     "{} at these companies",
-                    plural(
-                        *matched as usize,
-                        "first-degree connection",
-                        "first-degree connections"
-                    )
+                    plural(*matched as usize, "connection", "connections")
                 ),
                 ConnectionsOutcome::Unavailable { .. } => "Connection list not available".into(),
                 ConnectionsOutcome::Failed { .. } => "The connection list could not be read".into(),
@@ -611,6 +611,7 @@ mod tests {
                 provider: ProviderId::Linkedin,
                 checked: 10,
                 matched: 1,
+                imported: 0,
             },
             rows: vec![],
             stages: vec![],

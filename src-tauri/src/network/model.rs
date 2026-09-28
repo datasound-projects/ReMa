@@ -253,6 +253,10 @@ pub enum ConnectionsOutcome {
         provider: ProviderId,
         checked: u32,
         matched: u32,
+        /// How many of those checked are contacts the user imported (their
+        /// LinkedIn export, vCards); the rest came from LinkedIn's API.
+        #[serde(default)]
+        imported: u32,
     },
     Failed {
         reason: String,

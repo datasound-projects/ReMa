@@ -1144,7 +1144,12 @@ export type ConnectionsOutcome =
  */
 { state: "unavailable"; reason: string } | 
 /**  The connection list was checked. */
-{ state: "checked"; provider: ProviderId; checked: number; matched: number } | { state: "failed"; reason: string };
+{ state: "checked"; provider: ProviderId; checked: number; matched: number; 
+/**
+ *  How many of those checked are contacts the user imported (their
+ *  LinkedIn export, vCards); the rest came from LinkedIn's API.
+ */
+imported?: number } | { state: "failed"; reason: string };
 
 /**
  *  Why connecting or checking a connector failed (Spec B §60). Each code

@@ -573,6 +573,37 @@ function logModel(provider, step, body, extra = {}) {
     career_sources: whole.includes('<career_sources>'), contacts: CONTACTS.test(whole),
     linkedin_members: LINKEDIN_MEMBERS.test(whole), injected: INJECTED.test(whole), ...extra });
 }
+/** The last user message of a request (Responses `input` or Messages `messages`). */
+function lastUserText(body) {
+  const turns = body.input ?? body.messages ?? [];
+  const users = turns.filter((t) => t.role === 'user');
+  const last = users[users.length - 1];
+  if (!last) return '';
+  if (typeof last.content === 'string') return last.content;
+  return (last.content ?? []).map((c) => c.text ?? '').join(' ');
+}
+/** A request that carries results of the model's own tool calls (a later round). */
+const laterRound = (body) =>
+  JSON.stringify(body.input ?? body.messages ?? []).includes('function_call_output') ||
+  JSON.stringify(body.messages ?? []).includes('"tool_result"');
+/**
+ * The chat model with its provider's own search (ChatGPT and Claude
+ * parity): for a current-information question it searches, then answers
+ * with the postings it found, linked, as a table.
+ */
+function searchesItself(step, body) {
+  const web = (body.tools ?? []).some((t) => /web_search/.test(t.type ?? ''));
+  return step === 'answer' && web && !laterRound(body) && /\b(jobs?|openings?|vacanc|hiring|recruiters?)\b/i.test(lastUserText(body));
+}
+const ownSearchAnswer = () => {
+  const [a, b] = searchSources();
+  return (
+    'I searched the web for current openings.\n\n| Company | Role | Location | Work mode | Salary | Posted | Key skills | Link |\n|---|---|---|---|---|---|---|---|\n' +
+    `| Wien Robotics | LLM Engineer | Vienna, Austria | — | EUR 95,000 - 120,000 per year | ${isoDate(inDays(-4))} | Python, LLMs | [Posting](${a.url}) |\n` +
+    `| Prater AI | Applied AI Engineer | Vienna, Austria | — | — | ${isoDate(inDays(-2))} | Python | [Posting](${b.url}) |\n`
+  );
+};
+
 function modelText(step) {
   if (step === 'jobs') return searchAnswer();
   if (step === 'research') return researchAnswer();
@@ -591,8 +622,9 @@ function anthropicMessages(body, res) {
   const sse = (data) => res.write(`event: ${data.type}\ndata: ${JSON.stringify(data)}\n\n`);
   sse({ type: 'message_start', message: { id: 'msg_1', role: 'assistant', content: [] } });
   let index = 0;
-  if (step !== 'answer') {
-    const sources = step === 'jobs' ? searchSources() : researchSources();
+  const own = searchesItself(step, body);
+  if (step !== 'answer' || own) {
+    const sources = step === 'research' ? researchSources() : searchSources();
     sse({ type: 'content_block_start', index, content_block: { type: 'server_tool_use', id: 'srvtoolu_1', name: 'web_search', input: {} } });
     sse({ type: 'content_block_delta', index, delta: { type: 'input_json_delta', partial_json: JSON.stringify({ query: step === 'jobs' ? 'AI engineer jobs Vienna' : 'Nordlicht AI recruiters' }) } });
     sse({ type: 'content_block_stop', index });
@@ -604,7 +636,9 @@ function anthropicMessages(body, res) {
     sse({ type: 'content_block_stop', index });
     index += 1;
   }
-  const text = step !== 'answer' && searchMode !== 'ok' ? (step === 'jobs' ? '{"postings":[]}' : '{"findings":[]}') : modelText(step);
+  const text = own
+    ? ownSearchAnswer()
+    : step !== 'answer' && searchMode !== 'ok' ? (step === 'jobs' ? '{"postings":[]}' : '{"findings":[]}') : modelText(step);
   sse({ type: 'content_block_start', index, content_block: { type: 'text', text: '' } });
   sse({ type: 'content_block_delta', index, delta: { type: 'text_delta', text } });
   sse({ type: 'content_block_stop', index });
@@ -615,16 +649,17 @@ function anthropicMessages(body, res) {
 
 function openaiResponses(body, res) {
   const step = modelStep(body.instructions ?? '');
-  logModel('openai', step, body, { include: body.include ?? null });
+  const own = searchesItself(step, body);
+  logModel('openai', step, body, { include: body.include ?? null, searched_itself: own });
   res.writeHead(200, { 'content-type': 'text/event-stream' });
   const sse = (data) => res.write(`data: ${JSON.stringify(data)}\n\n`);
-  if (step !== 'answer') {
-    const sources = step === 'jobs' ? searchSources() : researchSources();
+  if (step !== 'answer' || own) {
+    const sources = step === 'research' ? researchSources() : searchSources();
     sse({ type: 'response.output_item.added', output_index: 0, item: { type: 'web_search_call', id: 'ws_1', status: 'in_progress' } });
     sse({ type: 'response.output_item.done', output_index: 0, item: { type: 'web_search_call', id: 'ws_1', status: 'completed',
       action: { type: 'search', query: step === 'jobs' ? 'AI engineer jobs Vienna' : 'Nordlicht AI recruiters', sources: sources.map((s) => ({ type: 'url', url: s.url })) } } });
   }
-  sse({ type: 'response.output_text.delta', item_id: 'msg_1', output_index: 1, delta: modelText(step) });
+  sse({ type: 'response.output_text.delta', item_id: 'msg_1', output_index: 1, delta: own ? ownSearchAnswer() : modelText(step) });
   sse({ type: 'response.completed', response: { status: 'completed' } });
   res.end();
 }

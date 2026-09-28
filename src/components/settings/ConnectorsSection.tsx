@@ -249,7 +249,12 @@ function ConnectorCard({ connector: c, onOpen }: { connector: ConnectorStatus; o
           {c.lastSyncAt !== null && <span>Synced {formatRelative(c.lastSyncAt)}</span>}
         </p>
       )}
-      {(attention || c.state === 'unavailable' || (c.errorCode !== null && c.message)) && c.message && (
+      {/* A network with no API for ReMa (XING) is a fact, not a fault. */}
+      {c.kind === 'network' && c.state === 'unavailable' && c.errorCode === null && c.message && (
+        <p className="connector-card__note connector-card__note--muted">{c.message}</p>
+      )}
+      {(attention || (c.state === 'unavailable' && c.kind !== 'network') || (c.errorCode !== null && c.message)) &&
+        c.message && (
         <p className="connector-card__problem">
           <AlertIcon className="connector-card__problem-icon" aria-hidden="true" />
           <span>

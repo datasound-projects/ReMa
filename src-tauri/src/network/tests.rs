@@ -504,7 +504,8 @@ async fn permitted_first_degree_connections_are_matched_for_the_session_only() {
         ConnectionsOutcome::Checked {
             provider: ProviderId::Linkedin,
             checked: 2,
-            matched: 1
+            matched: 1,
+            imported: 0
         }
     );
     assert_eq!(result.connections.len(), 1);
@@ -572,7 +573,8 @@ async fn imported_contacts_show_whom_you_know_without_linkedins_api() {
         ConnectionsOutcome::Checked {
             provider: ProviderId::Linkedin,
             checked: 2,
-            matched: 1
+            matched: 1,
+            imported: 2
         }
     );
     assert_eq!(result.connections[0].name, "Jane Example");

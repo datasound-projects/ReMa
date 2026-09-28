@@ -751,3 +751,8 @@
   margin: 0;
   font-size: var(--text-sm);
 }
+
+/* A network with no API for ReMa: a fact, not a fault or a link. */
+.connector-card__note--muted {
+  color: var(--color-text-secondary);
+}

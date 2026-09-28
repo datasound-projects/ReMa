@@ -66,25 +66,53 @@ pub fn connections_text(outcome: &ConnectionsOutcome) -> Option<String> {
         ConnectionsOutcome::Checked {
             matched: 0,
             checked,
+            imported,
             ..
-        } => Some(format!(
-            "ReMa checked your {} on LinkedIn: none of them lists one of these companies in \
-             their headline.",
-            plural(
-                *checked as usize,
-                "first-degree connection",
-                "first-degree connections"
+        } => Some(if *imported == *checked {
+            format!(
+                "ReMa checked your {}: none of them is listed at these companies.",
+                plural(*checked as usize, "imported contact", "imported contacts")
             )
-        )),
-        ConnectionsOutcome::Checked { matched, .. } => Some(format!(
-            "ReMa found {} at these companies. LinkedIn connection details are shown only in \
-             Network Connect during this session; they are not saved in chats or run history.",
-            plural(
-                *matched as usize,
-                "LinkedIn first-degree connection",
-                "LinkedIn first-degree connections"
+        } else if *imported > 0 {
+            format!(
+                "ReMa checked your {} (LinkedIn and your imported contacts): none of them is \
+                 listed at these companies.",
+                plural(*checked as usize, "connection", "connections")
             )
-        )),
+        } else {
+            format!(
+                "ReMa checked your {} on LinkedIn: none of them lists one of these companies \
+                 in their headline.",
+                plural(
+                    *checked as usize,
+                    "first-degree connection",
+                    "first-degree connections"
+                )
+            )
+        }),
+        ConnectionsOutcome::Checked {
+            matched,
+            checked,
+            imported,
+            ..
+        } => Some(if *imported == *checked {
+            format!(
+                "ReMa found {} at these companies, from the contacts you imported (kept on this \
+                 computer, never sent to a model).",
+                plural(*matched as usize, "of your contacts", "of your contacts")
+            )
+        } else {
+            format!(
+                "ReMa found {} at these companies. LinkedIn connection details are shown only \
+                 in Network Connect during this session; they are not saved in chats or run \
+                 history.",
+                plural(
+                    *matched as usize,
+                    "LinkedIn first-degree connection",
+                    "LinkedIn first-degree connections"
+                )
+            )
+        }),
         ConnectionsOutcome::Failed { reason } => {
             Some(format!("Your connections could not be checked: {reason}"))
         }
@@ -413,9 +441,21 @@ mod tests {
             provider: ProviderId::Linkedin,
             checked: 120,
             matched: 0,
+            imported: 0,
         })
         .unwrap();
         assert!(checked.contains("checked your 120 first-degree connections"));
+        let imported = connections_text(&ConnectionsOutcome::Checked {
+            provider: ProviderId::Linkedin,
+            checked: 3,
+            matched: 0,
+            imported: 3,
+        })
+        .unwrap();
+        assert_eq!(
+            imported,
+            "ReMa checked your 3 imported contacts: none of them is listed at these companies."
+        );
     }
 
     #[test]

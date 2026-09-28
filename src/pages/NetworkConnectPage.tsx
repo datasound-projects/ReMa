@@ -667,6 +667,7 @@ function CompanyCells({ company, job }: { company: Company; job: JobRef | null }
 /** What the connection check did (NC §22: never "no connections" unchecked). */
 function ConnectionsPanel({ outcome, connections }: { outcome: ConnectionsOutcome; connections: Connection[] }) {
   if (outcome.state === 'not_requested') return null;
+  const imported = outcome.state === 'checked' ? (outcome.imported ?? 0) : 0;
   return (
     <div className={`nc-connections nc-connections--${outcome.state}`} role="note">
       <NetworkIcon className="nc-connections__icon" aria-hidden="true" />
@@ -676,14 +677,21 @@ function ConnectionsPanel({ outcome, connections }: { outcome: ConnectionsOutcom
         {outcome.state === 'failed' && <p>Your connections could not be checked: {outcome.reason}</p>}
         {outcome.state === 'checked' && outcome.matched === 0 && (
           <p>
-            ReMa checked your {plural(outcome.checked, 'first-degree connection', 'first-degree connections')} on
-            LinkedIn: none of them lists one of these companies in their headline.
+            {imported === outcome.checked
+              ? `ReMa checked your ${plural(outcome.checked, 'imported contact', 'imported contacts')}: none of them is listed at these companies.`
+              : imported > 0
+                ? `ReMa checked your ${plural(outcome.checked, 'connection', 'connections')} (LinkedIn and your imported contacts): none of them is listed at these companies.`
+                : `ReMa checked your ${plural(outcome.checked, 'first-degree connection', 'first-degree connections')} on LinkedIn: none of them lists one of these companies in their headline.`}
           </p>
         )}
         {outcome.state === 'checked' && connections.length > 0 && (
           <>
             <p className="nc-connections__hint">
-              From LinkedIn, shown for this session only; not saved in chats or run history.
+              {imported === outcome.checked
+                ? 'From the contacts you imported: kept on this computer and never sent to a model.'
+                : imported > 0
+                  ? 'From LinkedIn (shown for this session only) and the contacts you imported; never sent to a model.'
+                  : 'From LinkedIn, shown for this session only; not saved in chats or run history.'}
             </p>
             <ul className="nc-connections__list">
               {connections.map((c) => (
