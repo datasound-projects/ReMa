@@ -13,9 +13,10 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import type { PortfolioContent, PortfolioEntry, PortfolioSection } from '../../services/portfolioService';
 import { addSection, moveSection, newSection, removeSection, updateSection } from './content';
 import { FONT_FAMILIES, FONT_FILES } from './fonts';
-import { buildDocument, defaultPageSize, displayUrl, formatDate, PAGE_SIZES, printedSections, type LayoutInput } from './layout';
-import { SAMPLE_CONTENT } from './sample';
-import { DEFAULT_TEMPLATE_ID, TEMPLATES, templateById } from './templates';
+import { buildDocument, defaultPageSize, displayUrl, formatDate, inlineRuns, PAGE_SIZES, printedSections, resolveTheme, stripMarkup, type LayoutInput } from './layout';
+import { SAMPLE_CONTENT, SAMPLE_LETTER } from './sample';
+import { applyStyle, contrastRatio, defaultStyle, isDefaultStyle, PALETTES } from './style';
+import { CATEGORIES, CV_TEMPLATES, DEFAULT_LETTER_TEMPLATE_ID, DEFAULT_TEMPLATE_ID, LETTER_TEMPLATES, matchingLetterTemplate, TEMPLATES, templateById } from './templates';
 
 interface PdfMakeNode {
   virtualfs: { writeFileSync(name: string, content: Uint8Array): void };
@@ -110,6 +111,10 @@ function fullContent(): PortfolioContent {
       entries: [entry({ title: 'AWS Solutions Architect', subtitle: 'Amazon Web Services', end: '2023-05' })],
     },
     { ...newSection('links'), entries: [entry({ title: 'Blog', url: 'https://blog.example.org/' })] },
+    {
+      ...newSection('publications'),
+      entries: [entry({ title: 'Deep Learning for Tabular Data', subtitle: 'Journal of Data Systems', end: '2023', url: 'https://doi.example.org/1' })],
+    },
     { ...newSection('custom'), title: 'Volunteering', text: 'Mentor at a coding school for refugees.' },
     { ...newSection('custom'), title: 'Secret hobbies', text: 'This hidden text must not be printed.', visible: false },
   ];
@@ -118,10 +123,12 @@ function fullContent(): PortfolioContent {
 
 const input = (templateId: string, content = fullContent(), pageSize: 'a4' | 'letter' = 'a4'): LayoutInput => ({
   name: 'Test CV',
+  kind: templateById(templateId).kind === 'letter' ? 'cover_letter' : 'cv',
   templateId,
   pageSize,
   accent: '',
   content,
+  letter: SAMPLE_LETTER,
 });
 
 describe('bundled fonts', () => {
@@ -139,35 +146,122 @@ describe('bundled fonts', () => {
 });
 
 describe('template registry', () => {
-  it('has at least 12 distinct templates, including the requested designs', () => {
-    expect(TEMPLATES.length).toBeGreaterThanOrEqual(12);
+  it('has 20 CV templates, two per category, and 5 cover letter templates', () => {
+    expect(CV_TEMPLATES).toHaveLength(20);
+    expect(LETTER_TEMPLATES).toHaveLength(5);
     const ids = TEMPLATES.map((t) => t.id);
     expect(new Set(ids).size).toBe(ids.length);
+    for (const category of CATEGORIES) {
+      expect(CV_TEMPLATES.filter((t) => t.category === category).map((t) => t.name), category).toHaveLength(2);
+    }
     const names = TEMPLATES.map((t) => t.name);
     for (const name of [
-      'Minimal',
-      'Modern',
+      'Technical Grid',
+      'Systems Minimal',
+      'Editorial Portfolio',
+      'Studio Accent',
+      'Structured Professional',
+      'Operations Clear',
+      'Precision Classic',
+      'Finance Modern',
+      'Campaign Modern',
+      'Brand Story',
+      'Results Focus',
+      'Relationship Professional',
+      'Clinical Clear',
+      'Care Professional',
+      'Academic Profile',
+      'Teaching Modern',
+      'Formal Counsel',
+      'Administrative Essential',
+      'Executive Brief',
+      'Leadership Profile',
+      'Classic Professional',
+      'Modern Minimal',
       'Executive',
-      'Technical',
-      'Data / AI',
-      'Consulting',
-      'Product',
-      'Creative',
-      'Academic',
-      'Compact',
-      'Two-column',
-      'ATS-friendly',
+      'Creative Editorial',
+      'Graduate / Career Change',
     ]) {
       expect(names).toContain(name);
     }
-    // Genuinely different: no two templates share every design choice.
+    // Genuinely different: no two templates share layout, header, section and entry treatment.
     const signature = (t: (typeof TEMPLATES)[number]) =>
-      JSON.stringify([t.layout, t.header, t.section, t.entry, t.skills, t.fonts, t.colors.accent]);
+      JSON.stringify([t.kind, t.layout, t.sidebar?.side, t.header, t.section, t.entry, t.skills, t.fonts, t.dividers, t.pattern]);
     expect(new Set(TEMPLATES.map(signature)).size).toBe(TEMPLATES.length);
+    // The requested variety of layouts.
+    const tags = new Set(TEMPLATES.flatMap((t) => t.tags));
+    for (const tag of ['single-column', 'two-column', 'sidebar', 'minimal', 'editorial', 'executive', 'text-first']) expect(tags.has(tag as never), tag).toBe(true);
+    expect(TEMPLATES.every((t) => t.tags.length > 0 && t.description.length > 20)).toBe(true);
   });
 
-  it('falls back to the default template for unknown ids', () => {
+  it('falls back to the default template for unknown ids and maps old ids', () => {
     expect(templateById('does-not-exist').id).toBe(DEFAULT_TEMPLATE_ID);
+    expect(templateById('does-not-exist', 'letter').id).toBe(DEFAULT_LETTER_TEMPLATE_ID);
+    expect(templateById('modern').id).toBe('campaign-modern');
+    expect(templateById('ats').plain).toBe(true);
+    expect(templateById('data-ai').layout).toBe('sidebar');
+    expect(matchingLetterTemplate('executive-brief').id).toBe('letter-executive');
+    expect(matchingLetterTemplate('studio-accent').id).toBe('letter-editorial');
+    expect(matchingLetterTemplate('campaign-modern').id).toBe('letter-minimal');
+  });
+});
+
+describe('style customization', () => {
+  it('applies palettes, fonts, spacing and layout on top of a template, and resets cleanly', () => {
+    const base = templateById('campaign-modern');
+    expect(isDefaultStyle(defaultStyle())).toBe(true);
+    expect(applyStyle(base, defaultStyle(), '')).toEqual(base);
+    const styled = applyStyle(
+      base,
+      { ...defaultStyle(), palette: 'wine', fontPairing: 'source-serif', scale: 1.08, margins: 'wide', lineSpacing: 'relaxed', sectionSpacing: 'tight', columns: 'sidebar_left', pattern: 'dots', dividers: 'thick', header: 'center', textAlign: 'justify' },
+      '',
+    );
+    expect(styled.colors.accent).toBe('#9f1239');
+    expect(styled.fonts.body).toBe('SourceSerif');
+    expect(styled.size.body).toBeCloseTo(base.size.body * 1.08, 1);
+    expect(styled.margins[0]).toBe(Math.round(base.margins[0] * 1.25));
+    expect(styled.lineHeight).toBeGreaterThan(base.lineHeight);
+    expect(styled.gap.section).toBeLessThan(base.gap.section);
+    expect(styled.layout).toBe('sidebar');
+    expect(styled.sidebar?.side).toBe('left');
+    expect(styled.pattern).toBe('dots');
+    expect(styled.dividers).toBe('thick');
+    expect(styled.header).toBe('center');
+    expect(styled.justify).toBe(true);
+    // The base template is untouched.
+    expect(base.layout).toBe('single');
+    // A chosen accent wins over the palette's.
+    expect(applyStyle(base, { ...defaultStyle(), palette: 'wine' }, '#0f766e').colors.accent).toBe('#0f766e');
+  });
+
+  it('keeps text readable: unreadable custom colors fall back, panels stay in contrast', () => {
+    const base = templateById('campaign-modern');
+    const pale = applyStyle(base, { ...defaultStyle(), textColor: '#f0f0f0', headingColor: '#ffffff', panelColor: '#1e3a5f' }, '');
+    expect(pale.colors.text).toBe(base.colors.text);
+    expect(pale.colors.heading ?? pale.colors.text).toBe(base.colors.heading ?? base.colors.text);
+    expect(pale.colors.panelText).toBe('#ffffff');
+    for (const p of PALETTES) {
+      expect(contrastRatio(p.text, '#ffffff'), p.name).toBeGreaterThan(4.5);
+      expect(contrastRatio(p.panelText, p.panel), p.name).toBeGreaterThan(4.5);
+    }
+    // Text-first templates ignore color choices.
+    const plain = applyStyle(templateById('administrative-essential'), { ...defaultStyle(), palette: 'wine' }, '#9f1239');
+    expect(plain.colors.accent).toBe('#000000');
+  });
+
+  it('inline markup: bold, italic and links', () => {
+    const runs = inlineRuns('Built **fast** pipelines with _care_ and [docs](https://example.org/docs).', '#0a66c2');
+    expect(runs).toEqual([
+      { text: 'Built ' },
+      { text: 'fast', bold: true },
+      { text: ' pipelines with ' },
+      { text: 'care', italics: true },
+      { text: ' and ' },
+      { text: 'docs', link: 'https://example.org/docs', color: '#0a66c2' },
+      { text: '.' },
+    ]);
+    expect(stripMarkup('a **b** [c](https://x.y)')).toBe('a b c');
+    expect(inlineRuns('snake_case_name and 2*3*4')).toEqual([{ text: 'snake_case_name and 2*3*4' }]);
   });
 });
 
@@ -201,6 +295,16 @@ describe('layout', () => {
     for (const t of TEMPLATES) buildDocument(input(t.id, content));
     expect(JSON.stringify(content)).toBe(before);
   });
+
+  it('resolves a theme for every template with and without a custom style', () => {
+    for (const t of TEMPLATES) {
+      const plain = resolveTheme({ templateId: t.id, accent: '', pageSize: 'a4', kind: t.kind === 'letter' ? 'cover_letter' : 'cv' });
+      expect(plain.t.id).toBe(t.id);
+      const styled = resolveTheme({ templateId: t.id, accent: '#6d28d9', pageSize: 'a4', style: { ...defaultStyle(), palette: 'midnight', columns: 'sidebar_right' } });
+      if (!t.plain) expect(styled.accent).toBe('#6d28d9');
+      expect(contrastRatio(styled.panelText, styled.panel), t.id).toBeGreaterThan(3);
+    }
+  });
 });
 
 describe('editing helpers', () => {
@@ -225,13 +329,14 @@ describe('PDF export', () => {
     '%s: real, selectable text inside the page margins, same content',
     async (_name, id) => {
       const template = templateById(id);
+      const isLetter = template.kind === 'letter';
       for (const size of ['a4', 'letter'] as const) {
         const bytes = await render(input(id, fullContent(), size));
         expect(new TextDecoder().decode(bytes.slice(0, 5))).toBe('%PDF-');
         const pages = await readPdf(bytes);
         expect(pages.length).toBeGreaterThanOrEqual(1);
         const text = allText(pages);
-        for (const expected of [
+        const expectedCv = [
           'Alex Morgan',
           'Senior Data Engineer',
           'Northwind Analytics',
@@ -242,7 +347,10 @@ describe('PDF export', () => {
           'Mentor at a coding school for refugees.',
           'Kafka',
           'German',
-        ]) {
+          'Deep Learning for Tabular Data',
+        ];
+        const expectedLetter = ['Alex Morgan', 'Jordan Lee', 'Fabrikam', 'Application for Staff Data Engineer', 'Kind regards,', 'two billion events'];
+        for (const expected of isLetter ? expectedLetter : expectedCv) {
           expect(text, `${id}/${size}`).toContain(expected);
         }
         expect(text).not.toContain('This hidden text must not be printed.');
@@ -291,7 +399,7 @@ describe('PDF export', () => {
         },
       ],
     };
-    for (const id of ['modern', 'data-ai', 'academic', 'ats']) {
+    for (const id of ['campaign-modern', 'technical-grid', 'academic-profile', 'administrative-essential', 'brand-story', 'leadership-profile']) {
       const pages = await readPdf(await render(input(id, long)));
       expect(pages.length).toBeGreaterThan(2);
       const text = allText(pages);
@@ -300,5 +408,40 @@ describe('PDF export', () => {
       expect(text).toContain('Paper 140:');
       expect(text).toContain(`${pages.length} / ${pages.length}`);
     }
-  }, 60_000);
+  }, 90_000);
+
+  it('short and nearly empty documents render on one page in every template', async () => {
+    const short: PortfolioContent = {
+      header: { ...SAMPLE_CONTENT.header, headline: '', website: '', linkedin: '', github: '' },
+      sections: [{ ...newSection('summary'), text: 'Short **summary** with a [link](https://example.org).' }],
+    };
+    for (const t of TEMPLATES) {
+      const pages = await readPdf(await render(input(t.id, short)));
+      expect(pages.length, t.id).toBe(1);
+      const text = allText(pages);
+      expect(text).toContain('Alex Morgan');
+      if (t.kind === 'cv') {
+        expect(text).toContain('summary');
+        expect(text).not.toContain('**');
+      }
+    }
+    const empty = await readPdf(await render(input('campaign-modern', { header: { ...SAMPLE_CONTENT.header, fullName: '', email: '', phone: '', location: '', website: '', linkedin: '', github: '', headline: '' }, sections: [] })));
+    expect(allText(empty)).toContain('Add your name');
+  }, 90_000);
+
+  it('a custom style renders for every template (band, patterns, panels, photo)', async () => {
+    const pixel =
+      'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+    const content = fullContent();
+    content.header.photo = pixel;
+    for (const t of TEMPLATES) {
+      const styled: LayoutInput = {
+        ...input(t.id, content),
+        accent: '#6d28d9',
+        style: { ...defaultStyle(), palette: 'plum', pattern: 'diagonal', dividers: 'dotted', header: t.kind === 'letter' ? 'band' : 'band', columns: t.kind === 'cv' ? 'sidebar_left' : '', showPhoto: true, fontPairing: 'playfair-sans', scale: 0.9 },
+      };
+      const pages = await readPdf(await render(styled));
+      expect(allText(pages), t.id).toContain('Alex Morgan');
+    }
+  }, 120_000);
 });

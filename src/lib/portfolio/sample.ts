@@ -1,4 +1,4 @@
-import type { PortfolioContent } from '../../services/portfolioService';
+import type { CoverLetter, PortfolioContent } from '../../services/portfolioService';
 
 /** Fictional content that shows off a template in the gallery. */
 export const SAMPLE_CONTENT: PortfolioContent = {
@@ -11,6 +11,7 @@ export const SAMPLE_CONTENT: PortfolioContent = {
     website: '',
     linkedin: 'https://www.linkedin.com/in/alex-morgan-example',
     github: 'https://github.com/alex-morgan-example',
+    photo: '',
   },
   sections: [
     {
@@ -116,4 +117,20 @@ export const SAMPLE_CONTENT: PortfolioContent = {
       ],
     },
   ],
+};
+
+/** A sample letter that matches the sample CV. */
+export const SAMPLE_LETTER: CoverLetter = {
+  recipientName: 'Jordan Lee',
+  recipientTitle: 'Head of Data Platform',
+  company: 'Fabrikam',
+  address: '1 Market Street\nLondon EC1A 1AA',
+  position: 'Staff Data Engineer',
+  date: '12 March 2026',
+  subject: 'Application for Staff Data Engineer',
+  greeting: 'Dear Jordan Lee,',
+  body:
+    'I am writing to apply for the Staff Data Engineer position at Fabrikam. Over the past eight years I have built streaming and batch platforms that teams rely on every day, most recently at Northwind Analytics.\n\nAt Northwind I led the move to an event-driven platform that now processes two billion events a day and cut pipeline costs by a third with incremental models. I care about data contracts, clear ownership and tooling that makes the right thing the easy thing.\n\nI would welcome the chance to discuss how I could contribute to your platform team, and I am happy to share more detail on any of the work above.',
+  closing: 'Kind regards,',
+  signature: 'Alex Morgan',
 };

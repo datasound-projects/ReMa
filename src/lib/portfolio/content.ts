@@ -16,7 +16,8 @@ export const SECTION_KINDS: { kind: SectionKind; label: string; description: str
   { kind: 'skills', label: 'Skills', description: 'Groups of skills and tools' },
   { kind: 'languages', label: 'Languages', description: 'Languages and levels' },
   { kind: 'certifications', label: 'Certifications', description: 'Certificates and licenses' },
-  { kind: 'links', label: 'Links', description: 'Portfolio, publications, profiles' },
+  { kind: 'publications', label: 'Publications', description: 'Papers, articles, talks' },
+  { kind: 'links', label: 'Links', description: 'Portfolio, profiles, websites' },
   { kind: 'custom', label: 'Custom section', description: 'Anything else: awards, volunteering…' },
 ];
 
@@ -28,6 +29,7 @@ export const DEFAULT_TITLES: Record<SectionKind, string> = {
   skills: 'Skills',
   languages: 'Languages',
   certifications: 'Certifications',
+  publications: 'Publications',
   links: 'Links',
   custom: 'Additional information',
 };
@@ -51,6 +53,7 @@ export const ENTRY_FIELDS: Record<SectionKind, EntryFields | null> = {
   skills: { title: 'Group (optional)', tags: 'Skills' },
   languages: { title: 'Language', subtitle: 'Level' },
   certifications: { title: 'Certificate', subtitle: 'Issuer', dates: 'single', url: true },
+  publications: { title: 'Title', subtitle: 'Journal, conference or publisher', location: true, dates: 'single', url: true, description: true },
   links: { title: 'Label', url: true },
   custom: { title: 'Title', subtitle: 'Subtitle', dates: 'range', url: true, description: true },
 };
@@ -64,6 +67,7 @@ export const HAS_TEXT: Record<SectionKind, boolean> = {
   skills: false,
   languages: false,
   certifications: false,
+  publications: false,
   links: false,
   custom: true,
 };

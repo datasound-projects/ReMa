@@ -1,9 +1,19 @@
 import type { PageSize } from '../../services/portfolioService';
-import { SAMPLE_CONTENT } from './sample';
+import type { LayoutInput } from './layout';
+import { SAMPLE_CONTENT, SAMPLE_LETTER } from './sample';
+import { templateById } from './templates';
 
 const cache = new Map<string, Promise<string>>();
 // One render at a time keeps the interface responsive.
 let queue: Promise<unknown> = Promise.resolve();
+
+/** The sample document for a template (a CV or a letter, by the template's kind). */
+export function sampleInput(templateId: string, pageSize: PageSize): LayoutInput {
+  const template = templateById(templateId);
+  return template.kind === 'letter'
+    ? { name: 'Sample', kind: 'cover_letter', templateId: template.id, pageSize, accent: '', content: SAMPLE_CONTENT, letter: SAMPLE_LETTER }
+    : { name: 'Sample', kind: 'cv', templateId: template.id, pageSize, accent: '', content: SAMPLE_CONTENT };
+}
 
 /**
  * A picture of a template's first page with sample content (rendered by
@@ -15,7 +25,7 @@ export function templateThumbnail(templateId: string, pageSize: PageSize, width 
   if (cached) return cached;
   const next = queue.then(async () => {
     const [{ renderPdf }, { firstPageImage }] = await Promise.all([import('./pdf'), import('../pdf/thumbnail')]);
-    const bytes = await renderPdf({ name: 'Sample', templateId, pageSize, accent: '', content: SAMPLE_CONTENT });
+    const bytes = await renderPdf(sampleInput(templateId, pageSize));
     return firstPageImage(bytes, width);
   });
   queue = next.catch(() => undefined);
