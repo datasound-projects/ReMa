@@ -1,6 +1,7 @@
 import {
   commands,
   type ApprovalDecision,
+  type ChatConnector,
   type Conversation,
   type ConversationDetail,
   type Message,
@@ -12,6 +13,7 @@ import { callBackend } from './ipc';
 
 export type {
   ApprovalDecision,
+  ChatConnector,
   ChatEvent,
   Conversation,
   ConversationDetail,
@@ -45,13 +47,17 @@ export function deleteConversation(id: number): Promise<null> {
   return callBackend(() => commands.deleteConversation(id));
 }
 
-/** Stores the agents and MCP servers selected in a conversation. */
+/**
+ * Stores the agents, MCP servers and connectors selected in a conversation
+ * (`connectors: null` keeps its connector choice).
+ */
 export function setConversationSelections(
   id: number,
   agentIds: string[],
   mcpServerIds: number[],
+  connectors: ChatConnector[] | null,
 ): Promise<Conversation> {
-  return callBackend(() => commands.setConversationSelections(id, agentIds, mcpServerIds));
+  return callBackend(() => commands.setConversationSelections(id, agentIds, mcpServerIds, connectors));
 }
 
 /** Answers a tool call that waits for the user's approval. */

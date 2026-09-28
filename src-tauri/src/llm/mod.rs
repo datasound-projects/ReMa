@@ -31,7 +31,16 @@ pub mod openai;
 pub mod openai_responses;
 pub mod sse;
 
-use std::{collections::HashMap, fmt, future::Future, pin::Pin, sync::Arc};
+use std::{
+    collections::HashMap,
+    fmt,
+    future::Future,
+    pin::Pin,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
 
 use reqwest::RequestBuilder;
 use serde_json::Value;
@@ -262,6 +271,10 @@ impl fmt::Debug for ToolBox {
     }
 }
 
+/// Why web search stopped in the middle of an answer.
+pub const PRIVATE_WEB_OFF: &str = "this answer read your mail, calendar or applications, so web \
+access is off for the rest of this chat. Start a new chat for answers from the web.";
+
 /// Most model calls in one answer when tools are used. After this many
 /// rounds the model answers once more with tools switched off.
 pub const MAX_TOOL_ROUNDS: usize = 8;
@@ -292,6 +305,10 @@ pub struct ChatRequest {
     /// The model must answer now, without calling tools (the last round of
     /// a long tool loop). The tools stay declared: earlier rounds used them.
     pub tools_off: bool,
+    /// Set by the tools once one returned the user's private data (mail,
+    /// calendar, applications): the provider's web search is switched off
+    /// for the rest of the answer, so nothing read there can reach it.
+    pub private: Option<Arc<AtomicBool>>,
 }
 
 impl ChatRequest {
@@ -787,6 +804,19 @@ impl LanguageModel for ProviderLanguageModel {
                     content: step.content,
                     paused: false,
                 });
+                // Private data was just read: no web search from here on
+                // (URLs and text in an email are untrusted).
+                if request
+                    .private
+                    .as_ref()
+                    .is_some_and(|p| p.load(Ordering::SeqCst))
+                {
+                    if let Some(web) = request.web.take() {
+                        web.report(WebEvent::Unavailable {
+                            reason: PRIVATE_WEB_OFF.into(),
+                        });
+                    }
+                }
                 // Enough tool use: the next call answers from what the tools
                 // returned, rather than the answer being lost.
                 if request.rounds.iter().filter(|r| !r.paused).count() >= MAX_TOOL_ROUNDS {

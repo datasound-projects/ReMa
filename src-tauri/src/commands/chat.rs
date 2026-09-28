@@ -4,8 +4,8 @@ use crate::{
     error::AppResult,
     models::{
         chat::{
-            ApprovalDecision, Conversation, ConversationDetail, Message, SendMessageInput,
-            SendMessageResult,
+            ApprovalDecision, ChatConnector, Conversation, ConversationDetail, Message,
+            SendMessageInput, SendMessageResult,
         },
         provider::ModelRef,
     },
@@ -60,7 +60,8 @@ pub async fn delete_conversation(state: State<'_, AppState>, id: i64) -> AppResu
     chat::delete_conversation(&state, id)
 }
 
-/// Stores the agents and MCP servers selected in a conversation.
+/// Stores the agents, MCP servers and connectors selected in a
+/// conversation (`connectors: None` keeps the conversation's choice).
 #[tauri::command]
 #[specta::specta]
 pub async fn set_conversation_selections(
@@ -68,8 +69,15 @@ pub async fn set_conversation_selections(
     id: i64,
     agent_ids: Vec<String>,
     mcp_server_ids: Vec<i64>,
+    connectors: Option<Vec<ChatConnector>>,
 ) -> AppResult<Conversation> {
-    chat::set_selections(&state, id, &agent_ids, &mcp_server_ids)
+    chat::set_selections(
+        &state,
+        id,
+        &agent_ids,
+        &mcp_server_ids,
+        connectors.as_deref(),
+    )
 }
 
 /// The user's answer to a tool call waiting for approval.

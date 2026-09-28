@@ -131,8 +131,15 @@ async fn setup(connect_gmail: bool) -> Option<Setup> {
             .unwrap();
     }
     let private = Arc::new(AtomicBool::new(false));
-    let (specs, tools) =
-        ConnectorTools::prepare(&state, 1, 1, CancellationToken::new(), private.clone()).await?;
+    let (specs, tools) = ConnectorTools::prepare(
+        &state,
+        1,
+        1,
+        CancellationToken::new(),
+        private.clone(),
+        None,
+    )
+    .await?;
     Some(Setup {
         state,
         tools,

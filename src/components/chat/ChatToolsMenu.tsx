@@ -1,9 +1,17 @@
 import { useNavigation } from '../../app/navigation';
-import { MAX_AGENTS, toggle, type ChatSelection } from '../../lib/chatSelection';
+import {
+  MAX_AGENTS,
+  connectorOn,
+  toggle,
+  toggleConnector,
+  type ChatSelection,
+  type ConnectorOption,
+} from '../../lib/chatSelection';
 import type { Agent } from '../../services/agentService';
+import type { ChatConnector } from '../../services/chatService';
 import type { McpServer } from '../../services/mcpService';
 import { AgentIcon } from '../agents/AgentIcon';
-import { CheckIcon, PlugIcon, PlusIcon, SearchIcon } from '../icons';
+import { BriefcaseIcon, CalendarIcon, CheckIcon, MailIcon, PlugIcon, PlusIcon, SearchIcon } from '../icons';
 import { Menu } from '../ui/Menu';
 
 interface ChatToolsMenuProps {
@@ -14,6 +22,8 @@ interface ChatToolsMenuProps {
   onChange: (selection: ChatSelection) => void;
   /** ReMa MCP (built in) is on: it is in every chat, nothing to pick. */
   builtinOn?: boolean;
+  /** Mail, calendars and applications this chat can turn on or off. */
+  connectors?: ConnectorOption[];
 }
 
 const STATE_LABELS: Partial<Record<McpServer['status']['state'], string>> = {
@@ -23,8 +33,23 @@ const STATE_LABELS: Partial<Record<McpServer['status']['state'], string>> = {
   error: 'Not working',
 };
 
-/** The composer's + button: agents and MCP servers for this chat. */
-export function ChatToolsMenu({ agents, servers, selection, onChange, builtinOn = false }: ChatToolsMenuProps) {
+const CONNECTOR_ICONS: Record<ChatConnector, typeof MailIcon> = {
+  gmail: MailIcon,
+  outlook_mail: MailIcon,
+  google_calendar: CalendarIcon,
+  outlook_calendar: CalendarIcon,
+  applications: BriefcaseIcon,
+};
+
+/** The composer's + button: agents, connectors and MCP servers for this chat. */
+export function ChatToolsMenu({
+  agents,
+  servers,
+  selection,
+  onChange,
+  builtinOn = false,
+  connectors = [],
+}: ChatToolsMenuProps) {
   const { navigate } = useNavigation();
   const builtins = agents.filter((a) => a.builtin);
   const mine = agents.filter((a) => !a.builtin);
@@ -59,8 +84,8 @@ export function ChatToolsMenu({ agents, servers, selection, onChange, builtinOn 
         <button
           type="button"
           className={count > 0 ? 'plus-button plus-button--active' : 'plus-button'}
-          aria-label="Agents and MCP tools"
-          title="Agents and MCP tools"
+          aria-label="Agents, connectors and MCP tools"
+          title="Agents, connectors and MCP tools"
           {...props}
         >
           <PlusIcon />
@@ -85,6 +110,44 @@ export function ChatToolsMenu({ agents, servers, selection, onChange, builtinOn 
               }}
             >
               {mine.length > 0 ? 'Manage agents…' : 'My agents…'}
+            </button>
+          </div>
+          <div className="plus-menu__group" role="group" aria-label="Connectors">
+            <div className="plus-menu__heading">Connectors</div>
+            {connectors.map((connector) => {
+              const Icon = CONNECTOR_ICONS[connector.id];
+              const checked = connector.ready && connectorOn(selection, connector.id);
+              return (
+                <button
+                  key={connector.id}
+                  type="button"
+                  role="menuitemcheckbox"
+                  aria-checked={checked}
+                  disabled={!connector.ready}
+                  className="menu__item plus-menu__item"
+                  title={connector.ready ? undefined : 'Reconnect it in Settings → Connectors'}
+                  onClick={() => onChange(toggleConnector(selection, connector.id, connectors))}
+                >
+                  <Icon className="plus-menu__icon" aria-hidden="true" />
+                  <span className="plus-menu__label">{connector.name}</span>
+                  {!connector.ready && <span className="plus-menu__state plus-menu__state--error">Needs attention</span>}
+                  {checked && <CheckIcon className="plus-menu__check" />}
+                </button>
+              );
+            })}
+            {!connectors.some((c) => c.id !== 'applications') && (
+              <p className="plus-menu__hint">Connect Gmail, Outlook or your calendar once in Settings.</p>
+            )}
+            <button
+              type="button"
+              role="menuitem"
+              className="menu__item plus-menu__link"
+              onClick={() => {
+                close();
+                navigate({ page: 'settings', focus: 'connectors' });
+              }}
+            >
+              Connector settings…
             </button>
           </div>
           <div className="plus-menu__group" role="group" aria-label="Invoke MCP">

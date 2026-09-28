@@ -27,6 +27,57 @@ use crate::{
 /// An access token is renewed this long before it expires.
 pub const EXPIRY_MARGIN_MS: i64 = 5 * 60_000;
 
+/// How often connected accounts are renewed while ReMa runs. A grant that
+/// is never used expires: Microsoft after 90 days, Google after about six
+/// months; one renewal a day (and one at start) keeps it alive.
+pub const KEEP_ALIVE_EVERY: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// Keeps connected Google and Microsoft accounts signed in: renews each
+/// one's grant (no mail or calendar is read), so a connection made once
+/// keeps working. A grant the provider rejects marks its account
+/// "Reconnect needed" as any request would; ReMa never opens a sign-in.
+pub async fn keep_alive(state: &AppState) {
+    for provider in [ProviderId::Google, ProviderId::Microsoft] {
+        let connected = state
+            .db
+            .call(|c| repo::account(c, provider))
+            .ok()
+            .flatten()
+            .is_some_and(|a| a.status == AccountStatus::Connected);
+        if !connected || state.connectors.app(provider).is_none() {
+            continue;
+        }
+        match get_valid_access_token(state, provider).await {
+            Ok(_) => super::diag(format!(
+                "[connector] provider={} keep_alive=ok",
+                provider.as_str()
+            )),
+            Err(error) => super::diag(format!(
+                "[connector] provider={} keep_alive=failed category={:?}",
+                provider.as_str(),
+                error.code()
+            )),
+        }
+    }
+}
+
+/// Runs [`keep_alive`] shortly after start and then once a day, until
+/// ReMa quits.
+pub fn start_keep_alive(state: AppState) {
+    tauri::async_runtime::spawn(async move {
+        let stop = state.connectors.shutdown.clone();
+        let mut wait = std::time::Duration::from_secs(60);
+        loop {
+            tokio::select! {
+                _ = stop.cancelled() => return,
+                _ = tokio::time::sleep(wait) => {}
+            }
+            keep_alive(&state).await;
+            wait = KEEP_ALIVE_EVERY;
+        }
+    });
+}
+
 /// The credential-store key of one connected account.
 pub fn vault_key(provider: ProviderId, account_id: &str) -> String {
     format!("connector:{}:{account_id}", provider.as_str())

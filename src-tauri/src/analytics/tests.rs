@@ -683,6 +683,7 @@ async fn chat_answers_with_job_tables_are_ingested_automatically() {
             use_profile: false,
             agent_ids: Vec::new(),
             mcp_server_ids: Vec::new(),
+            connectors: None,
         },
     )
     .await

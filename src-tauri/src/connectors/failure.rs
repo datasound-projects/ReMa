@@ -256,12 +256,22 @@ pub fn from_token_error(
             format!("{provider} did not issue access to ReMa. Click Retry."),
         )
     };
-    let reported = match error {
+    let mut reported = match error {
         Some(e) => detail(e, description),
         None => format!("HTTP {status}"),
     };
+    // Google ends grants 7 days after sign-in while the app's publishing
+    // status is "Testing": the usual cause of a weekly "Reconnect".
+    if phase == TokenPhase::Refresh && code == "invalid_grant" && provider == "Google" {
+        reported.push_str(GOOGLE_TESTING_HINT);
+    }
     failure.with_detail(reported)
 }
+
+/// Why a Google connection may end after a week (for the details).
+pub const GOOGLE_TESTING_HINT: &str = " (If this happens about 7 days after connecting, ReMa's \
+Google app is still in testing: Google ends its access weekly until the publisher moves it to \
+production.)";
 
 /// What a provider API said to a connection check (`connector` is the
 /// card's name, e.g. "Gmail").
@@ -379,6 +389,12 @@ mod tests {
             Some("Token has been expired or revoked."),
         );
         assert_eq!(refresh.code, ReauthRequired);
+        // The details name the usual cause of a weekly "Reconnect".
+        assert!(refresh
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("still in testing"));
         let exchange = from_token_error(
             "Google",
             TokenPhase::Exchange,

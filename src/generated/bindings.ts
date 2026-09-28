@@ -303,8 +303,11 @@ export const commands = {
 	retryMessage: (messageId: number, model: ModelRef) => __TAURI_INVOKE<Message>("retry_message", { messageId, model }),
 	stopGeneration: (messageId: number) => __TAURI_INVOKE<null>("stop_generation", { messageId }),
 	deleteConversation: (id: number) => __TAURI_INVOKE<null>("delete_conversation", { id }),
-	/**  Stores the agents and MCP servers selected in a conversation. */
-	setConversationSelections: (id: number, agentIds: string[], mcpServerIds: number[]) => __TAURI_INVOKE<Conversation>("set_conversation_selections", { id, agentIds, mcpServerIds }),
+	/**
+	 *  Stores the agents, MCP servers and connectors selected in a
+	 *  conversation (`connectors: None` keeps the conversation's choice).
+	 */
+	setConversationSelections: (id: number, agentIds: string[], mcpServerIds: number[], connectors: ChatConnector[] | null) => __TAURI_INVOKE<Conversation>("set_conversation_selections", { id, agentIds, mcpServerIds, connectors }),
 	/**  The user's answer to a tool call waiting for approval. */
 	respondToolApproval: (messageId: number, callId: string, decision: ApprovalDecision) => __TAURI_INVOKE<null>("respond_tool_approval", { messageId, callId, decision }),
 	listTasks: () => __TAURI_INVOKE<ScheduledTask[]>("list_tasks"),
@@ -879,6 +882,15 @@ export type ChannelPlan = {
 	evidence: SourceNote[],
 };
 
+/**
+ *  A source of the user's own data a chat can use: the composer's
+ *  connector toggles (like Claude's and ChatGPT's). The model decides when
+ *  to call a connector that is on.
+ */
+export type ChatConnector = "gmail" | "google_calendar" | "outlook_mail" | "outlook_calendar" | 
+/**  The job application tracker (Applications). */
+"applications";
+
 /**  Streaming updates for an assistant message, emitted by the backend. */
 export type ChatEvent = 
 /**  New text appended to a streaming message. */
@@ -1298,6 +1310,8 @@ export type Conversation = {
 	agentIds: string[],
 	/**  MCP servers made available in this conversation, in selection order. */
 	mcpServerIds: number[],
+	/**  Connectors this conversation may use; `None`: every connected one. */
+	connectors: ChatConnector[] | null,
 	createdAt: number,
 	updatedAt: number,
 };
@@ -3277,6 +3291,11 @@ export type SendMessageInput = {
 	agentIds: string[],
 	/**  MCP servers to make available, in selection order. */
 	mcpServerIds: number[],
+	/**
+	 *  Connectors the conversation may use (`None` keeps its choice; a new
+	 *  conversation then uses every connected one).
+	 */
+	connectors?: ChatConnector[] | null,
 };
 
 export type SendMessageResult = {

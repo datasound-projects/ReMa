@@ -169,6 +169,8 @@ pub fn run() {
             scheduler::start(state.clone());
             analytics::enrich::start(state.clone());
             mail_monitor::start(state.clone());
+            // Connected accounts stay signed in (no data is read).
+            connectors::tokens::start_keep_alive(state.clone());
             // Career search needs no setup: its parts are checked, an old
             // search-service setting is moved out of the way, and what the
             // connected models can do is learned before the first search.

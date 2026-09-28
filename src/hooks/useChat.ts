@@ -25,13 +25,17 @@ interface Pending {
 }
 
 
-const selectionOf = (c: Conversation): ChatSelection => ({ agentIds: c.agentIds, mcpServerIds: c.mcpServerIds });
+const selectionOf = (c: Conversation): ChatSelection => ({
+  agentIds: c.agentIds,
+  mcpServerIds: c.mcpServerIds,
+  connectors: c.connectors,
+});
 
 interface ChatState {
   conversationId: number | null;
   /** The conversation shares the user's Profile with the model. */
   profileContext: boolean;
-  /** Agents and MCP servers stored for the conversation. */
+  /** Agents, MCP servers and connectors stored for the conversation. */
   selection: ChatSelection;
   messages: Message[];
   loading: boolean;
@@ -152,6 +156,7 @@ export function useChat(conversationId: number | null, onCreated: (id: number) =
         useProfile,
         agentIds: selection.agentIds,
         mcpServerIds: selection.mcpServerIds,
+        connectors: selection.connectors,
       });
       const added = [result.userMessage, applyPending(result.assistantMessage)];
       loadedId.current = result.conversation.id;

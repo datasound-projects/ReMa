@@ -1014,6 +1014,46 @@ async fn access_tokens_are_refreshed_silently_before_they_expire() {
 }
 
 #[tokio::test]
+async fn connected_accounts_are_kept_signed_in_without_reading_anything() {
+    let providers = providers().await;
+    let (state, _) = state_for(&providers, apps());
+    connect(
+        &state,
+        ConnectorId::Gmail,
+        Browser::default().open(Consent::Allow),
+    )
+    .await
+    .unwrap();
+    // Connecting checked the mailbox; keeping alive reads nothing.
+    let mailbox = providers.requests("/gmail").len();
+    // A valid access token: nothing to renew.
+    tokens::keep_alive(&state).await;
+    assert_eq!(providers.requests("/token").len(), 1);
+
+    // After a restart (no token in memory) the grant is renewed once: a
+    // grant that is used does not expire. No mailbox request is made.
+    expire(&state, ProviderId::Google).await;
+    tokens::keep_alive(&state).await;
+    assert_eq!(providers.requests("/token").len(), 2);
+    assert_eq!(providers.requests("/gmail").len(), mailbox);
+
+    // An account that needs reconnecting is left alone.
+    state
+        .db
+        .call(|c| {
+            c.execute(
+                "UPDATE connector_accounts SET status = 'reauth_required' WHERE provider = 'google'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    expire(&state, ProviderId::Google).await;
+    tokens::keep_alive(&state).await;
+    assert_eq!(providers.requests("/token").len(), 2);
+}
+
+#[tokio::test]
 async fn microsoft_refresh_tokens_rotate() {
     let providers = providers().await;
     let (state, _) = state_for(&providers, apps());

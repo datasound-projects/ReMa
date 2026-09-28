@@ -31,6 +31,28 @@ text_enum!(MessageStatus {
     Error => "error",
 });
 
+/// A source of the user's own data a chat can use: the composer's
+/// connector toggles (like Claude's and ChatGPT's). The model decides when
+/// to call a connector that is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatConnector {
+    Gmail,
+    GoogleCalendar,
+    OutlookMail,
+    OutlookCalendar,
+    /// The job application tracker (Applications).
+    Applications,
+}
+
+text_enum!(ChatConnector {
+    Gmail => "gmail",
+    GoogleCalendar => "google_calendar",
+    OutlookMail => "outlook_mail",
+    OutlookCalendar => "outlook_calendar",
+    Applications => "applications",
+});
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct Conversation {
@@ -44,6 +66,8 @@ pub struct Conversation {
     pub agent_ids: Vec<String>,
     /// MCP servers made available in this conversation, in selection order.
     pub mcp_server_ids: Vec<i64>,
+    /// Connectors this conversation may use; `None`: every connected one.
+    pub connectors: Option<Vec<ChatConnector>>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -159,6 +183,10 @@ pub struct SendMessageInput {
     pub agent_ids: Vec<String>,
     /// MCP servers to make available, in selection order.
     pub mcp_server_ids: Vec<i64>,
+    /// Connectors the conversation may use (`None` keeps its choice; a new
+    /// conversation then uses every connected one).
+    #[serde(default)]
+    pub connectors: Option<Vec<ChatConnector>>,
 }
 
 #[derive(Debug, Clone, Serialize, Type)]

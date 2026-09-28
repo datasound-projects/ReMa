@@ -54,6 +54,7 @@ const conversation = (id: number) => ({
   profileContext: false,
   agentIds: [],
   mcpServerIds: [],
+  connectors: null,
   createdAt: 0,
   updatedAt: 0,
 });
@@ -91,7 +92,7 @@ describe('useChat', () => {
     chat.sendMessage.mockReturnValue(new Promise((resolve) => (answer = resolve)));
     let sent!: Promise<void>;
     act(() => {
-      sent = result.current.send('Hi', model, false, { agentIds: [], mcpServerIds: [] });
+      sent = result.current.send('Hi', model, false, { agentIds: [], mcpServerIds: [], connectors: null });
     });
 
     emit({ type: 'delta', conversationId: 7, messageId: 71, text: 'Early text' });

@@ -6,13 +6,13 @@ use super::{agents, mcp};
 use crate::{
     error::{AppError, AppResult},
     models::{
-        chat::{Conversation, Message, MessageRole, MessageStatus, ToolActivity},
+        chat::{ChatConnector, Conversation, Message, MessageRole, MessageStatus, ToolActivity},
         provider::ModelRef,
     },
 };
 
 const CONVERSATION_COLUMNS: &str =
-    "id, title, provider_id, model_id, created_at, updated_at, profile_context";
+    "id, title, provider_id, model_id, created_at, updated_at, profile_context, connectors";
 const MESSAGE_COLUMNS: &str =
     "id, conversation_id, role, content, status, error, provider_id, model_id, created_at, activity";
 
@@ -29,7 +29,41 @@ fn conversation_from_row(row: &Row) -> rusqlite::Result<Conversation> {
         profile_context: row.get(6)?,
         agent_ids: Vec::new(),
         mcp_server_ids: Vec::new(),
+        connectors: row
+            .get::<_, Option<String>>(7)?
+            .map(|json| parse_connectors(&json)),
     })
+}
+
+/// The stored connector choice (unknown ids are skipped).
+fn parse_connectors(json: &str) -> Vec<ChatConnector> {
+    serde_json::from_str::<Vec<String>>(json)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|id| ChatConnector::parse(id))
+        .collect()
+}
+
+/// Stores which connectors a conversation may use (`None`: all connected).
+pub fn set_connectors(
+    conn: &Connection,
+    id: i64,
+    connectors: Option<&[ChatConnector]>,
+) -> AppResult<()> {
+    let json = connectors.map(|list| {
+        let mut ids: Vec<&str> = Vec::new();
+        for id in list.iter().map(|c| c.as_str()) {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        serde_json::to_string(&ids).unwrap_or_else(|_| "[]".into())
+    });
+    conn.execute(
+        "UPDATE conversations SET connectors = ?2 WHERE id = ?1",
+        params![id, json],
+    )?;
+    Ok(())
 }
 
 /// Adds the conversation's selected agents and MCP servers.

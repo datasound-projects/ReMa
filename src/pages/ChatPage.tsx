@@ -10,11 +10,18 @@ import { BrandMark } from '../components/ui/BrandMark';
 import { dataOr } from '../hooks/useAsyncData';
 import { useAgents } from '../hooks/useAgents';
 import { useChat } from '../hooks/useChat';
+import { useConnectors } from '../hooks/useConnectors';
 import { useMcpServers } from '../hooks/useMcpServers';
 import { useRemaMcp } from '../hooks/useRemaMcp';
 import { useModelCatalog } from '../hooks/useModelCatalog';
 import { useSystemTimezone } from '../hooks/useTasks';
-import { pickableServers, reconcile, sameSelection, type ChatSelection } from '../lib/chatSelection';
+import {
+  connectorOptions,
+  pickableServers,
+  reconcile,
+  sameSelection,
+  type ChatSelection,
+} from '../lib/chatSelection';
 import { formatDateTime } from '../lib/format';
 import { setConversationSelections } from '../services/chatService';
 import { toApiError } from '../services/ipc';
@@ -70,10 +77,11 @@ export function ChatPage({ conversationId, initialAgentIds }: ChatPageProps) {
   const profileOn =
     profileChoice?.conversationId === conversationId ? profileChoice.on : chat.profileContext;
 
-  // Agents and MCP servers (the + menu): the user's choice in this chat,
-  // else what the conversation stored. Independent of Profile.
+  // Agents, connectors and MCP servers (the + menu): the user's choice in
+  // this chat, else what the conversation stored. Independent of Profile.
   const agentsState = useAgents().state;
   const serversState = useMcpServers().state;
+  const connectors = connectorOptions(dataOr(useConnectors().state, null));
   const remaMcp = useRemaMcp().state;
   const builtinOn = remaMcp.status === 'success' && remaMcp.data.enabled;
   const agents = agentsState.status === 'success' ? agentsState.data : null;
@@ -85,7 +93,7 @@ export function ChatPage({ conversationId, initialAgentIds }: ChatPageProps) {
     notice: string | null;
   } | null>(() =>
     initialAgentIds?.length
-      ? { conversationId, selection: { agentIds: initialAgentIds, mcpServerIds: [] }, notice: null }
+      ? { conversationId, selection: { agentIds: initialAgentIds, mcpServerIds: [], connectors: null }, notice: null }
       : null,
   );
   const ownChoice = selectionChoice?.conversationId === conversationId ? selectionChoice : null;
@@ -98,7 +106,7 @@ export function ChatPage({ conversationId, initialAgentIds }: ChatPageProps) {
     setSelectionChoice({ conversationId, selection: next, notice });
     if (conversationId !== null) {
       const id = conversationId;
-      setConversationSelections(id, next.agentIds, next.mcpServerIds).catch((err: unknown) =>
+      setConversationSelections(id, next.agentIds, next.mcpServerIds, next.connectors).catch((err: unknown) =>
         setSelectionChoice((c) => (c && c.conversationId === id ? { ...c, notice: toApiError(err).message } : c)),
       );
     }
@@ -176,6 +184,7 @@ export function ChatPage({ conversationId, initialAgentIds }: ChatPageProps) {
           selection={selection}
           onChange={(next) => changeSelection(next)}
           builtinOn={builtinOn}
+          connectors={connectors}
         />
       }
       chips={

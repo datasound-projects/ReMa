@@ -1005,3 +1005,91 @@ async fn each_claude_console_request_takes_the_current_token() {
     assert!(request.contains("authorization: bearer fresh-console-token"));
     assert!(!request.contains("expired-console-token"));
 }
+
+/// A mail tool: running it marks the answer as having read private data.
+struct PrivateTools(Arc<std::sync::atomic::AtomicBool>);
+
+impl ToolExecutor for PrivateTools {
+    fn execute<'a>(&'a self, _call: &'a ToolCall) -> BoxFuture<'a, ToolOutput> {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async {
+            ToolOutput {
+                content: "One email from Acme.".into(),
+                is_error: false,
+            }
+        })
+    }
+}
+
+#[tokio::test]
+async fn web_search_stops_once_a_tool_returned_private_data() {
+    let (base_url, mut received) = serve_sequence(vec![
+        (
+            200,
+            vec![
+                "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"mail_search\",\"input\":{}}}\n\n",
+                "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{}\"}}\n\n",
+                "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+                "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n",
+                "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+            ],
+        ),
+        (
+            200,
+            vec![
+                "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+                "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Acme wrote.\"}}\n\n",
+                "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+                "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+            ],
+        ),
+    ])
+    .await;
+    let endpoint = endpoint(ProviderKind::Anthropic, base_url, "sk-ant-test");
+    let private = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let web = Arc::new(RecordingWeb::default());
+    let mut request = request();
+    request.tools = Some(tool_box(
+        "mail_search",
+        Arc::new(PrivateTools(private.clone())),
+    ));
+    request.web = Some(WebSearch {
+        observer: Some(web.clone()),
+        ..WebSearch::default()
+    });
+    request.private = Some(private);
+    let (result, text) = run(
+        &endpoint,
+        "claude-opus-5",
+        &request,
+        &ProviderLanguageModel::new(None),
+    )
+    .await;
+    assert_eq!(result.unwrap(), Finish::Complete);
+    assert_eq!(text, "Acme wrote.");
+
+    let types = |body: &Value| -> Vec<String> {
+        body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["type"].as_str().unwrap_or("custom").to_string())
+            .collect()
+    };
+    // Before any private data: the web next to the mail tool.
+    let first = body_of(&received.recv().await.unwrap());
+    assert!(types(&first).iter().any(|t| t.starts_with("web_search")));
+    // After the mail tool returned: no web tools, and the reason is shown.
+    let second = body_of(&received.recv().await.unwrap());
+    assert!(
+        types(&second).iter().all(|t| !t.starts_with("web_")),
+        "{:?}",
+        types(&second)
+    );
+    assert!(web
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|e| matches!(e, WebEvent::Unavailable { reason } if reason.contains("mail"))));
+}
