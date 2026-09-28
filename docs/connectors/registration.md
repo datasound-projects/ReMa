@@ -21,7 +21,7 @@ overrides a value, for example in the release workflow:
 | `connectors.toml` | Variable | Required | Meaning |
 |---|---|---|---|
 | `[google] desktop_client_id` | `GOOGLE_DESKTOP_CLIENT_ID` | release | Google OAuth client of type **Desktop app** (`….apps.googleusercontent.com`) |
-| `[google] desktop_client_secret` | `GOOGLE_DESKTOP_CLIENT_SECRET` | release | that client's secret: Google's token endpoint requires it for Desktop clients (`invalid_request: client_secret is missing` without it, PKCE or not), and Google does not treat it as confidential for installed apps. It is public configuration, never a security boundary, and never shown or logged |
+| `[google] desktop_client_secret` | `GOOGLE_DESKTOP_CLIENT_SECRET` | no | that client's secret. Google's current native-app documentation marks it optional at the token endpoint, and Google does not treat it as confidential for installed apps; some registered Desktop clients still answer `invalid_request: client_secret is missing` without it, in which case set it. A build with the client ID alone is allowed; token requests omit the field when it is empty. It is public configuration, never a security boundary, and never shown or logged |
 | `[microsoft] public_client_id` | `MICROSOFT_PUBLIC_CLIENT_ID` | release | Microsoft Entra application (client) ID (a GUID) of a public client |
 | `[microsoft] tenant` | `MICROSOFT_TENANT` | no (default `common`) | `common` (work, school and personal accounts); release builds refuse a single tenant |
 | `[linkedin] client_id` | `LINKEDIN_CLIENT_ID` | no | client ID of a LinkedIn app with native PKCE enabled; no secret exists or ships |
@@ -68,7 +68,7 @@ Official guides: [OAuth 2.0 for iOS & Desktop Apps](https://developers.google.co
 1. Create (or choose) a Google Cloud project owned by the publisher.
 2. **APIs & Services → Library**: enable the **Gmail API** and the **Google Calendar API**.
 3. **Google Auth Platform → Branding** (OAuth consent screen): app name "ReMa", support email, logo, home page, privacy policy and terms of service URLs, authorized domain of those pages, developer contact.
-4. **Audience**: user type **External**. While the app is in *Testing*, only listed test users can sign in, and Google expires their refresh tokens after 7 days (users then see "Reconnect needed" in ReMa).
+4. **Audience**: user type **External**. While the app is in *Testing*, only listed test users can sign in, and Google ends their sign-ins about 7 days after they are made (users then see "Reconnect needed" in ReMa; a build made with `GOOGLE_PUBLISHING_STATUS=testing` says so on the card, with an estimated end date).
 5. **Data access**: add exactly these scopes:
    - `openid`, `…/auth/userinfo.email` (`email`), `…/auth/userinfo.profile` (`profile`)
    - `https://www.googleapis.com/auth/gmail.readonly` (restricted)
@@ -170,7 +170,7 @@ Publisher row is done.
 | Restricted Gmail scope justification and demo | Publisher | pending |
 | OAuth verification | Publisher (Google) | pending |
 | Security assessment (restricted scope; job mail may be sent to the user's cloud model) | Publisher (assessor) | pending |
-| Production client ID and secret in the release | ReMa + Publisher | ReMa: build fails without them; Publisher: set `GOOGLE_DESKTOP_CLIENT_ID` (variable) and `GOOGLE_DESKTOP_CLIENT_SECRET` (secret) for the release workflow |
+| Production client ID (and secret, if the registered client needs one) in the release | ReMa + Publisher | ReMa: a release build fails without the client ID and names the missing key; Publisher: set `GOOGLE_DESKTOP_CLIENT_ID` (variable) and, if needed, `GOOGLE_DESKTOP_CLIENT_SECRET` (secret) for the release workflow |
 | System browser, PKCE S256, state, loopback, refresh, revoke | ReMa | done |
 | Clean-machine sign-in with a real Google account | Publisher | pending (verified here against stand-ins only) |
 
