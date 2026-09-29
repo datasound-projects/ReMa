@@ -647,6 +647,7 @@ mod tests {
                         status_cause: None,
                         connected_at: now,
                         updated_at: now,
+                        last_refreshed_at: None,
                     },
                 )?;
                 connector_repo::set_enabled(c, ConnectorId::Gmail, true, now)

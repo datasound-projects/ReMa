@@ -9,6 +9,13 @@
 //! requests for one account share a single refresh. Nothing here reaches
 //! SQLite, settings, logs, the frontend or a model's context.
 //!
+//! Renewal is lazy: a grant is refreshed when a request needs an access
+//! token and none is cached, when an API rejected the token (once, then
+//! the request is retried), and, as the one proactive case, when a grant
+//! has gone unused so long that the provider would soon expire it
+//! ([`RENEW_UNUSED_AFTER`]). There is no daily refresh just to keep tokens
+//! alive.
+//!
 //! When a refresh is rejected outright (`invalid_grant`: revoked consent,
 //! password change, expired refresh token) the account becomes
 //! "reauth_required" and stays so until the user clicks Reconnect: ReMa
@@ -38,44 +45,74 @@ use crate::{
 /// An access token is renewed this long before it expires.
 pub const EXPIRY_MARGIN_MS: i64 = 5 * 60_000;
 
-/// How often connected accounts are renewed while ReMa runs. A grant that
-/// is never used expires after a while (Microsoft's refresh tokens end
-/// from inactivity, Google's after months unused); one renewal a day (and
-/// one at start) keeps it alive.
-pub const KEEP_ALIVE_EVERY: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+/// A grant unused for this long is renewed once, for a concrete reason:
+/// Microsoft ends refresh tokens after 90 days without use and Google after
+/// six months, so an account the user rarely asks about would otherwise
+/// silently need a new sign-in.
+pub const RENEW_UNUSED_AFTER_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 
-/// Keeps connected Google and Microsoft accounts signed in: renews each
-/// one's grant (no mail or calendar is read), so a connection made once
-/// keeps working. A grant the provider rejects marks its account
-/// "Reconnect needed" as any request would; ReMa never opens a sign-in.
-pub async fn keep_alive(state: &AppState) {
+/// How often the unused-grant check runs while ReMa is open. The check
+/// itself reads only the database; a provider is contacted only for a
+/// grant older than [`RENEW_UNUSED_AFTER_MS`].
+pub const RENEWAL_CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
+
+/// Whether an account's grant has gone unused long enough to be renewed:
+/// the last renewal (or the sign-in, before any) is older than
+/// [`RENEW_UNUSED_AFTER_MS`].
+pub fn renewal_due(account: &repo::AccountRecord, now: i64) -> bool {
+    let last_used = account
+        .last_refreshed_at
+        .unwrap_or(account.connected_at)
+        .max(account.connected_at);
+    account.status == AccountStatus::Connected && now - last_used >= RENEW_UNUSED_AFTER_MS
+}
+
+/// Renews the grant of each connected Google or Microsoft account that has
+/// gone unused for [`RENEW_UNUSED_AFTER_MS`] (no mail or calendar is read).
+/// Accounts used recently are left alone. A grant the provider rejects
+/// marks its account "Reconnect needed" as any request would; ReMa never
+/// opens a sign-in. Returns the providers it renewed.
+pub async fn renew_unused(state: &AppState) -> Vec<ProviderId> {
+    let now = now_ms();
+    let mut renewed = Vec::new();
     for provider in [ProviderId::Google, ProviderId::Microsoft] {
-        let connected = state
+        let due = state
             .db
             .call(|c| repo::account(c, provider))
             .ok()
             .flatten()
-            .is_some_and(|a| a.status == AccountStatus::Connected);
-        if !connected || state.connectors.app(provider).is_none() {
+            .is_some_and(|a| renewal_due(&a, now));
+        if !due || state.connectors.app(provider).is_none() {
             continue;
         }
+        let key = match key_of(state, provider) {
+            Ok(key) => key,
+            Err(_) => continue,
+        };
+        // A cached access token proves nothing about the refresh token's
+        // age: the renewal itself is the point.
+        state.connectors.forget_access(&key);
         match get_valid_access_token(state, provider).await {
-            Ok(_) => super::diag(format!(
-                "[connector] provider={} keep_alive=ok",
-                provider.as_str()
-            )),
+            Ok(_) => {
+                renewed.push(provider);
+                super::diag(format!(
+                    "[connector] provider={} renew_unused=ok",
+                    provider.as_str()
+                ))
+            }
             Err(error) => super::diag(format!(
-                "[connector] provider={} keep_alive=failed category={:?}",
+                "[connector] provider={} renew_unused=failed category={:?}",
                 provider.as_str(),
                 error.code()
             )),
         }
     }
+    renewed
 }
 
-/// Runs [`keep_alive`] shortly after start and then once a day, until
-/// ReMa quits.
-pub fn start_keep_alive(state: AppState) {
+/// Runs [`renew_unused`] shortly after start and then every
+/// [`RENEWAL_CHECK_EVERY`], until ReMa quits.
+pub fn start_renewal(state: AppState) {
     tauri::async_runtime::spawn(async move {
         let stop = state.connectors.shutdown.clone();
         let mut wait = std::time::Duration::from_secs(60);
@@ -84,8 +121,8 @@ pub fn start_keep_alive(state: AppState) {
                 _ = stop.cancelled() => return,
                 _ = tokio::time::sleep(wait) => {}
             }
-            keep_alive(&state).await;
-            wait = KEEP_ALIVE_EVERY;
+            renew_unused(&state).await;
+            wait = RENEWAL_CHECK_EVERY;
         }
     });
 }
@@ -326,6 +363,7 @@ async fn refresh_with(
     // A disconnect during the request changes the generation; the result
     // is then thrown away instead of bringing the grant back.
     let generation = ctx.grant_generation(provider);
+    let _refreshing = ctx.begin_refresh(provider);
     let mut attempt = 1;
     let result = loop {
         let result = oauth::token_request(
@@ -382,8 +420,12 @@ async fn refresh_with(
                     )
                     .await?;
             }
-            let expires_at = now_ms() + tokens.expires_in.unwrap_or(3_600) * 1000;
+            let now = now_ms();
+            let expires_at = now + tokens.expires_in.unwrap_or(3_600) * 1000;
             ctx.cache_access(key, tokens.access_token.clone(), expires_at);
+            if let Err(error) = state.db.call(|c| repo::touch_refreshed(c, provider, now)) {
+                eprintln!("[connector] could not record the renewal: {error}");
+            }
             oauth::log(provider.name(), "token_refreshed", "");
             Ok(tokens.access_token)
         }

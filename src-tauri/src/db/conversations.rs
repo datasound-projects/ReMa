@@ -69,6 +69,32 @@ pub fn set_connectors(
     Ok(())
 }
 
+/// Adds connectors to every conversation that chose its own connectors
+/// (those using "all connected" already see a new account). Returns how
+/// many conversations changed.
+pub fn add_connectors_to_chosen(conn: &Connection, added: &[ChatConnector]) -> AppResult<usize> {
+    let mut stmt =
+        conn.prepare("SELECT id, connectors FROM conversations WHERE connectors IS NOT NULL")?;
+    let rows: Vec<(i64, String)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<_, _>>()?;
+    let mut changed = 0;
+    for (id, json) in rows {
+        let mut list = parse_connectors(&json);
+        let before = list.len();
+        for connector in added {
+            if !list.contains(connector) {
+                list.push(*connector);
+            }
+        }
+        if list.len() != before {
+            set_connectors(conn, id, Some(&list))?;
+            changed += 1;
+        }
+    }
+    Ok(changed)
+}
+
 /// Adds the conversation's selected agents and MCP servers.
 fn with_selections(conn: &Connection, mut conversation: Conversation) -> AppResult<Conversation> {
     conversation.agent_ids = agents::conversation_agents(conn, conversation.id)?;

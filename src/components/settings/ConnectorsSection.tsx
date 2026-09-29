@@ -12,11 +12,16 @@ import { formatDateTime, formatRelative } from '../../lib/format';
 import {
   cancelConnectorSignIn,
   connectConnector,
+  connectProviderAccount,
   disconnectConnector,
+  disconnectProviderAccount,
   setBackgroundSettings,
+  setConnectionPreferences,
   type ConnectorStatus,
   type ConnectorsOverview,
   type MailProcessing,
+  type ProviderAccount,
+  type ProviderId,
 } from '../../services/connectorService';
 import { openExternalUrl } from '../../services/systemService';
 import { runTaskNow, type ScheduledTask } from '../../services/taskService';
@@ -25,7 +30,7 @@ import { Dialog } from '../ui/Dialog';
 import { IconButton } from '../ui/IconButton';
 import { StatusIndicator } from '../ui/StatusIndicator';
 import { Switch } from '../ui/Switch';
-import { ConnectorLogo } from './ConnectorIcons';
+import { ConnectorLogo, ProviderLogo } from './ConnectorIcons';
 import { NetworkContactsCard } from './NetworkContactsCard';
 
 const MICROSOFT_APPS_URL = 'https://account.microsoft.com/privacy/app-access';
@@ -70,7 +75,9 @@ export function ConnectorsSection({ focus = false }: { focus?: boolean }) {
   useScrollIntoFocus(ref, focus);
   const overview = dataOr(remote.state, null);
   const [openId, setOpenId] = useState<ConnectorStatus['id'] | null>(null);
+  const [managing, setManaging] = useState<ProviderId | null>(null);
   const open = overview?.connectors.find((c) => c.id === openId) ?? null;
+  const managed = overview?.accounts.find((a) => a.provider === managing) ?? null;
 
   return (
     <section className="section" aria-labelledby="connectors-heading" ref={ref} id="settings-connectors">
@@ -97,10 +104,10 @@ export function ConnectorsSection({ focus = false }: { focus?: boolean }) {
       {overview && (
         <>
           <div className="connector-grid">
-            {overview.connectors
-              .filter((c) => c.kind !== 'network')
-              .map((connector) => (
-                <ConnectorCard key={connector.id} connector={connector} onOpen={() => setOpenId(connector.id)} />
+            {overview.accounts
+              .filter((a) => a.provider === 'google' || a.provider === 'microsoft')
+              .map((account) => (
+                <AccountCard key={account.provider} account={account} onManage={() => setManaging(account.provider)} />
               ))}
           </div>
           <h3 className="connectors__group">Professional networks</h3>
@@ -113,6 +120,7 @@ export function ConnectorsSection({ focus = false }: { focus?: boolean }) {
           </div>
           <NetworkContactsCard />
           <MailTrackingNote />
+          <ChatDefaults overview={overview} />
           <BackgroundOptions overview={overview} />
           <p className="form__hint connectors__privacy">{mailPrivacy(overview.mailProcessing)}</p>
         </>
@@ -120,7 +128,477 @@ export function ConnectorsSection({ focus = false }: { focus?: boolean }) {
       {open && overview && (
         <ConnectorDetail connector={open} overview={overview} onClose={() => setOpenId(null)} />
       )}
+      {managed && overview && (
+        <AccountDetail account={managed} overview={overview} onClose={() => setManaging(null)} />
+      )}
     </section>
+  );
+}
+
+/** Connect (or reconnect) a whole account through the browser; a cancel is not shown as an error. */
+function useConnectAccount(provider: ProviderId) {
+  const action = useAction();
+  const cancelled = useRef(false);
+  const connect = async () => {
+    cancelled.current = false;
+    const ok = await action.run(() => connectProviderAccount(provider));
+    if (!ok && cancelled.current) action.clearError();
+  };
+  const cancel = () => {
+    cancelled.current = true;
+    void cancelConnectorSignIn(provider).catch(() => {});
+  };
+  return { ...action, connect, cancel };
+}
+
+const ACCOUNT_STATUS: Record<ProviderAccount['state'], { tone: 'ready' | 'pending' | 'error' | 'idle'; label: string }> = {
+  disconnected: { tone: 'idle', label: 'Not connected' },
+  connecting: { tone: 'pending', label: 'Waiting for sign-in' },
+  connected: { tone: 'ready', label: 'Connected' },
+  refreshing: { tone: 'pending', label: 'Renewing access' },
+  reauth_required: { tone: 'error', label: 'Reconnect required' },
+  permission_denied: { tone: 'error', label: 'Permission missing' },
+  admin_approval_required: { tone: 'error', label: 'Approval required' },
+  provider_error: { tone: 'error', label: 'Connection failed' },
+  offline: { tone: 'error', label: 'Offline' },
+  unavailable: { tone: 'idle', label: 'Unavailable' },
+};
+
+/** What an account gives ReMa, said before connecting. */
+function accountPitch(provider: ProviderId): string {
+  return provider === 'google'
+    ? 'Gmail and Google Calendar: track job mail and manage confirmed interviews.'
+    : 'Outlook Mail and Outlook Calendar: track job mail and manage confirmed interviews.';
+}
+
+/** An account's connection needs the user (a new sign-in or the provider's fix). */
+const needsAttention = (a: ProviderAccount) =>
+  a.state === 'reauth_required' ||
+  a.state === 'permission_denied' ||
+  a.state === 'admin_approval_required' ||
+  a.state === 'provider_error' ||
+  a.state === 'offline';
+
+/** One provider account: Google or Microsoft (Settings → Connectors). */
+function AccountCard({ account: a, onManage }: { account: ProviderAccount; onManage: () => void }) {
+  const connect = useConnectAccount(a.provider);
+  const action = useAction();
+  const [confirming, setConfirming] = useState(false);
+  const [showDetail, setShowDetail] = useState(false);
+  const status = ACCOUNT_STATUS[a.state];
+  const hasAccount = a.email !== null || a.connectionId !== null;
+  const attention = needsAttention(a);
+  const live = a.state === 'connected' || a.state === 'refreshing';
+
+  return (
+    <div className={`connector-card account-card${attention ? ' connector-card--attention' : ''}`}>
+      <div className="connector-card__row">
+        <span className="connector-card__logo">
+          <ProviderLogo id={a.provider} size={32} />
+        </span>
+        <span className="connector-card__text">
+          <span className="connector-card__name">{a.name}</span>
+          {hasAccount && a.email && <span className="connector-card__by account-card__email">{a.email}</span>}
+        </span>
+        <StatusIndicator tone={status.tone} label={status.label} live={a.state === 'connecting' || a.state === 'refreshing'} />
+      </div>
+      {!hasAccount && a.state !== 'connecting' && a.state !== 'unavailable' && (
+        <p className="connector-card__description">{accountPitch(a.provider)}</p>
+      )}
+      {a.state === 'connecting' && (
+        <p className="connector-card__note">{a.message ?? `Finish signing in with ${a.name} in your browser.`}</p>
+      )}
+      {hasAccount && (
+        <ul className="account-card__capabilities" aria-label={`${a.name} capabilities`}>
+          {a.capabilities.map((c) => (
+            <li key={c.connector} className={c.granted ? 'is-granted' : 'is-missing'}>
+              {c.granted ? (
+                <CheckIcon className="account-card__capability-icon" aria-hidden="true" />
+              ) : (
+                <span className="account-card__capability-off" aria-hidden="true" />
+              )}
+              <span>{c.name}</span>
+              <span className="sr-only">{c.granted ? ' (on)' : ' (not added)'}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {a.signInEndsAt !== null && !attention && (
+        <p className="connector-card__note connector-card__note--muted">{testingNote(a.signInEndsAt)}</p>
+      )}
+      {(attention || a.state === 'unavailable' || (a.errorCode !== null && a.message)) && a.message && (
+        <p className={a.state === 'unavailable' ? 'connector-card__note connector-card__note--muted' : 'connector-card__problem'}>
+          {a.state !== 'unavailable' && <AlertIcon className="connector-card__problem-icon" aria-hidden="true" />}
+          <span>
+            {a.state === 'provider_error' && !hasAccount && <strong>Connection failed. </strong>}
+            {a.message}
+          </span>
+        </p>
+      )}
+      {(attention || a.errorCode !== null) && a.detail && (
+        <>
+          <button
+            type="button"
+            className="link-button connector-card__details-toggle"
+            aria-expanded={showDetail}
+            onClick={() => setShowDetail(!showDetail)}
+          >
+            {showDetail ? 'Hide details' : 'Show details'}
+          </button>
+          {showDetail && <pre className="connector-card__details">{a.detail}</pre>}
+        </>
+      )}
+      <div className="account-card__actions">
+        {a.state === 'connecting' ? (
+          <button type="button" className="button button--ghost button--small" onClick={connect.cancel}>
+            Cancel
+          </button>
+        ) : a.state === 'unavailable' ? null : !hasAccount ? (
+          <button
+            type="button"
+            className="button button--primary button--small"
+            disabled={connect.busy}
+            onClick={() => void connect.connect()}
+          >
+            {a.state === 'provider_error' || a.state === 'admin_approval_required' || a.state === 'offline' || a.state === 'permission_denied'
+              ? 'Retry'
+              : 'Connect'}
+          </button>
+        ) : (
+          <>
+            {attention && (
+              <button
+                type="button"
+                className="button button--primary button--small"
+                disabled={connect.busy}
+                onClick={() => void connect.connect()}
+              >
+                Reconnect
+              </button>
+            )}
+            <button type="button" className="button button--secondary button--small" disabled={!live && !attention} onClick={onManage}>
+              Manage
+            </button>
+            <button
+              type="button"
+              className="button button--ghost button--small"
+              disabled={action.busy}
+              onClick={() => setConfirming(true)}
+            >
+              Disconnect
+            </button>
+          </>
+        )}
+      </div>
+      {(connect.error ?? action.error) && a.errorCode === null && a.state !== 'connecting' && (
+        <p className="form-error" role="alert">
+          {connect.error ?? action.error}
+        </p>
+      )}
+      {confirming && (
+        <DisconnectAccountDialog
+          account={a}
+          busy={action.busy}
+          error={action.error}
+          onCancel={() => setConfirming(false)}
+          onConfirm={() =>
+            void action.run(() => disconnectProviderAccount(a.provider)).then((ok) => {
+              if (ok) setConfirming(false);
+            })
+          }
+        />
+      )}
+    </div>
+  );
+}
+
+function DisconnectAccountDialog({
+  account: a,
+  busy,
+  error,
+  onCancel,
+  onConfirm,
+}: {
+  account: ProviderAccount;
+  busy: boolean;
+  error: string | null;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <Dialog
+      title={`Disconnect ${a.name}?`}
+      onClose={onCancel}
+      actions={
+        <>
+          {error && <p className="form-error">{error}</p>}
+          <button type="button" className="button button--secondary" onClick={onCancel}>
+            Cancel
+          </button>
+          <button type="button" className="button button--danger" disabled={busy} onClick={onConfirm}>
+            Disconnect
+          </button>
+        </>
+      }
+    >
+      <p className="dialog__text">
+        ReMa stops using {a.capabilities.map((c) => c.name).join(' and ')}. Your tracked applications and their history
+        stay in ReMa.
+      </p>
+      <p className="dialog__text">
+        {a.provider === 'microsoft'
+          ? 'ReMa also deletes its Microsoft sign-in from this computer. To remove ReMa from your Microsoft account entirely, open your account’s app permissions.'
+          : 'ReMa also revokes its access at Google and deletes the sign-in from this computer.'}
+      </p>
+    </Dialog>
+  );
+}
+
+/** Manage: the account's capabilities (add or remove each), permissions, sync and sign-in. */
+function AccountDetail({
+  account: a,
+  overview,
+  onClose,
+}: {
+  account: ProviderAccount;
+  overview: ConnectorsOverview;
+  onClose: () => void;
+}) {
+  const connect = useConnectAccount(a.provider);
+  const action = useAction();
+  const sync = useAction();
+  const mailTask = useMailTask();
+  const [removing, setRemoving] = useState<ConnectorStatus | null>(null);
+  const [showDetail, setShowDetail] = useState(false);
+  const [synced, setSynced] = useState(false);
+  const cards = overview.connectors.filter((c) => c.provider === a.provider);
+  const microsoft = a.provider === 'microsoft';
+  const status = ACCOUNT_STATUS[a.state];
+  const permissions = cards.flatMap((c) => c.permissions.map((p) => ({ ...p, connector: c.name })));
+
+  if (removing) {
+    return (
+      <Dialog
+        title={`Remove ${removing.name}?`}
+        onClose={() => setRemoving(null)}
+        actions={
+          <>
+            {action.error && <p className="form-error">{action.error}</p>}
+            <button type="button" className="button button--secondary" onClick={() => setRemoving(null)}>
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="button button--danger"
+              disabled={action.busy}
+              onClick={() =>
+                void action.run(() => disconnectConnector(removing.id)).then((ok) => {
+                  if (ok) setRemoving(null);
+                })
+              }
+            >
+              Remove
+            </button>
+          </>
+        }
+      >
+        <p className="dialog__text">
+          ReMa stops syncing {removing.name}. Your tracked applications and their history stay in ReMa.
+        </p>
+        <p className="dialog__text">
+          {cards.filter((c) => c.id !== removing.id && added(c)).length > 0
+            ? `Your ${a.name} account stays connected for the rest.`
+            : microsoft
+              ? 'It is the last capability of this account: ReMa also deletes its Microsoft sign-in from this computer.'
+              : 'It is the last capability of this account: ReMa also revokes its access at Google and deletes the sign-in from this computer.'}
+        </p>
+      </Dialog>
+    );
+  }
+
+  return (
+    <Dialog
+      title={`${a.name} account`}
+      size="wide"
+      onClose={onClose}
+      actions={
+        <button type="button" className="button button--secondary" onClick={onClose}>
+          Close
+        </button>
+      }
+    >
+      <div className="connector-detail">
+        <div className="connector-detail__head">
+          <ProviderLogo id={a.provider} size={40} />
+          <div className="connector-detail__heading">
+            <span className="connector-detail__account">{a.displayName ?? a.email ?? `${a.name} account`}</span>
+            {a.email && a.displayName && <span className="connector-detail__email">{a.email}</span>}
+          </div>
+          <StatusIndicator tone={status.tone} label={status.label} />
+        </div>
+        {a.message && <p className="connector-detail__message">{a.message}</p>}
+
+        <dl className="connector-detail__facts">
+          <dt>Capabilities</dt>
+          <dd>
+            <ul className="connector-detail__capabilities">
+              {cards.map((c) => (
+                <li key={c.id}>
+                  <span>{c.name}</span>
+                  <span className="connector-detail__capability-state">{capabilityState(c)}</span>
+                  {added(c) ? (
+                    <button
+                      type="button"
+                      className="button button--ghost button--small"
+                      disabled={action.busy}
+                      onClick={() => setRemoving(c)}
+                    >
+                      Remove {c.name}
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="button button--secondary button--small"
+                      disabled={connect.busy || c.state === 'unavailable'}
+                      onClick={() => void connect.run(() => connectConnector(c.id))}
+                    >
+                      Add {c.name}
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </dd>
+          <dt>Permissions</dt>
+          <dd>
+            <ul className="connector-detail__permissions">
+              {permissions.map((p) => (
+                <li key={`${p.connector}-${p.capability}`} className={p.granted ? 'is-granted' : 'is-missing'}>
+                  {p.granted ? (
+                    <CheckIcon className="connector-detail__perm-icon" aria-hidden="true" />
+                  ) : (
+                    <AlertIcon className="connector-detail__perm-icon" aria-hidden="true" />
+                  )}
+                  {p.label}
+                  <span className="sr-only">{p.granted ? ' (granted)' : ' (not granted)'}</span>
+                </li>
+              ))}
+            </ul>
+          </dd>
+          <dt>Health</dt>
+          <dd>
+            {a.connectedAt !== null && <span>Signed in {formatDateTime(a.connectedAt)}. </span>}
+            {a.lastRefreshedAt !== null
+              ? `Access renewed ${formatRelative(a.lastRefreshedAt)}.`
+              : 'Access is renewed only when a request needs it.'}
+          </dd>
+          <dt>Last sync</dt>
+          <dd>
+            {cards.some((c) => c.lastSyncAt !== null)
+              ? cards
+                  .filter((c) => c.lastSyncAt !== null)
+                  .map((c) => `${c.name}: ${formatDateTime(c.lastSyncAt as number)}`)
+                  .join(' · ')
+              : 'Not yet'}
+          </dd>
+        </dl>
+
+        <MailTrackingLine />
+
+        <div className="connector-detail__actions">
+          {mailTask && (
+            <button
+              type="button"
+              className="button button--secondary button--small"
+              disabled={sync.busy || a.state === 'connecting'}
+              onClick={() =>
+                void sync.run(() => runTaskNow(mailTask.id)).then((ok) => {
+                  if (ok) setSynced(true);
+                })
+              }
+            >
+              {sync.busy ? 'Starting…' : 'Sync now'}
+            </button>
+          )}
+          {a.state === 'connecting' ? (
+            <button type="button" className="button button--ghost button--small" onClick={connect.cancel}>
+              Cancel sign-in
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="button button--secondary button--small"
+              disabled={connect.busy}
+              onClick={() => void connect.connect()}
+            >
+              Reconnect
+            </button>
+          )}
+        </div>
+        {synced && (
+          <p className="form__hint" role="status">
+            Job Mail &amp; Interview Sync is running; see Scheduled Tasks for its result.
+          </p>
+        )}
+        {(action.error ?? sync.error ?? (a.errorCode === null ? connect.error : null)) && (
+          <p className="form-error" role="alert">
+            {action.error ?? sync.error ?? connect.error}
+          </p>
+        )}
+
+        {a.detail && (
+          <div>
+            <button
+              type="button"
+              className="button button--ghost button--small"
+              aria-expanded={showDetail}
+              onClick={() => setShowDetail(!showDetail)}
+            >
+              {showDetail ? <ChevronDownIcon className="button__icon" /> : <ChevronRightIcon className="button__icon" />}
+              Technical details
+            </button>
+            {showDetail && <pre className="connector-card__details">{a.detail}</pre>}
+          </div>
+        )}
+        <p className="form__hint">
+          {microsoft ? 'Manage apps with access to your Microsoft account at ' : 'Review apps with access to your Google Account at '}
+          <button
+            type="button"
+            className="link-button"
+            onClick={() => void openExternalUrl(microsoft ? MICROSOFT_APPS_URL : GOOGLE_APPS_URL).catch(() => {})}
+          >
+            {microsoft ? 'account.microsoft.com' : 'myaccount.google.com'}
+          </button>
+          .
+        </p>
+      </div>
+    </Dialog>
+  );
+}
+
+/** How a newly connected account meets chats (privacy-conscious default: off). */
+function ChatDefaults({ overview }: { overview: ConnectorsOverview }) {
+  const action = useAction();
+  const { newAccountsInChats } = overview.preferences;
+  return (
+    <div className="panel panel--list connectors__prefs">
+      <div className="setting-row">
+        <div className="setting-row__text">
+          <span className="setting-row__label">Add new accounts to chats that chose their own connectors</span>
+          <span className="setting-row__hint">
+            Chats using “all connected” see a new account right away. Off: a chat that picked its own connectors keeps
+            that choice until you change it there. Turning a connector off in a chat never disconnects the account.
+          </span>
+        </div>
+        <Switch
+          checked={newAccountsInChats}
+          disabled={action.busy}
+          aria-label="Add new accounts to chats that chose their own connectors"
+          onChange={(on) => void action.run(() => setConnectionPreferences({ newAccountsInChats: on }))}
+        />
+      </div>
+      {action.error && <p className="form-error connectors__error">{action.error}</p>}
+    </div>
   );
 }
 

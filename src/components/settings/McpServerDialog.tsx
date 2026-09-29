@@ -125,7 +125,13 @@ export function McpServerDialog({ server, onClose }: { server: McpServer | null;
     setError(null);
     try {
       if (kind === 'test') {
-        setTest(await testMcpServer(server?.id ?? null, toInput(form)));
+        const result = await testMcpServer(server?.id ?? null, toInput(form));
+        setTest(result);
+        // A server that answers with an authorization challenge is an OAuth
+        // server: the sign-in (in the browser) replaces any token to paste.
+        if (result.requiresSignIn && form.auth === 'none') {
+          setForm((f) => ({ ...f, auth: 'oauth', secret: '' }));
+        }
       } else {
         await saveMcpServer(server?.id ?? null, toInput(form));
         onClose();

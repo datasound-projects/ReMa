@@ -475,6 +475,7 @@ async fn connect_linkedin(state: &AppState, scopes: &[&str]) {
                     status_cause: None,
                     connected_at: now,
                     updated_at: now,
+                    last_refreshed_at: None,
                 },
             )?;
             repo::set_enabled(c, ConnectorId::Linkedin, true, now)

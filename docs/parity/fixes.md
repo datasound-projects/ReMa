@@ -2,7 +2,9 @@
 
 Follows [open-issues.md](open-issues.md), which lists the state after the
 second pass ([verification.md](verification.md)). This pass worked every
-ID there. One row per ID, then what remains for the owner.
+ID there. One row per ID, then what remains for the owner. The fourth
+pass, the connection runtime (authentication belongs to ReMa, not to a
+model), is at the end: [Connection runtime](#connection-runtime-fourth-pass).
 
 **Code status:** *fixed* (changed in this pass), *unchanged* (a deliberate
 limitation, kept), *unsupported* (not offered, and said so), *blocked*
@@ -147,3 +149,126 @@ Only inputs ReMa cannot supply, with the exact steps.
 7. **Job boards:** allow `www.arbeitnow.com`, `boards-api.greenhouse.io`,
    `api.lever.co`, `remotive.com` (or run on the Mac) and ask a chat for
    jobs; run Settings → Career Search → Check now.
+
+
+## Connection runtime (fourth pass)
+
+The request: ReMa authenticates Google, Microsoft and remote MCP servers
+itself, like Claude Desktop and the ChatGPT app; models receive tool
+definitions and sanitized results, never a token. Architecture and the
+state machine: [../connectors/implementation.md §6](../connectors/implementation.md#6-connection-runtime-model-independent-authentication).
+
+**Status vocabulary for this pass.** *Code-complete*: implemented and
+covered by deterministic tests against mock providers (a mock never
+verifies a provider). *Live-verified*: run for real against the provider,
+with the evidence named. *External-policy-dependent*: correct in ReMa and
+still gated by something only the provider or the publisher decides.
+
+### What changed
+
+| Area | Change | Status |
+|---|---|---|
+| Public configuration | Client IDs are public application configuration: compiled in (`src-tauri/connectors.toml`, release builds fail without Google and Microsoft), and a development build also reads `<data dir>/connectors.toml` (`Apps::load`, validated by key, never overriding the build). A missing registration names the key, the build variable and the file on the card; users of a release never see it. | code-complete (`public_configuration_can_come_from_the_data_folder_in_development`) |
+| Account cards | Settings → Connectors shows one card per provider: Connect → browser → email, ✓ Gmail ✓ Google Calendar, Connected, Manage, Disconnect (revokes at Google, deletes the Microsoft grant). Manage adds or removes each capability, lists permissions, health (sign-in time, last renewal), last sync, Sync now. LinkedIn and XING keep their cards. | code-complete (`connecting_a_provider_asks_for_every_capability_in_one_sign_in`, `ConnectorsSection.test.tsx`) |
+| State machine | `ConnectionState`: disconnected, connecting, connected, refreshing, reauth_required, permission_denied, admin_approval_required, provider_error, offline, unavailable; derived per account with the structured error code and an actionable message; tenant/admin-consent rejection (AADSTS90094/65001) is `admin_approval_required`, never a ReMa failure. | code-complete (`the_account_state_machine_names_each_situation`) |
+| Token lifecycle | `connect`, `disconnect`, `get_valid_access_token`, `refresh_access_token` (after a 401, the request retried once), `revoke_connection`, `requires_reauthentication`; the daily keep-alive is gone: renewal is lazy, plus one renewal for a grant unused 30 days (`renew_unused`, recorded in `connector_accounts.last_refreshed_at`, migration 0020). | code-complete (`unused_grants_are_renewed_for_a_reason_without_reading_anything`, `access_tokens_are_refreshed_silently_before_they_expire`, `a_revoked_grant_requires_reconnecting_and_never_retries_on_its_own`) |
+| Chats | Account-level connections; per-chat toggles unchanged; new setting "Add new accounts to chats that chose their own connectors" (off by default). Switching the model changes nothing: `ConnectorTools::prepare` takes no model, only the chat's toggles. | code-complete (`a_new_account_joins_chats_with_their_own_connector_choice_only_when_asked`) |
+| Tool router | `services/tool_registry.rs`: canonical ids (`mail.search` with the aliases `gmail.search`/`outlook.search`, `calendar.*`, `applications.*`, `mcp.<server>.<tool>`) mapped onto the stable model-facing names; provider adapters translate `ToolSpec` only. Model-facing names were not renamed (conversation history and provider histories carry them). | code-complete (`services::tool_registry::tests`) |
+| Remote MCP OAuth | A server added by URL alone is probed: a 401 challenge turns it into an OAuth server with "Authentication required" and a Sign in button (no token to paste); Test in the dialog says so and switches the form to OAuth. Sign-in: protected resource metadata → authorization server metadata → pre-registered / Client ID Metadata Document (`REMA_MCP_CLIENT_METADATA_URL`, HTTPS, when the server advertises support) / Dynamic Client Registration → PKCE S256, state, loopback, RFC 8707 `resource` → token → the connection and its tools/list run. Refresh on expiry, `reauth` on a rejected refresh, a 401 during use marks the server "Authentication required" (never a browser on its own), issuer mismatch and malformed metadata stop the sign-in with a plain message. | code-complete (`mcp::oauth_tests`: 4 tests against a mock MCP + authorization server) |
+| Local MCP | Unchanged: stdio servers run with ReMa's controlled environment (`accounts::locate`: login shell PATH, nvm/volta/uv/pipx paths, Windows PATHEXT). Independent of remote OAuth. | code-complete (earlier passes) |
+| Web search | Unchanged and decoupled: provider-native search uses the model provider's own credentials; connector auth is the account's. The two-step answer keeps web search out of a step that read private data. | code-complete (earlier passes) |
+| Live smoke tests | `pnpm test:live:google`, `pnpm test:live:microsoft` (connect → renew → one mail search → one calendar read → disconnect), `pnpm test:live:mcp` (probe → sign in → tools/list → tools/call → restart). Interactive, in-memory credential store, skip with `BLOCKED …` when their variable is not set. | code-complete; **not live-verified** (no client IDs, no accounts, no MCP server reachable from this environment) |
+
+### Live verification: not done, and what it needs
+
+Nothing in this pass is live-verified. The definition of done (build on
+macOS → Connect Google → authorize → Connected → Claude reads Gmail →
+switch to OpenAI, Gemini → restart → expired tokens renew → Disconnect →
+Outlook the same → an OAuth MCP server by URL → restart) needs the owner
+inputs below and a Mac. Until those runs happen, the rows above are
+code-complete only.
+
+1. **Google Cloud (once, by the publisher).** Project → APIs & Services →
+   Library: enable *Gmail API* and *Google Calendar API*. Google Auth
+   Platform → Branding: app name, support e-mail, logo, home page, privacy
+   policy, terms, authorized domain, developer contact. Audience:
+   *External*; add test users while in Testing. Data access (scopes):
+   `openid`, `email`, `profile`, `https://www.googleapis.com/auth/gmail.readonly`,
+   `https://www.googleapis.com/auth/calendar.events`,
+   `https://www.googleapis.com/auth/calendar.freebusy`. Clients → Create
+   client → *Desktop app* (no redirect URI: loopback is accepted). Put the
+   client ID into `src-tauri/connectors.toml` `[google] desktop_client_id`
+   (or `GOOGLE_DESKTOP_CLIENT_ID` in the release workflow); the secret only
+   if the token endpoint answers `client_secret is missing`;
+   `GOOGLE_PUBLISHING_STATUS=testing` until published.
+2. **Microsoft Entra (once).** App registrations → New registration: name
+   ReMa; supported account types *Accounts in any organizational directory
+   and personal Microsoft accounts*. Authentication → Add a platform →
+   *Mobile and desktop applications* → redirect URI `http://localhost`;
+   *Allow public client flows* = Yes. No client secret. API permissions →
+   Microsoft Graph → Delegated: `openid`, `profile`, `email`,
+   `offline_access`, `User.Read`, `Mail.Read`, `Calendars.ReadWrite`.
+   Branding: publisher domain, publisher verification. Put the Application
+   (client) ID into `[microsoft] public_client_id`
+   (`MICROSOFT_PUBLIC_CLIENT_ID`), tenant `common`.
+3. **Live tests** (from the repository root, a browser opens; a person
+   signs in):
+
+   ```sh
+   REMA_LIVE_GOOGLE_CLIENT_ID=….apps.googleusercontent.com pnpm test:live:google
+   REMA_LIVE_MICROSOFT_CLIENT_ID=<guid> pnpm test:live:microsoft
+   REMA_LIVE_MCP_URL=https://<server>/mcp pnpm test:live:mcp
+   ```
+
+   Without the variable each prints `BLOCKED …` and passes. The
+   connector tests use an in-memory credential store; the keychain itself
+   is exercised by running the app (step 4).
+4. **In the app (macOS):** `pnpm build:app`, install, Settings → Connectors
+   → Google → Connect → authorize → Connected with the e-mail and ✓ Gmail
+   ✓ Google Calendar. Ask a chat (Claude) about recent job mail; switch to
+   OpenAI, then Gemini: same tools, same answers, no new sign-in. Quit and
+   restart: still connected (Keychain). Wait past an hour (or Manage →
+   Reconnect is not needed): the next request renews the token silently.
+   Disconnect → the Google account's connections page no longer lists ReMa
+   and Keychain Access has no `cloud.datasound.rema` item for it. Microsoft
+   the same with Outlook. Settings → MCP → Add → URL of an OAuth server →
+   Test says "requires sign-in" → Save → Sign in → Connected with tools →
+   restart → reconnects without a browser.
+
+### External-policy-dependent
+
+- **Google restricted scope (`gmail.readonly`)**: until the OAuth app is
+  verified (CASA assessment), Google shows the unverified-app screen and
+  limits the app to 100 users; while the app is in *Testing*, Google ends
+  every sign-in about 7 days after it is made. ReMa says both on the card
+  when the build says `testing`; it cannot code around either.
+- **Microsoft tenants** may require admin consent for multi-tenant apps
+  or block unverified publishers: `admin_approval_required` names the
+  organization's policy; publisher verification is the publisher's.
+- **Remote MCP servers** that support neither Dynamic Client Registration
+  nor Client ID Metadata Documents accept only clients their operator
+  registered; ReMa says so and offers a token instead. CIMD needs ReMa to
+  host `client.json` at an HTTPS URL of its own domain
+  (`REMA_MCP_CLIENT_METADATA_URL`), a publishing step.
+- **LinkedIn** (60-day tokens, partner scopes) and **XING** (no API) are
+  unchanged.
+
+### Migration
+
+Existing data is kept: `connector_accounts` gains `last_refreshed_at`
+(NULL for every existing row, so a grant older than 30 days is renewed
+once at the next check), conversations and their connector choices,
+scheduled tasks, provider selections, local MCP configurations and ReMa
+MCP are untouched; grants stay under their per-account keychain keys. A
+server that was saved with *no authentication* and turns out to require
+sign-in is switched to OAuth at its next connection and shows "Sign in".
+
+### Checks run (fourth pass)
+
+| Check | Result |
+|---|---|
+| `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` | clean |
+| `cargo test --lib` | 839 passed, 0 failed, 13 ignored (the live tests among them) |
+| `pnpm typecheck`, `pnpm lint`, `pnpm build` | clean |
+| `pnpm test` | 174 passed |
+| `pnpm test:live:google` / `:microsoft` / `:mcp` | not run: no client IDs, accounts or reachable OAuth MCP server in this environment (each prints `BLOCKED …` without its variable) |

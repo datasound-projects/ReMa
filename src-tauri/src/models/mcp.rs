@@ -166,6 +166,9 @@ pub struct McpTestResult {
     pub ok: bool,
     pub message: String,
     pub tools: Vec<McpToolInfo>,
+    /// The server answered with an authorization challenge: it is an OAuth
+    /// server, and the user has to sign in (in the browser) first.
+    pub requires_sign_in: bool,
 }
 
 /// MCP servers or their connections changed.

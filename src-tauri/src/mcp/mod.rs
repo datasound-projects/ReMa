@@ -21,7 +21,11 @@ pub mod client;
 pub mod config;
 pub mod import;
 pub mod legacy_sse;
+#[cfg(test)]
+mod live_tests;
 pub mod oauth;
+#[cfg(test)]
+mod oauth_tests;
 #[cfg(test)]
 mod schema_checks;
 
@@ -245,6 +249,20 @@ impl McpContext {
     }
 
     /// Starts tracking a browser sign-in, cancelling an earlier one.
+    /// The server no longer accepts ReMa's sign-in (a 401 during use): the
+    /// connection is closed and the status says to sign in again. ReMa
+    /// never opens a browser on its own for that.
+    pub fn mark_needs_sign_in(&self, id: i64, message: &str) {
+        self.drop_connection(id);
+        self.set_status(
+            id,
+            McpStatus {
+                message: Some(message.to_string()),
+                ..McpStatus::of(McpState::NeedsSignIn)
+            },
+        );
+    }
+
     pub fn begin_sign_in(&self, id: i64) -> CancellationToken {
         let cancel = CancellationToken::new();
         if let Some(previous) = self

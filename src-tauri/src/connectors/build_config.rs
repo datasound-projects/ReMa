@@ -60,6 +60,8 @@ pub const LINKEDIN_APPROVED_SCOPES: Key = Key {
     env: "LINKEDIN_APPROVED_SCOPES",
 };
 
+/// Every key (`build.rs` iterates them).
+#[allow(dead_code)]
 pub const KEYS: [Key; 7] = [
     GOOGLE_CLIENT_ID,
     GOOGLE_CLIENT_SECRET,
@@ -233,6 +235,7 @@ pub fn resolve(
 }
 
 /// The Rust source compiled into ReMa (`connectors::config`).
+#[allow(dead_code)]
 pub fn to_rust(config: &ConnectorConfig) -> String {
     let opt = |v: &Option<String>| match v {
         Some(v) => format!("Some({v:?})"),

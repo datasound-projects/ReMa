@@ -420,6 +420,15 @@ impl ChatTools {
                 }
             }
             Err(message) => {
+                // The server no longer accepts ReMa's sign-in: the row in
+                // Settings says so; nothing opens a browser on its own.
+                if !tool.builtin && crate::mcp::client::call_needs_sign_in(&message) {
+                    self.state.mcp.mark_needs_sign_in(
+                        tool.server_id,
+                        "The server no longer accepts ReMa's sign-in. Sign in again.",
+                    );
+                    self.state.events.mcp_changed();
+                }
                 activity.status = ToolStatus::Failed;
                 activity.detail = Some(shorten(&message, MAX_DETAIL));
                 self.report(&activity);

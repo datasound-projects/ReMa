@@ -125,6 +125,7 @@ async fn setup(connect_gmail: bool) -> Option<Setup> {
                         status_cause: None,
                         connected_at: now,
                         updated_at: now,
+                        last_refreshed_at: None,
                     },
                 )?;
                 crate::db::connectors::set_enabled(c, ConnectorId::Gmail, true, now)
@@ -490,6 +491,7 @@ async fn sign_in(state: &AppState, provider: ProviderId, ids: &[ConnectorId]) {
                     status_cause: None,
                     connected_at: now,
                     updated_at: now,
+                    last_refreshed_at: None,
                 },
             )?;
             for id in ids {

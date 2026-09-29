@@ -5,7 +5,7 @@ use tauri_plugin_opener::OpenerExt;
 use crate::{
     connectors,
     error::{AppError, AppResult},
-    models::connectors::{ConnectorId, ConnectorsOverview, ProviderId},
+    models::connectors::{ConnectionPreferences, ConnectorId, ConnectorsOverview, ProviderId},
     services::background,
     state::AppState,
 };
@@ -33,6 +33,49 @@ pub async fn connect_connector(
             .map_err(|e| AppError::internal(format!("could not open the browser: {e}")))
     })
     .await?;
+    connectors::overview(&state).await
+}
+
+/// Connects a provider account with every capability ReMa offers for it
+/// (Settings → Connectors → Google → Connect): one browser sign-in.
+#[tauri::command]
+#[specta::specta]
+pub async fn connect_provider_account(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    provider: ProviderId,
+) -> AppResult<ConnectorsOverview> {
+    connectors::connect_provider(&state, provider, |url| {
+        app.opener()
+            .open_url(url, None::<&str>)
+            .map_err(|e| AppError::internal(format!("could not open the browser: {e}")))
+    })
+    .await?;
+    connectors::overview(&state).await
+}
+
+/// Signs a provider account out entirely: every connector of the provider
+/// is removed, access is revoked where the provider allows it and the
+/// stored grant is deleted. Application history is kept.
+#[tauri::command]
+#[specta::specta]
+pub async fn disconnect_provider_account(
+    state: State<'_, AppState>,
+    provider: ProviderId,
+) -> AppResult<ConnectorsOverview> {
+    connectors::disconnect_provider(&state, provider).await?;
+    connectors::overview(&state).await
+}
+
+/// How connections meet chats (new accounts and chats with their own
+/// connector choice).
+#[tauri::command]
+#[specta::specta]
+pub async fn set_connection_preferences(
+    state: State<'_, AppState>,
+    preferences: ConnectionPreferences,
+) -> AppResult<ConnectorsOverview> {
+    connectors::set_preferences(&state, preferences)?;
     connectors::overview(&state).await
 }
 

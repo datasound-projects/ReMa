@@ -346,11 +346,94 @@ pub struct MailProcessing {
 #[serde(rename_all = "camelCase")]
 pub struct ConnectorsOverview {
     pub connectors: Vec<ConnectorStatus>,
+    /// One per provider, in [`ProviderId::ALL`] order.
+    pub accounts: Vec<ProviderAccount>,
     pub background: BackgroundSettings,
     /// None until a model is connected.
     pub mail_processing: Option<MailProcessing>,
+    pub preferences: ConnectionPreferences,
 }
 
 /// Connectors changed (state, account, sync).
 #[derive(Debug, Clone, Serialize, Deserialize, Type, tauri_specta::Event)]
 pub struct ConnectorsChanged;
+
+/// The state of one provider account's connection (the account-level
+/// state machine behind every connector of that provider).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionState {
+    /// No account is connected.
+    Disconnected,
+    /// Waiting for the browser sign-in.
+    Connecting,
+    /// Connected; requests get a valid access token.
+    Connected,
+    /// A renewal of the access token is in flight.
+    Refreshing,
+    /// The provider ended the grant; the user must sign in again.
+    ReauthRequired,
+    /// Connected, but a permission a connector needs was not granted.
+    PermissionDenied,
+    /// An organization's policy requires an administrator's approval.
+    AdminApprovalRequired,
+    /// The provider rejected ReMa (configuration, API not enabled, an
+    /// unverified app) or the last sign-in failed for another reason.
+    ProviderError,
+    /// The provider could not be reached (or the keychain did not answer).
+    Offline,
+    /// This build of ReMa has no public app configuration for the provider.
+    Unavailable,
+}
+
+/// One capability of a provider account as the account card lists it
+/// ("✓ Gmail"): a connector of the provider.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityView {
+    pub connector: ConnectorId,
+    pub name: String,
+    /// The user added this connector and the provider granted what it
+    /// needs.
+    pub granted: bool,
+    /// The connector's own state (sync, permissions).
+    pub state: ConnectorState,
+}
+
+/// A provider account as Settings → Connectors shows it: one card per
+/// provider (Google, Microsoft), with the connectors it enables. Nothing
+/// here carries a token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderAccount {
+    pub provider: ProviderId,
+    pub name: String,
+    pub state: ConnectionState,
+    /// A stable id of the connection (`<provider>:<account id>`), for
+    /// diagnostics; never a token.
+    pub connection_id: Option<String>,
+    pub email: Option<String>,
+    pub display_name: Option<String>,
+    pub capabilities: Vec<CapabilityView>,
+    /// A short user-readable explanation for the current state.
+    pub message: Option<String>,
+    /// Technical details for "Show details" (no secrets).
+    pub detail: Option<String>,
+    pub error_code: Option<ConnectorErrorCode>,
+    pub connected_at: Option<i64>,
+    /// When the grant was last renewed (None: not since the sign-in).
+    pub last_refreshed_at: Option<i64>,
+    /// See [`ConnectorStatus::sign_in_ends_at`].
+    pub sign_in_ends_at: Option<i64>,
+    /// This build has the provider's public app configuration.
+    pub available: bool,
+}
+
+/// Settings that decide how connections meet chats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionPreferences {
+    /// A newly connected account is also added to chats that chose their
+    /// own connectors (off: only chats using "all connected" see it).
+    pub new_accounts_in_chats: bool,
+}

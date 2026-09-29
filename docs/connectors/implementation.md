@@ -342,3 +342,76 @@ addresses, account ids, mail content.
 - **No cloud auth proxy, no device code, no embedded login** (B §83–§85).
 - **One account per provider** for now; keys and cursors are per account
   (B §69).
+
+
+## 6. Connection runtime (model-independent authentication)
+
+ReMa authenticates services; models get tools. The pieces, and where each
+lives:
+
+```text
+Settings → Connectors (React)          src/components/settings/ConnectorsSection.tsx
+  one card per account provider        AccountCard: Connect · Manage · Disconnect, ✓ Gmail ✓ Google Calendar
+  chat default for new accounts        ChatDefaults (ConnectionPreferences)
+        │  typed IPC: connect_provider_account, disconnect_provider_account,
+        │             set_connection_preferences (+ the per-connector commands)
+connectors/mod.rs      Connection Manager: connect_provider / connect (one sign-in, the union of
+                       scopes), disconnect_provider / disconnect, require, ready, overview
+                       (ConnectorsOverview.accounts: the account state machine, `account_of`)
+                       Apps::load: public configuration (compiled in, or a development build's
+                       <data dir>/connectors.toml); ConnectorsContext::unavailable_reason
+connectors/oauth.rs    OAuth Manager: PKCE S256, random state, loopback redirect, token requests
+connectors/tokens.rs   token lifecycle: get_valid_access_token (cache → refresh), refresh_access_token
+                       (after a 401, then the request is retried once by api.rs), mark_reauth_required,
+                       revoke_connection, renew_unused (the only proactive renewal: a grant unused
+                       for 30 days; no daily refresh)
+secrets.rs             Credential Vault: SecretStore over the OS credential store (macOS Keychain,
+                       Windows Credential Manager, Linux Secret Service through `keyring`);
+                       MemoryStore in tests. Refresh tokens live nowhere else.
+db/connectors.rs       metadata only (account id, email, granted scopes, status, last_refreshed_at)
+services/tool_registry.rs   the unified tool registry: canonical ids (mail.search, calendar.list_events,
+                       applications.*, mcp.<server>.<tool>) ↔ the stable model-facing names
+services/connector_tools.rs, services/chat_tools.rs   the tool router: definitions are ReMa's,
+                       execution is ReMa's; every provider adapter (Anthropic, OpenAI Responses,
+                       Gemini, Codex) only translates ToolSpec
+mcp/oauth.rs, mcp/client.rs, services/mcp.rs   remote MCP servers: 401 challenge → protected
+                       resource metadata → authorization server metadata → pre-registered client /
+                       Client ID Metadata Document / Dynamic Client Registration → PKCE → loopback
+                       → token → tools/list; refresh, expiry, reauthorization; credentials in the vault
+```
+
+**State machine** (`ConnectionState`, one per provider account):
+`disconnected`, `connecting`, `connected`, `refreshing`, `reauth_required`,
+`permission_denied`, `admin_approval_required`, `provider_error`,
+`offline`, `unavailable` (no public configuration in this build).
+`state_of_failure` maps the structured error codes (`ConnectorErrorCode`)
+onto it: `PROVIDER_ADMIN_POLICY` → admin approval required,
+`SCOPE_NOT_GRANTED` → permission denied, `NETWORK_ERROR` and
+`CREDENTIAL_STORE_UNAVAILABLE` → offline, the rest → provider error.
+
+**Before every tool call**: the account is resolved from the connector's
+provider → the access token comes from memory or one refresh
+(`get_valid_access_token`) → the API call → on 401 one refresh and one
+retry (`api.rs`) → on a second refusal the account is marked
+`reauth_required` and the tool answers "reconnect in Settings". Nothing
+opens a browser on its own.
+
+**Accounts and chats**: an account is connected once, for every model and
+every chat. A chat's connector toggles only decide which tools that chat
+gets (`conversations.connectors`); turning one off never disconnects the
+account. A newly connected account is visible to chats using "all
+connected" at once, and joins chats that chose their own connectors only
+when Settings → Connectors → "Add new accounts to chats that chose their
+own connectors" is on (off by default).
+
+**What a model never receives**: access tokens, refresh tokens,
+authorization codes, PKCE verifiers, client IDs (public, but pointless) or
+client secrets. Tool results are ReMa's sanitized views (`<private_data>`
+wrapping, size limits). `connectors::tests::tokens_live_only_in_the_credential_store`
+and `mcp::oauth_tests` check the database, the logs and the notifications
+for every secret the mock providers issued.
+
+**Limits**: one account per provider (`connector_accounts.provider` is the
+primary key); a second Google account replaces the first. Multiple accounts
+per provider would need a schema change and per-account tool routing and is
+not offered.

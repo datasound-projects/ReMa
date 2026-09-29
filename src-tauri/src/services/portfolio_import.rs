@@ -28,11 +28,10 @@ use crate::{
     },
     services::{
         portfolio::new_id,
-        profile,
         portfolio_ai::{
             self, ask, figures, from_raw_content, from_raw_letter, RawContent, RawLetter,
         },
-        profile_import,
+        profile, profile_import,
     },
     state::AppState,
 };
@@ -58,7 +57,8 @@ the job title and \"subtitle\" the employer; for education, \"title\" is the deg
 and the skills as \"tags\"; for languages, \"title\" is the language and \"subtitle\" the \
 level.";
 
-const LETTER_RULES: &str = "You read a cover letter for ReMa's Portfolio Studio and return its parts as JSON so \
+const LETTER_RULES: &str =
+    "You read a cover letter for ReMa's Portfolio Studio and return its parts as JSON so \
 the person can edit it in a template. Copy the text exactly; never invent or complete \
 anything. Answer with one JSON object only: {\"header\": {\"fullName\", \"headline\", \"email\", \
 \"phone\", \"location\", \"website\", \"linkedin\", \"github\"} (the sender), \"letter\": \
@@ -83,7 +83,11 @@ struct LetterAnswer {
 }
 
 /// Reads a stored Profile document into a proposal.
-pub async fn import(state: &AppState, document_id: i64, kind: PortfolioKind) -> AppResult<PortfolioImport> {
+pub async fn import(
+    state: &AppState,
+    document_id: i64,
+    kind: PortfolioKind,
+) -> AppResult<PortfolioImport> {
     let (document, text) = state.db.call(|c| {
         Ok((
             repo::get_document(c, document_id)?,
@@ -342,10 +346,16 @@ fn verify(
         notes.push(format!(
             "{} entr{} highlighted for you to check (an unclear date, employer or title).",
             uncertain.len(),
-            if uncertain.len() == 1 { "y is" } else { "ies are" }
+            if uncertain.len() == 1 {
+                "y is"
+            } else {
+                "ies are"
+            }
         ));
     }
-    content.sections.retain(|s| !s.entries.is_empty() || !s.text.trim().is_empty());
+    content
+        .sections
+        .retain(|s| !s.entries.is_empty() || !s.text.trim().is_empty());
     (content, notes, uncertain)
 }
 
@@ -375,16 +385,22 @@ mod tests {
         state::testing,
     };
 
-    const CV: &str = "Ana Tester\nData Engineer\nana.tester@example.com · +43 660 1234567 · Vienna\n\
+    const CV: &str =
+        "Ana Tester\nData Engineer\nana.tester@example.com · +43 660 1234567 · Vienna\n\
         github.com/anatester\n\nExperience\nSenior Data Engineer, Globex, 2021 – present\n\
         - Built the lakehouse\nData Engineer, Initech, 2018 – 2021\n\nSkills\nPython, SQL";
 
     async fn state_with(answer: &str) -> AppState {
         let (state, _) = testing::state(Arc::new(FakeLanguageModel::replying(&[answer])));
-        providers::connect(&state, ProviderKind::Anthropic, "k").await.unwrap();
+        providers::connect(&state, ProviderKind::Anthropic, "k")
+            .await
+            .unwrap();
         providers::set_default_model(
             &state,
-            &ModelRef { provider_id: "anthropic".into(), model_id: "model-a".into() },
+            &ModelRef {
+                provider_id: "anthropic".into(),
+                model_id: "model-a".into(),
+            },
         )
         .unwrap();
         state
@@ -394,7 +410,10 @@ mod tests {
         let path = state.data_dir.join("Ana CV.pdf");
         let lines: Vec<&str> = CV.lines().collect();
         std::fs::write(&path, samples::pdf(&lines)).unwrap();
-        profile::add_document(state, &path, Some(DocumentKind::Cv)).await.unwrap().id
+        profile::add_document(state, &path, Some(DocumentKind::Cv))
+            .await
+            .unwrap()
+            .id
     }
 
     #[tokio::test]
@@ -415,15 +434,27 @@ mod tests {
         assert!(import.has_text);
         assert_eq!(import.model.as_deref(), Some("model-a"));
         assert_eq!(import.content.header.full_name, "Ana Tester");
-        assert_eq!(import.content.header.email, "ana.tester@example.com", "found in the text");
+        assert_eq!(
+            import.content.header.email, "ana.tester@example.com",
+            "found in the text"
+        );
         assert_eq!(import.content.header.github, "https://github.com/anatester");
         let experience = &import.content.sections[0];
         assert_eq!(experience.kind, SectionKind::Experience);
         assert_eq!(experience.entries.len(), 2, "Acme is not in the text");
         assert_eq!(experience.entries[0].description, "- Built the lakehouse");
-        assert_eq!(import.content.sections[1].entries[0].tags, ["Python", "SQL"]);
-        assert!(import.notes.iter().any(|n| n.contains("1 entry")), "{:?}", import.notes);
-        assert!(import.notes.contains(&"No education section found".to_string()));
+        assert_eq!(
+            import.content.sections[1].entries[0].tags,
+            ["Python", "SQL"]
+        );
+        assert!(
+            import.notes.iter().any(|n| n.contains("1 entry")),
+            "{:?}",
+            import.notes
+        );
+        assert!(import
+            .notes
+            .contains(&"No education section found".to_string()));
 
         // The proposal is valid content for a new document.
         let doc = portfolio::create(
@@ -472,10 +503,17 @@ mod tests {
         .await;
         let path = state.data_dir.join("letter.txt");
         std::fs::write(&path, "Ana Tester\nDear Jordan,\nI am writing to apply for Data Lead at Fabrikam.\nKind regards,\nAna Tester").unwrap();
-        let doc = profile::add_document(&state, &path, Some(DocumentKind::Other)).await.unwrap();
-        let import = import(&state, doc.id, PortfolioKind::CoverLetter).await.unwrap();
+        let doc = profile::add_document(&state, &path, Some(DocumentKind::Other))
+            .await
+            .unwrap();
+        let import = import(&state, doc.id, PortfolioKind::CoverLetter)
+            .await
+            .unwrap();
         assert_eq!(import.letter.company, "Fabrikam");
         assert_eq!(import.letter.body, "I am writing to apply.");
-        assert!(import.uncertain.contains(&"recipient".to_string()), "Jordan Lee is not written in full");
+        assert!(
+            import.uncertain.contains(&"recipient".to_string()),
+            "Jordan Lee is not written in full"
+        );
     }
 }

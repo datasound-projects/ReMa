@@ -174,7 +174,7 @@ pub fn run() {
             analytics::enrich::start(state.clone());
             mail_monitor::start(state.clone());
             // Connected accounts stay signed in (no data is read).
-            connectors::tokens::start_keep_alive(state.clone());
+            connectors::tokens::start_renewal(state.clone());
             // Career search needs no setup: its parts are checked, an old
             // search-service setting is moved out of the way, and what the
             // connected models can do is learned before the first search.
@@ -290,6 +290,14 @@ pub(crate) fn build_state(
         info.version.clone(),
     ));
     let claude_console = Arc::new(ClaudeConsole::new(runtimes.join("anthropic")));
+    // Public OAuth client configuration: compiled in, and for development
+    // builds also read from the data folder.
+    let connectors = ConnectorsContext::new(
+        GoogleEndpoints::from_env(),
+        MicrosoftEndpoints::from_env(),
+        Apps::load(&data_dir),
+    )
+    .with_runtime_config(&data_dir);
 
     Ok(AppState {
         info: Arc::new(info),
@@ -301,11 +309,7 @@ pub(crate) fn build_state(
         events,
         generations: Generations::default(),
         scheduler: SchedulerHandle::default(),
-        connectors: ConnectorsContext::new(
-            GoogleEndpoints::from_env(),
-            MicrosoftEndpoints::from_env(),
-            Apps::from_build(),
-        ),
+        connectors,
         browser: Default::default(),
         analytics: Default::default(),
         mcp: Default::default(),

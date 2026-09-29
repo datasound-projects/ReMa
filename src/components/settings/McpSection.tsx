@@ -33,7 +33,7 @@ const STATUS: Record<McpServer['status']['state'], { tone: StatusTone; label: st
   disconnected: { tone: 'idle', label: 'Ready' },
   connecting: { tone: 'pending', label: 'Connecting…' },
   connected: { tone: 'ready', label: 'Connected' },
-  needs_sign_in: { tone: 'pending', label: 'Sign-in needed' },
+  needs_sign_in: { tone: 'pending', label: 'Authentication required' },
   error: { tone: 'error', label: 'Connection failed' },
 };
 
@@ -141,7 +141,7 @@ function McpServerRow({ server, onEdit }: { server: McpServer; onEdit: () => voi
         }),
       );
     } catch (err) {
-      setTest({ ok: false, message: toApiError(err).message, tools: [] });
+      setTest({ ok: false, message: toApiError(err).message, tools: [], requiresSignIn: false });
     } finally {
       setTesting(false);
     }
@@ -194,7 +194,7 @@ function McpServerRow({ server, onEdit }: { server: McpServer; onEdit: () => voi
         />
       </div>
       <div className="mcp-server__actions">
-        {oauth && (signingIn || server.status.state === 'needs_sign_in') ? (
+        {(oauth || server.status.state === 'needs_sign_in') && (signingIn || server.status.state === 'needs_sign_in') ? (
           signingIn ? (
             <button type="button" className="button button--ghost button--small" onClick={() => void cancelMcpSignIn(server.id)}>
               Cancel sign-in

@@ -75,6 +75,9 @@ pub struct AccountRecord {
     pub status_cause: Option<ReauthCause>,
     pub connected_at: i64,
     pub updated_at: i64,
+    /// When the grant was last renewed with the provider (None: not since
+    /// the sign-in).
+    pub last_refreshed_at: Option<i64>,
 }
 
 fn account_from_row(row: &Row) -> rusqlite::Result<AccountRecord> {
@@ -93,11 +96,12 @@ fn account_from_row(row: &Row) -> rusqlite::Result<AccountRecord> {
         connected_at: row.get(7)?,
         updated_at: row.get(8)?,
         status_cause: cause.as_deref().and_then(ReauthCause::parse),
+        last_refreshed_at: row.get(10)?,
     })
 }
 
 const ACCOUNT_COLUMNS: &str = "provider, account_id, email, display_name, granted_scopes, status,
-    status_reason, connected_at, updated_at, status_cause";
+    status_reason, connected_at, updated_at, status_cause, last_refreshed_at";
 
 pub fn account(conn: &Connection, provider: ProviderId) -> AppResult<Option<AccountRecord>> {
     Ok(conn
@@ -112,14 +116,14 @@ pub fn account(conn: &Connection, provider: ProviderId) -> AppResult<Option<Acco
 pub fn save_account(conn: &Connection, account: &AccountRecord) -> AppResult<()> {
     conn.execute(
         "INSERT INTO connector_accounts (provider, account_id, email, display_name, granted_scopes,
-             status, status_reason, connected_at, updated_at, status_cause)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             status, status_reason, connected_at, updated_at, status_cause, last_refreshed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
          ON CONFLICT (provider) DO UPDATE SET
              account_id = excluded.account_id, email = excluded.email,
              display_name = excluded.display_name, granted_scopes = excluded.granted_scopes,
              status = excluded.status, status_reason = excluded.status_reason,
              connected_at = excluded.connected_at, updated_at = excluded.updated_at,
-             status_cause = excluded.status_cause",
+             status_cause = excluded.status_cause, last_refreshed_at = excluded.last_refreshed_at",
         params![
             account.provider.as_str(),
             account.account_id,
@@ -131,7 +135,17 @@ pub fn save_account(conn: &Connection, account: &AccountRecord) -> AppResult<()>
             account.connected_at,
             account.updated_at,
             account.status_cause.map(|c| c.as_str()),
+            account.last_refreshed_at,
         ],
+    )?;
+    Ok(())
+}
+
+/// Records a renewal of the account's grant.
+pub fn touch_refreshed(conn: &Connection, provider: ProviderId, now: i64) -> AppResult<()> {
+    conn.execute(
+        "UPDATE connector_accounts SET last_refreshed_at = ?2 WHERE provider = ?1",
+        params![provider.as_str(), now],
     )?;
     Ok(())
 }
@@ -360,6 +374,7 @@ mod tests {
                 status_cause: None,
                 connected_at: 1,
                 updated_at: 1,
+                last_refreshed_at: None,
             };
             save_account(c, &record)?;
             assert_eq!(account(c, ProviderId::Google)?, Some(record));

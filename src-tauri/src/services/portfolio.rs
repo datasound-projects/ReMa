@@ -258,7 +258,10 @@ fn blank_letter() -> CoverLetter {
 
 /// A one-time copy of the Custom Profile and credentials. Afterwards the
 /// document and the Profile are edited independently.
-pub fn content_from_profile(profile: &Profile, credentials: &[ProfileCredential]) -> PortfolioContent {
+pub fn content_from_profile(
+    profile: &Profile,
+    credentials: &[ProfileCredential],
+) -> PortfolioContent {
     let header = PortfolioHeader {
         full_name: profile.full_name(),
         headline: profile.title.clone(),
@@ -553,9 +556,8 @@ fn normalize_accent(value: &str) -> AppResult<String> {
 }
 
 fn normalize_color(value: &str, field: &str) -> AppResult<String> {
-    normalize_accent(value).map_err(|_| {
-        AppError::validation(format!("{field}: choose a color from the picker."))
-    })
+    normalize_accent(value)
+        .map_err(|_| AppError::validation(format!("{field}: choose a color from the picker.")))
 }
 
 /// One of a fixed set of choices, or empty.
@@ -574,7 +576,9 @@ fn normalize_style(s: PortfolioStyle) -> AppResult<PortfolioStyle> {
     } else if s.scale.is_finite() && (0.8..=1.25).contains(&s.scale) {
         (s.scale * 100.0).round() / 100.0
     } else {
-        return Err(AppError::validation("Text size: choose a size from the list."));
+        return Err(AppError::validation(
+            "Text size: choose a size from the list.",
+        ));
     };
     Ok(PortfolioStyle {
         palette: line(&s.palette, 40, "Palette")?,
@@ -585,7 +589,11 @@ fn normalize_style(s: PortfolioStyle) -> AppResult<PortfolioStyle> {
         font_pairing: line(&s.font_pairing, 40, "Fonts")?,
         scale,
         margins: choice(&s.margins, &["narrow", "normal", "wide"], "Margins")?,
-        line_spacing: choice(&s.line_spacing, &["tight", "normal", "relaxed"], "Line spacing")?,
+        line_spacing: choice(
+            &s.line_spacing,
+            &["tight", "normal", "relaxed"],
+            "Line spacing",
+        )?,
         section_spacing: choice(
             &s.section_spacing,
             &["tight", "normal", "relaxed"],
@@ -597,7 +605,11 @@ fn normalize_style(s: PortfolioStyle) -> AppResult<PortfolioStyle> {
             "Layout",
         )?,
         pattern: choice(&s.pattern, &["none", "dots", "grid", "diagonal"], "Pattern")?,
-        dividers: choice(&s.dividers, &["none", "hairline", "dotted", "thick"], "Dividers")?,
+        dividers: choice(
+            &s.dividers,
+            &["none", "hairline", "dotted", "thick"],
+            "Dividers",
+        )?,
         header: choice(
             &s.header,
             &["left", "center", "band", "split", "stacked"],
@@ -631,11 +643,17 @@ fn normalize_photo(value: &str) -> AppResult<String> {
     if value.is_empty() {
         return Ok(String::new());
     }
-    let ok = ["data:image/png;base64,", "data:image/jpeg;base64,", "data:image/webp;base64,"]
-        .iter()
-        .any(|prefix| value.starts_with(prefix));
+    let ok = [
+        "data:image/png;base64,",
+        "data:image/jpeg;base64,",
+        "data:image/webp;base64,",
+    ]
+    .iter()
+    .any(|prefix| value.starts_with(prefix));
     if !ok {
-        return Err(AppError::validation("Photo: choose a PNG, JPEG or WebP image."));
+        return Err(AppError::validation(
+            "Photo: choose a PNG, JPEG or WebP image.",
+        ));
     }
     if value.len() > MAX_PHOTO_BYTES * 4 / 3 + 40 {
         return Err(AppError::validation(
@@ -839,7 +857,13 @@ mod tests {
         testing::state(Arc::new(FakeLanguageModel::replying(&[]))).0
     }
 
-    fn input(name: &str, template_id: &str, page_size: PageSize, accent: &str, content: PortfolioContent) -> PortfolioInput {
+    fn input(
+        name: &str,
+        template_id: &str,
+        page_size: PageSize,
+        accent: &str,
+        content: PortfolioContent,
+    ) -> PortfolioInput {
         PortfolioInput {
             name: name.into(),
             kind: PortfolioKind::Cv,
@@ -856,7 +880,14 @@ mod tests {
     #[test]
     fn creates_blank_and_profile_based_documents() {
         let state = state();
-        let blank = create(&state, PortfolioCreate { template_id: "minimal".into(), ..Default::default() }).unwrap();
+        let blank = create(
+            &state,
+            PortfolioCreate {
+                template_id: "minimal".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(blank.name, "Untitled CV");
         assert_eq!(blank.content.sections.len(), 5);
         assert!(blank.content.header.full_name.is_empty());
@@ -896,7 +927,13 @@ mod tests {
         assert_eq!(copy.content.sections[3].entries[0].tags, ["Rust", "SQL"]);
 
         // The copy is independent: editing it leaves the Custom Profile alone.
-        let mut input = input(&copy.name, &copy.template_id, copy.page_size, "", copy.content.clone());
+        let mut input = input(
+            &copy.name,
+            &copy.template_id,
+            copy.page_size,
+            "",
+            copy.content.clone(),
+        );
         input.content.header.full_name = "A. Tester".into();
         save(&state, copy.id, input).unwrap();
         let (saved_profile, _) = state.db.call(|c| profile_db::get(c)).unwrap();
@@ -931,7 +968,13 @@ mod tests {
         let switched = save(
             &state,
             doc.id,
-            input("CV", "executive", PageSize::Letter, "", saved.content.clone()),
+            input(
+                "CV",
+                "executive",
+                PageSize::Letter,
+                "",
+                saved.content.clone(),
+            ),
         )
         .unwrap();
         assert_eq!(switched.template_id, "executive");

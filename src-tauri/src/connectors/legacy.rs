@@ -128,6 +128,7 @@ pub async fn migrate(state: &AppState) -> AppResult<()> {
                     status_cause: None,
                     connected_at: now,
                     updated_at: now,
+                    last_refreshed_at: None,
                 },
             )?;
             for id in &connectors {

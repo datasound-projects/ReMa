@@ -22,4 +22,5 @@ pub mod schedule;
 pub mod scheduler;
 pub mod system;
 pub mod tasks;
+pub mod tool_registry;
 pub mod websearch;

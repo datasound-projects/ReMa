@@ -756,3 +756,55 @@
 .connector-card__note--muted {
   color: var(--color-text-secondary);
 }
+
+/* ── Connector account cards (Google, Microsoft) ─────────── */
+
+.account-card__email {
+  overflow-wrap: anywhere;
+}
+
+.account-card__capabilities {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--text-sm);
+}
+
+.account-card__capabilities li {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.account-card__capabilities .is-missing {
+  color: var(--color-text-tertiary);
+}
+
+.account-card__capability-icon {
+  width: 14px;
+  height: 14px;
+  stroke-width: 2.4;
+  color: var(--color-success);
+}
+
+.account-card__capability-off {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 1.5px solid var(--color-border-strong);
+  border-radius: var(--radius-pill);
+}
+
+.account-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: auto;
+}
+
+.connector-detail__capabilities li .button {
+  margin-left: auto;
+}

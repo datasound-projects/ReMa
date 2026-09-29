@@ -19,7 +19,6 @@
 //! in Rust. The interface only ever sees [`ConnectorStatus`].
 
 pub mod api;
-#[cfg(test)]
 pub(crate) mod build_config;
 pub mod calendar;
 pub mod config;
@@ -37,6 +36,7 @@ pub mod xing;
 
 use std::{
     collections::HashMap,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex,
@@ -59,9 +59,13 @@ use self::{
 use crate::{
     db::connectors::{self as repo, AccountRecord, AccountStatus, ConnectorRecord},
     error::{AppError, AppResult},
-    models::connectors::{
-        Capability, ConnectorErrorCode, ConnectorId, ConnectorKind, ConnectorState,
-        ConnectorStatus, ConnectorsOverview, PermissionView, ProviderId,
+    models::{
+        chat::ChatConnector,
+        connectors::{
+            Capability, CapabilityView, ConnectionPreferences, ConnectionState, ConnectorErrorCode,
+            ConnectorId, ConnectorKind, ConnectorState, ConnectorStatus, ConnectorsOverview,
+            PermissionView, ProviderAccount, ProviderId,
+        },
     },
     oauth_loopback::{self, Loopback},
     state::AppState,
@@ -102,13 +106,19 @@ pub struct SigningIn {
     pub opened: bool,
 }
 
-/// ReMa's app registrations (set at build time).
+/// ReMa's app registrations: public OAuth client configuration (client
+/// IDs, never a user's token). Compiled in at build time; a development
+/// build may also read them at run time from the data folder.
 #[derive(Debug, Clone, Default)]
 pub struct Apps {
     pub google: Option<OAuthApp>,
     pub microsoft: Option<OAuthApp>,
     pub linkedin: Option<OAuthApp>,
 }
+
+/// The public configuration file a development build reads at run time
+/// (same tables and keys as `src-tauri/connectors.toml`).
+pub const RUNTIME_CONFIG_FILE: &str = "connectors.toml";
 
 impl Apps {
     pub fn from_build() -> Self {
@@ -117,6 +127,72 @@ impl Apps {
             microsoft: microsoft::app(),
             linkedin: linkedin::app(),
         }
+    }
+
+    /// The build's registrations, completed from `<data_dir>/connectors.toml`
+    /// where the build has none (public client IDs only; the file is
+    /// validated like the build's, and an invalid file is reported and
+    /// ignored). Release builds carry every registration already and read
+    /// no file.
+    pub fn load(data_dir: &Path) -> Self {
+        let mut apps = Self::from_build();
+        if !cfg!(debug_assertions) {
+            return apps;
+        }
+        let path = data_dir.join(RUNTIME_CONFIG_FILE);
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return apps;
+        };
+        match Self::from_toml(&text) {
+            Ok(file) => {
+                diag(format!(
+                    "[connector] config runtime_file={} google={} microsoft={} linkedin={}",
+                    path.display(),
+                    file.google.is_some(),
+                    file.microsoft.is_some(),
+                    file.linkedin.is_some()
+                ));
+                apps.google = apps.google.or(file.google);
+                apps.microsoft = apps.microsoft.or(file.microsoft);
+                apps.linkedin = apps.linkedin.or(file.linkedin);
+            }
+            Err(errors) => eprintln!(
+                "[connector] {} ignored:\n  - {}",
+                path.display(),
+                errors.join("\n  - ")
+            ),
+        }
+        apps
+    }
+
+    /// Registrations from the text of a `connectors.toml` (values are
+    /// checked like the build's; errors name keys, never values).
+    pub fn from_toml(text: &str) -> Result<Self, Vec<String>> {
+        let table: toml::Table = text
+            .parse()
+            .map_err(|e: toml::de::Error| vec![format!("not valid TOML: {e}")])?;
+        let file = |key: build_config::Key| {
+            table
+                .get(key.table)
+                .and_then(|t| t.get(key.name))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        };
+        let config = build_config::resolve(&file, &|_| None, false)?;
+        Ok(Self {
+            google: config.google_client_id.map(|client_id| OAuthApp {
+                client_id,
+                client_secret: config.google_client_secret.filter(|v| !v.trim().is_empty()),
+            }),
+            microsoft: config.microsoft_client_id.map(|client_id| OAuthApp {
+                client_id,
+                client_secret: None,
+            }),
+            linkedin: config.linkedin_client_id.map(|client_id| OAuthApp {
+                client_id,
+                client_secret: None,
+            }),
+        })
     }
 }
 
@@ -146,6 +222,11 @@ pub struct ConnectorsContext {
     /// Counts each provider's disconnects: a refresh saves its result only
     /// if the count is what it was when the refresh started.
     grant_generation: Arc<Mutex<HashMap<ProviderId, u64>>>,
+    /// Refreshes in flight per provider (the account shows "Refreshing").
+    refreshing: Arc<Mutex<HashMap<ProviderId, usize>>>,
+    /// Where a development build looks for public configuration at run
+    /// time, for the message that says what is missing.
+    runtime_config: Option<PathBuf>,
     /// Microsoft accounts whose calendar cannot answer `getSchedule`
     /// (personal accounts): availability comes from `calendarView` instead.
     /// Learnt at sign-in or from the first refusal, for this run of ReMa.
@@ -174,6 +255,8 @@ impl ConnectorsContext {
             refresh_locks: Arc::default(),
             grant_locks: Arc::default(),
             grant_generation: Arc::default(),
+            refreshing: Arc::default(),
+            runtime_config: None,
             microsoft_schedule_unsupported: Arc::default(),
             syncs: Arc::default(),
             shutdown: CancellationToken::new(),
@@ -195,6 +278,35 @@ impl ConnectorsContext {
     pub fn with_linkedin(mut self, endpoints: LinkedinEndpoints) -> Self {
         self.linkedin = Arc::new(endpoints);
         self
+    }
+
+    /// Names the run-time configuration file in "unavailable" messages.
+    pub fn with_runtime_config(mut self, data_dir: &Path) -> Self {
+        self.runtime_config = Some(data_dir.join(RUNTIME_CONFIG_FILE));
+        self
+    }
+
+    /// Why a provider cannot be connected in this copy of ReMa.
+    pub fn unavailable_reason(&self, provider: ProviderId) -> String {
+        unavailable_reason_at(provider, self.runtime_config.as_deref())
+    }
+
+    /// Marks a refresh of the provider's grant as in flight until the guard
+    /// is dropped.
+    pub(crate) fn begin_refresh(&self, provider: ProviderId) -> RefreshGuard {
+        *self.refreshing.lock().unwrap().entry(provider).or_default() += 1;
+        RefreshGuard {
+            refreshing: self.refreshing.clone(),
+            provider,
+        }
+    }
+
+    pub fn is_refreshing(&self, provider: ProviderId) -> bool {
+        self.refreshing
+            .lock()
+            .unwrap()
+            .get(&provider)
+            .is_some_and(|n| *n > 0)
     }
 
     pub fn app(&self, provider: ProviderId) -> Option<OAuthApp> {
@@ -368,6 +480,11 @@ impl ConnectorsContext {
             .map(|(_, failure)| failure.clone())
     }
 
+    /// The last failed sign-in of the provider, whichever card started it.
+    fn provider_failure(&self, provider: ProviderId) -> Option<(ConnectorId, Failure)> {
+        self.failures.lock().unwrap().get(&provider).cloned()
+    }
+
     fn clear_failure(&self, provider: ProviderId) {
         self.failures.lock().unwrap().remove(&provider);
     }
@@ -393,6 +510,22 @@ impl ConnectorsContext {
     }
 }
 
+/// Ends the "Refreshing" state of a provider when dropped.
+pub(crate) struct RefreshGuard {
+    refreshing: Arc<Mutex<HashMap<ProviderId, usize>>>,
+    provider: ProviderId,
+}
+
+impl Drop for RefreshGuard {
+    fn drop(&mut self) {
+        if let Ok(mut refreshing) = self.refreshing.lock() {
+            if let Some(n) = refreshing.get_mut(&self.provider) {
+                *n = n.saturating_sub(1);
+            }
+        }
+    }
+}
+
 pub fn unavailable_error(provider: ProviderId) -> AppError {
     AppError::configuration(unavailable_reason(provider))
 }
@@ -402,16 +535,28 @@ pub fn unavailable_error(provider: ProviderId) -> AppError {
 /// is a development build's diagnostic, saying how to add the registration.
 /// LinkedIn is optional (it needs LinkedIn's approval); XING has no sign-in.
 pub fn unavailable_reason(provider: ProviderId) -> String {
-    let setting = match provider {
-        ProviderId::Google => build_setting::GOOGLE,
-        ProviderId::Microsoft => build_setting::MICROSOFT,
-        ProviderId::Linkedin => build_setting::LINKEDIN,
+    unavailable_reason_at(provider, None)
+}
+
+/// [`unavailable_reason`], naming the run-time configuration file a
+/// development build also reads.
+pub fn unavailable_reason_at(provider: ProviderId, runtime_config: Option<&Path>) -> String {
+    let (setting, key) = match provider {
+        ProviderId::Google => (build_setting::GOOGLE, "[google] desktop_client_id"),
+        ProviderId::Microsoft => (build_setting::MICROSOFT, "[microsoft] public_client_id"),
+        ProviderId::Linkedin => (build_setting::LINKEDIN, "[linkedin] client_id"),
         ProviderId::Xing => return xing::UNAVAILABLE.to_string(),
     };
     if cfg!(debug_assertions) {
+        let runtime = match runtime_config {
+            Some(path) => format!(" or put {key} in {}", path.display()),
+            None => String::new(),
+        };
         format!(
-            "Development build without ReMa's {} app registration: add it to \
-             src-tauri/connectors.toml or set {setting} (see docs/connectors/registration.md).",
+            "Development build without ReMa's {} public app configuration ({key}): add it to \
+             src-tauri/connectors.toml, set {setting} when building{runtime} (see \
+             docs/connectors/registration.md). This is a developer setting: users of a release \
+             never enter it.",
             provider.name()
         )
     } else if provider == ProviderId::Linkedin {
@@ -578,6 +723,14 @@ async fn profile(state: &AppState, provider: ProviderId, tokens: &TokenResponse)
     profile
 }
 
+/// The connectors of a provider (its capabilities).
+pub fn connectors_of(provider: ProviderId) -> Vec<ConnectorId> {
+    ConnectorId::ALL
+        .into_iter()
+        .filter(|id| id.provider() == provider)
+        .collect()
+}
+
 /// Runs a sign-in for a connector: the default browser shows the provider's
 /// own account chooser and consent screen; ReMa waits on the loopback
 /// redirect (bound before the browser opens), checks `state`, exchanges the
@@ -593,11 +746,6 @@ pub async fn connect(
     open_browser: impl FnOnce(&str) -> AppResult<()>,
 ) -> AppResult<()> {
     let provider = id.provider();
-    let name = provider.name();
-    let app = state
-        .connectors
-        .app(provider)
-        .ok_or_else(|| unavailable_error(provider))?;
     // No incremental authorization for installed apps: ask for the union of
     // this connector and the provider's other enabled connectors.
     let mut wanted = state
@@ -607,6 +755,36 @@ pub async fn connect(
     if !wanted.contains(&id) {
         wanted.push(id);
     }
+    connect_wanted(state, id, wanted, open_browser).await
+}
+
+/// Connects a provider account with every capability ReMa offers for it
+/// (Settings → Connectors → Google → Connect): one sign-in, one consent
+/// screen. Connectors already added are kept; the others are added.
+pub async fn connect_provider(
+    state: &AppState,
+    provider: ProviderId,
+    open_browser: impl FnOnce(&str) -> AppResult<()>,
+) -> AppResult<()> {
+    let wanted = connectors_of(provider);
+    let Some(clicked) = wanted.first().copied() else {
+        return Err(unavailable_error(provider));
+    };
+    connect_wanted(state, clicked, wanted, open_browser).await
+}
+
+async fn connect_wanted(
+    state: &AppState,
+    id: ConnectorId,
+    wanted: Vec<ConnectorId>,
+    open_browser: impl FnOnce(&str) -> AppResult<()>,
+) -> AppResult<()> {
+    let provider = id.provider();
+    let name = provider.name();
+    let app = state
+        .connectors
+        .app(provider)
+        .ok_or_else(|| AppError::configuration(state.connectors.unavailable_reason(provider)))?;
     let scopes = provider_scopes(provider, &wanted);
     let pkce = Pkce::new()?;
     let csrf = oauth::random_token(24)?;
@@ -940,12 +1118,15 @@ async fn finish_sign_in(
                     status_cause: None,
                     connected_at: now,
                     updated_at: now,
+                    last_refreshed_at: None,
                 },
             )?;
+            let mut added = Vec::new();
             for id in connectors {
                 let record = repo::connector(&tx, *id)?;
                 if !record.enabled {
                     repo::set_enabled(&tx, *id, true, now)?;
+                    added.extend(chat_connector(*id));
                 } else {
                     // Reconnected: clear the old error. Connecting reads no
                     // mail (only "Job Mail & Interview Sync" does), so no sync
@@ -953,10 +1134,60 @@ async fn finish_sign_in(
                     repo::clear_error(&tx, *id)?;
                 }
             }
+            // Chats that chose their own connectors see a new account only
+            // when the user asked for that (privacy-conscious default: off).
+            // Chats using "all connected" see it either way.
+            if !added.is_empty() && preferences_in(&tx)?.new_accounts_in_chats {
+                crate::db::conversations::add_connectors_to_chosen(&tx, &added)?;
+            }
             tx.commit()?;
             Ok(())
         })
         .map_err(internal)?;
+    Ok(())
+}
+
+/// The chat toggle of a connector (networks have none).
+pub fn chat_connector(id: ConnectorId) -> Option<ChatConnector> {
+    match id {
+        ConnectorId::Gmail => Some(ChatConnector::Gmail),
+        ConnectorId::GoogleCalendar => Some(ChatConnector::GoogleCalendar),
+        ConnectorId::OutlookMail => Some(ChatConnector::OutlookMail),
+        ConnectorId::OutlookCalendar => Some(ChatConnector::OutlookCalendar),
+        ConnectorId::Linkedin | ConnectorId::Xing => None,
+    }
+}
+
+const PREFERENCE_NEW_ACCOUNTS_IN_CHATS: &str = "connectors.new_accounts_in_chats";
+
+fn preferences_in(conn: &rusqlite::Connection) -> AppResult<ConnectionPreferences> {
+    Ok(ConnectionPreferences {
+        new_accounts_in_chats: crate::db::providers::get_setting(
+            conn,
+            PREFERENCE_NEW_ACCOUNTS_IN_CHATS,
+        )?
+        .is_some_and(|v| v == "1"),
+    })
+}
+
+/// How connections meet chats (see [`ConnectionPreferences`]).
+pub fn preferences(state: &AppState) -> AppResult<ConnectionPreferences> {
+    state.db.call(|c| preferences_in(c))
+}
+
+pub fn set_preferences(state: &AppState, preferences: ConnectionPreferences) -> AppResult<()> {
+    state.db.call(|c| {
+        crate::db::providers::set_setting(
+            c,
+            PREFERENCE_NEW_ACCOUNTS_IN_CHATS,
+            if preferences.new_accounts_in_chats {
+                "1"
+            } else {
+                "0"
+            },
+        )
+    })?;
+    state.events.connectors_changed();
     Ok(())
 }
 
@@ -994,6 +1225,34 @@ pub async fn disconnect(state: &AppState, id: ConnectorId) -> AppResult<()> {
         }
     }
     state.events.connectors_changed();
+    Ok(())
+}
+
+/// Disconnects a provider account entirely (Settings → Connectors → Google
+/// → Disconnect): every connector of the provider is removed, ReMa revokes
+/// its access where the provider allows it and deletes the stored grant.
+/// Application history is kept.
+pub async fn disconnect_provider(state: &AppState, provider: ProviderId) -> AppResult<()> {
+    state.connectors.cancel_sign_in(provider);
+    let enabled = state
+        .db
+        .call(|c| repo::connectors(c))
+        .map(|records| enabled_of(&records, provider))?;
+    for id in enabled {
+        disconnect(state, id).await?;
+    }
+    // An account left without connectors (or with none enabled) still holds
+    // a grant: sign it out too.
+    if state.db.call(|c| repo::account(c, provider))?.is_some() {
+        state.connectors.clear_failure(provider);
+        tokens::revoke_connection(state, provider).await?;
+        state.db.call(|c| repo::delete_account(c, provider))?;
+        diag(format!(
+            "[connector] provider={} state=disconnected",
+            provider.as_str()
+        ));
+        state.events.connectors_changed();
+    }
     Ok(())
 }
 
@@ -1054,7 +1313,7 @@ pub async fn overview(state: &AppState) -> AppResult<ConnectorsOverview> {
     })?;
     let mut grants: HashMap<ProviderId, Result<bool, String>> = HashMap::new();
     let mut connectors = Vec::new();
-    for record in records {
+    for record in &records {
         let provider = record.id.provider();
         let account = accounts[provider.index()].clone();
         let has_token = if record.enabled && account.is_some() {
@@ -1077,7 +1336,7 @@ pub async fn overview(state: &AppState) -> AppResult<ConnectorsOverview> {
             Ok(false)
         };
         let mut status = status_of(
-            &record,
+            record,
             account.as_ref(),
             has_token,
             state.connectors.signing_in(provider),
@@ -1085,6 +1344,9 @@ pub async fn overview(state: &AppState) -> AppResult<ConnectorsOverview> {
             state.connectors.app(provider).is_some(),
             state.connectors.failure(record.id),
         );
+        if status.state == ConnectorState::Unavailable {
+            status.message = Some(state.connectors.unavailable_reason(provider));
+        }
         explain_sign_in(
             &mut status,
             account.as_ref(),
@@ -1092,10 +1354,28 @@ pub async fn overview(state: &AppState) -> AppResult<ConnectorsOverview> {
         );
         connectors.push(status);
     }
+    let mut views = Vec::new();
+    for provider in ProviderId::ALL {
+        views.push(account_of(&AccountInput {
+            provider,
+            connectors: &connectors,
+            account: accounts[provider.index()].as_ref(),
+            has_token: grants.get(&provider).cloned().unwrap_or(Ok(false)),
+            signing_in: state.connectors.signing_in(provider).is_some(),
+            refreshing: state.connectors.is_refreshing(provider),
+            available: state.connectors.app(provider).is_some(),
+            failure: state.connectors.provider_failure(provider),
+            google_in_testing: state.connectors.google_in_testing(),
+            unavailable_reason: &state.connectors.unavailable_reason(provider),
+        }));
+    }
+    let accounts = views;
     Ok(ConnectorsOverview {
         connectors,
+        accounts,
         background: crate::services::background::settings(state)?,
         mail_processing: mail_processing(state)?,
+        preferences: preferences(state)?,
     })
 }
 
@@ -1303,6 +1583,190 @@ pub fn status_of(
     }
 }
 
+/// What the account card of a provider is derived from.
+pub struct AccountInput<'a> {
+    pub provider: ProviderId,
+    /// Every connector card (those of other providers are ignored).
+    pub connectors: &'a [ConnectorStatus],
+    pub account: Option<&'a AccountRecord>,
+    /// Whether a grant is stored (Err: the keychain did not answer).
+    pub has_token: Result<bool, String>,
+    pub signing_in: bool,
+    pub refreshing: bool,
+    /// This build has the provider's public app configuration.
+    pub available: bool,
+    /// The last failed sign-in of the provider.
+    pub failure: Option<(ConnectorId, Failure)>,
+    pub google_in_testing: Option<bool>,
+    pub unavailable_reason: &'a str,
+}
+
+/// The connection state a failed sign-in leaves an account in.
+pub fn state_of_failure(code: ConnectorErrorCode) -> ConnectionState {
+    match code {
+        ConnectorErrorCode::ProviderAdminPolicy => ConnectionState::AdminApprovalRequired,
+        ConnectorErrorCode::ScopeNotGranted => ConnectionState::PermissionDenied,
+        ConnectorErrorCode::NetworkError | ConnectorErrorCode::CredentialStoreUnavailable => {
+            ConnectionState::Offline
+        }
+        ConnectorErrorCode::ReauthRequired => ConnectionState::ReauthRequired,
+        _ => ConnectionState::ProviderError,
+    }
+}
+
+/// The account card of a provider: the account-level state machine over
+/// its connector cards.
+pub fn account_of(input: &AccountInput<'_>) -> ProviderAccount {
+    let provider = input.provider;
+    let cards: Vec<&ConnectorStatus> = input
+        .connectors
+        .iter()
+        .filter(|c| c.provider == provider)
+        .collect();
+    let added: Vec<&ConnectorStatus> = cards
+        .iter()
+        .copied()
+        .filter(|c| c.enabled && c.state != ConnectorState::Disconnected)
+        .collect();
+    let connected_account = input.account.filter(|_| !added.is_empty());
+    let capabilities = cards
+        .iter()
+        .map(|c| CapabilityView {
+            connector: c.id,
+            name: c.name.clone(),
+            granted: c.enabled
+                && !matches!(
+                    c.state,
+                    ConnectorState::Disconnected
+                        | ConnectorState::Unavailable
+                        | ConnectorState::PermissionMissing
+                        | ConnectorState::ReauthRequired
+                        | ConnectorState::Connecting
+                ),
+            state: c.state,
+        })
+        .collect();
+    let keychain_message = "ReMa could not read its sign-in from your system keychain. Unlock \
+                            the keychain, or restart ReMa; the connection itself is unchanged.";
+    let mut error_code = None;
+    let (state, message, detail) = if !input.available {
+        (
+            ConnectionState::Unavailable,
+            Some(input.unavailable_reason.to_string()),
+            None,
+        )
+    } else if input.signing_in {
+        (
+            ConnectionState::Connecting,
+            Some(format!(
+                "Finish signing in with {} in your browser.",
+                provider.name()
+            )),
+            None,
+        )
+    } else if let Some(account) = connected_account {
+        match &input.has_token {
+            Err(reason) => {
+                error_code = Some(ConnectorErrorCode::CredentialStoreUnavailable);
+                (
+                    ConnectionState::Offline,
+                    Some(keychain_message.to_string()),
+                    Some(reason.clone()),
+                )
+            }
+            Ok(has_token) if account.status == AccountStatus::ReauthRequired || !has_token => {
+                error_code = Some(ConnectorErrorCode::ReauthRequired);
+                (
+                    ConnectionState::ReauthRequired,
+                    Some(failure::reauth_message(
+                        provider,
+                        account.status_cause,
+                        input.google_in_testing,
+                    )),
+                    account.status_reason.clone(),
+                )
+            }
+            Ok(_) if input.refreshing => (ConnectionState::Refreshing, None, None),
+            Ok(_) => {
+                let denied: Vec<&str> = added
+                    .iter()
+                    .filter(|c| c.state == ConnectorState::PermissionMissing)
+                    .map(|c| c.name.as_str())
+                    .collect();
+                if !denied.is_empty() {
+                    error_code = Some(ConnectorErrorCode::ScopeNotGranted);
+                    (
+                        ConnectionState::PermissionDenied,
+                        Some(format!(
+                            "{} did not grant ReMa permission to use {}. Reconnect and allow \
+                             access on {}'s screen.",
+                            provider.name(),
+                            denied.join(" and "),
+                            provider.name()
+                        )),
+                        None,
+                    )
+                } else {
+                    match &input.failure {
+                        // A reconnect that failed leaves the working
+                        // connection as it was, and says why.
+                        Some((_, failure)) => {
+                            error_code = Some(failure.code);
+                            (
+                                ConnectionState::Connected,
+                                Some(failure.message.clone()),
+                                failure.detail.clone(),
+                            )
+                        }
+                        None => (ConnectionState::Connected, None, None),
+                    }
+                }
+            }
+        }
+    } else {
+        match &input.failure {
+            Some((_, failure)) => {
+                error_code = Some(failure.code);
+                (
+                    state_of_failure(failure.code),
+                    Some(failure.message.clone()),
+                    failure.detail.clone(),
+                )
+            }
+            None => (ConnectionState::Disconnected, None, None),
+        }
+    };
+    let sign_in_ends_at = connected_account
+        .filter(|a| {
+            provider == ProviderId::Google
+                && input.google_in_testing == Some(true)
+                && a.status == AccountStatus::Connected
+                && matches!(
+                    state,
+                    ConnectionState::Connected | ConnectionState::Refreshing
+                )
+        })
+        .map(|a| a.connected_at + failure::GOOGLE_TESTING_GRANT_MS);
+    ProviderAccount {
+        provider,
+        name: provider.name().into(),
+        state,
+        connection_id: connected_account
+            .and_then(|a| a.account_id.as_deref())
+            .map(|id| format!("{}:{id}", provider.as_str())),
+        email: connected_account.and_then(|a| a.email.clone()),
+        display_name: connected_account.and_then(|a| a.display_name.clone()),
+        capabilities,
+        message,
+        detail,
+        error_code,
+        connected_at: connected_account.map(|a| a.connected_at),
+        last_refreshed_at: connected_account.and_then(|a| a.last_refreshed_at),
+        sign_in_ends_at,
+        available: input.available,
+    }
+}
+
 /// Says why a connection must be renewed (the cause the provider gave, and
 /// whose setting it is), and, while this build says ReMa's Google app is in
 /// Testing, about when Google will end a sign-in (`sign_in_ends_at`: an
@@ -1334,5 +1798,7 @@ pub fn explain_sign_in(
     }
 }
 
+#[cfg(test)]
+mod live_tests;
 #[cfg(test)]
 mod tests;

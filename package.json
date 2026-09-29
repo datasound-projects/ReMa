@@ -17,6 +17,9 @@
     "tauri": "tauri",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
     "bindings": "cargo test --manifest-path src-tauri/Cargo.toml --lib ipc::tests::export -- --ignored",
+    "test:live:google": "cargo test --manifest-path src-tauri/Cargo.toml --lib connectors::live_tests::google -- --ignored --nocapture --test-threads 1",
+    "test:live:microsoft": "cargo test --manifest-path src-tauri/Cargo.toml --lib connectors::live_tests::microsoft -- --ignored --nocapture --test-threads 1",
+    "test:live:mcp": "cargo test --manifest-path src-tauri/Cargo.toml --lib mcp::live_tests -- --ignored --nocapture --test-threads 1",
     "runtimes": "node scripts/runtimes/fetch.mjs",
     "build:app": "tauri build --config src-tauri/tauri.runtimes.conf.json",
     "brand": "node scripts/brand/build-brand.mjs"

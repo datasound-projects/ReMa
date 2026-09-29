@@ -50,6 +50,17 @@ Pushing a Google client secret into a public repository can trip GitHub's
 secret scanning even though Google treats it as non-confidential; keeping
 it in the Actions secret avoids that.
 
+**Development builds can also read the public configuration at run time**
+from `connectors.toml` in ReMa's data folder (macOS:
+`~/Library/Application Support/cloud.datasound.rema/connectors.toml`; Linux:
+`~/.local/share/cloud.datasound.rema/connectors.toml`), with the same tables
+and keys as `src-tauri/connectors.toml`. It completes what the build lacks
+and never overrides it; a malformed file is reported by key in the log and
+ignored. Release builds carry every registration already and read no file.
+A development build without a registration says so on the card, naming the
+key, the build variable and the file (`connectors::unavailable_reason_at`);
+that message is for developers, users of a release never see it.
+
 **Development only** (ignored by release builds): `REMA_DEV_GOOGLE_CLIENT_ID`,
 `REMA_DEV_GOOGLE_CLIENT_SECRET`, `REMA_DEV_MICROSOFT_CLIENT_ID`,
 `REMA_DEV_LINKEDIN_CLIENT_ID` and `REMA_DEV_LINKEDIN_APPROVED_SCOPES` override

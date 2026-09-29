@@ -33,7 +33,8 @@ use crate::{
 /// Characters of text sent to the model per part.
 const MAX_INPUT: usize = 30_000;
 
-pub const RULES: &str = "You are the writing assistant of ReMa's Portfolio Studio, helping with a CV or a \
+pub const RULES: &str =
+    "You are the writing assistant of ReMa's Portfolio Studio, helping with a CV or a \
 cover letter. Rules:\n\
 - Never invent employers, job titles, qualifications, dates, responsibilities, figures, \
 percentages or achievements. Use only facts in the material you are given.\n\
@@ -135,7 +136,11 @@ pub fn section_kind(name: &str) -> SectionKind {
 
 pub fn from_raw_entry(e: RawEntry, keep_id: bool) -> PortfolioEntry {
     PortfolioEntry {
-        id: if keep_id && !e.id.is_empty() { e.id } else { portfolio::new_id() },
+        id: if keep_id && !e.id.is_empty() {
+            e.id
+        } else {
+            portfolio::new_id()
+        },
         title: e.title,
         subtitle: e.subtitle,
         location: e.location,
@@ -150,7 +155,11 @@ pub fn from_raw_entry(e: RawEntry, keep_id: bool) -> PortfolioEntry {
 pub fn from_raw_section(s: RawSection, keep_ids: bool) -> PortfolioSection {
     let kind = section_kind(&s.kind);
     PortfolioSection {
-        id: if keep_ids && !s.id.is_empty() { s.id } else { portfolio::new_id() },
+        id: if keep_ids && !s.id.is_empty() {
+            s.id
+        } else {
+            portfolio::new_id()
+        },
         kind,
         title: if s.title.trim().is_empty() {
             kind.default_title().into()
@@ -362,7 +371,10 @@ fn section_json(content: &PortfolioContent, id: &str) -> AppResult<String> {
 }
 
 /// The facts the model may use, as text, for the fact check afterwards.
-async fn source_material(state: &AppState, request: &AiRequest) -> AppResult<(String, Vec<String>)> {
+async fn source_material(
+    state: &AppState,
+    request: &AiRequest,
+) -> AppResult<(String, Vec<String>)> {
     let mut notes = Vec::new();
     let mut material = String::new();
     if request.action == AiAction::Populate {
@@ -377,7 +389,10 @@ async fn source_material(state: &AppState, request: &AiRequest) -> AppResult<(St
                 })?;
                 material = portfolio::plain_text(&content);
                 if material.trim().is_empty() {
-                    notes.push("Your Custom Profile is empty, so there is nothing to fill in from it.".into());
+                    notes.push(
+                        "Your Custom Profile is empty, so there is nothing to fill in from it."
+                            .into(),
+                    );
                 }
             }
             AiSource::Document => {
@@ -409,7 +424,9 @@ pub async fn assist(state: &AppState, request: AiRequest) -> AppResult<AiProposa
         return Err(AppError::validation("Select some text first."));
     }
     if request.action == AiAction::Tailor && request.job_text.trim().is_empty() {
-        return Err(AppError::validation("Paste or choose the job posting first."));
+        return Err(AppError::validation(
+            "Paste or choose the job posting first.",
+        ));
     }
     let model = default_model(state)?;
     let (material, mut notes) = source_material(state, &request).await?;
@@ -467,7 +484,12 @@ pub async fn assist(state: &AppState, request: AiRequest) -> AppResult<AiProposa
     let answer = ask(state, &model, RULES, prompt, 8_000).await?;
     let raw: RawAnswer = serde_json::from_str(json_object(&answer)?)
         .map_err(|_| AppError::provider("the answer was not in the expected format"))?;
-    notes.extend(raw.notes.into_iter().filter(|n| !n.trim().is_empty()).take(20));
+    notes.extend(
+        raw.notes
+            .into_iter()
+            .filter(|n| !n.trim().is_empty())
+            .take(20),
+    );
 
     // Everything the proposal may legitimately contain.
     let mut sources = vec![document_text, request.selection.clone(), material];
@@ -478,7 +500,10 @@ pub async fn assist(state: &AppState, request: AiRequest) -> AppResult<AiProposa
         // Translated numbers are the same numbers; dates may be reformatted.
         sources.push(String::new());
     }
-    let known = sources.iter().flat_map(|s| figures(s)).collect::<HashSet<_>>();
+    let known = sources
+        .iter()
+        .flat_map(|s| figures(s))
+        .collect::<HashSet<_>>();
 
     let mut proposal = AiProposal {
         scope: request.scope,
@@ -515,10 +540,9 @@ pub async fn assist(state: &AppState, request: AiRequest) -> AppResult<AiProposa
                     .warnings
                     .extend(new_entries(&original.entries, &section.entries));
             }
-            proposal.warnings.extend(unknown_figures(
-                &portfolio::section_text(&section),
-                &known,
-            ));
+            proposal
+                .warnings
+                .extend(unknown_figures(&portfolio::section_text(&section), &known));
             proposal.section = Some(section);
         }
         AiScope::Document => match request.kind {
@@ -540,10 +564,9 @@ pub async fn assist(state: &AppState, request: AiRequest) -> AppResult<AiProposa
                     .flat_map(|s| s.entries.iter().cloned())
                     .collect();
                 proposal.warnings.extend(new_entries_ref(&before, &after));
-                proposal.warnings.extend(unknown_figures(
-                    &portfolio::plain_text(&content),
-                    &known,
-                ));
+                proposal
+                    .warnings
+                    .extend(unknown_figures(&portfolio::plain_text(&content), &known));
                 proposal.content = Some(content);
             }
             PortfolioKind::CoverLetter => {
@@ -551,7 +574,9 @@ pub async fn assist(state: &AppState, request: AiRequest) -> AppResult<AiProposa
                     .letter
                     .ok_or_else(|| AppError::provider("the model returned no letter"))?;
                 let letter = from_raw_letter(raw);
-                proposal.warnings.extend(unknown_figures(&letter.body, &known));
+                proposal
+                    .warnings
+                    .extend(unknown_figures(&letter.body, &known));
                 proposal.letter = Some(letter);
             }
         },
@@ -626,7 +651,11 @@ pub fn unknown_figures(text: &str, known: &HashSet<String>) -> Vec<String> {
 }
 
 fn entry_key(e: &PortfolioEntry) -> String {
-    format!("{}|{}", e.title.trim().to_lowercase(), e.subtitle.trim().to_lowercase())
+    format!(
+        "{}|{}",
+        e.title.trim().to_lowercase(),
+        e.subtitle.trim().to_lowercase()
+    )
 }
 
 /// Entries in the proposal that were not in the original section.
@@ -647,7 +676,9 @@ fn new_entries_ref(before: &[&PortfolioEntry], after: &[PortfolioEntry]) -> Vec<
                 .filter(|s| !s.is_empty())
                 .collect::<Vec<_>>()
                 .join(" at ");
-            format!("“{name}” is a new entry that was not in your document. Check it before accepting.")
+            format!(
+                "“{name}” is a new entry that was not in your document. Check it before accepting."
+            )
         })
         .collect()
 }
@@ -708,8 +739,14 @@ mod tests {
 
     #[test]
     fn figures_are_found_with_separators() {
-        assert_eq!(figures("Saved 1,200 hours (35%) in 2021."), ["1200", "35", "2021"]);
-        assert!(figures("one 5 x").is_empty(), "single digits are not figures");
+        assert_eq!(
+            figures("Saved 1,200 hours (35%) in 2021."),
+            ["1200", "35", "2021"]
+        );
+        assert!(
+            figures("one 5 x").is_empty(),
+            "single digits are not figures"
+        );
     }
 
     #[tokio::test]
@@ -718,9 +755,12 @@ mod tests {
             r#"{"text": "Cut warehouse costs by 35%, saving $900k a year", "notes": ["Add the team size"]}"#,
         )
         .await;
-        let proposal = assist(&state, request(&state, AiScope::Selection, AiAction::Improve))
-            .await
-            .unwrap();
+        let proposal = assist(
+            &state,
+            request(&state, AiScope::Selection, AiAction::Improve),
+        )
+        .await
+        .unwrap();
         assert_eq!(proposal.model, "model-a");
         assert_eq!(proposal.notes, ["Add the team size"]);
         assert!(proposal.text.unwrap().contains("35%"));

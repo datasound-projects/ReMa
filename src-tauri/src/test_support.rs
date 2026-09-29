@@ -17,7 +17,30 @@ pub struct Recorded {
     pub body: String,
 }
 
-type Handler = dyn Fn(&Recorded) -> Option<(u16, String)> + Send + Sync;
+type Handler = dyn Fn(&Recorded) -> Option<Reply> + Send + Sync;
+
+/// A scripted answer: status, extra headers and body.
+#[derive(Debug, Clone)]
+pub struct Reply {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: String,
+}
+
+impl Reply {
+    pub fn new(status: u16, body: impl Into<String>) -> Self {
+        Self {
+            status,
+            headers: Vec::new(),
+            body: body.into(),
+        }
+    }
+
+    pub fn header(mut self, name: &str, value: &str) -> Self {
+        self.headers.push((name.to_string(), value.to_string()));
+        self
+    }
+}
 
 /// Serves every request with the first handler that returns a response.
 pub struct MockServer {
@@ -28,6 +51,16 @@ pub struct MockServer {
 impl MockServer {
     pub async fn start(
         handler: impl Fn(&Recorded) -> Option<(u16, String)> + Send + Sync + 'static,
+    ) -> Self {
+        Self::start_with_headers(move |request| {
+            handler(request).map(|(status, body)| Reply::new(status, body))
+        })
+        .await
+    }
+
+    /// [`start`](Self::start) for handlers that also set response headers.
+    pub async fn start_with_headers(
+        handler: impl Fn(&Recorded) -> Option<Reply> + Send + Sync + 'static,
     ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base_url = format!("http://{}", listener.local_addr().unwrap());
@@ -82,11 +115,19 @@ impl MockServer {
                     // Handlers may block (e.g. to simulate a slow service);
                     // keep that off the runtime's worker threads.
                     let request = recorded.clone();
-                    let (status, body) = tokio::task::spawn_blocking(move || handler(&request))
+                    let Reply {
+                        status,
+                        headers,
+                        body,
+                    } = tokio::task::spawn_blocking(move || handler(&request))
                         .await
                         .unwrap()
-                        .unwrap_or((404, "{}".into()));
+                        .unwrap_or(Reply::new(404, "{}"));
                     log.lock().unwrap().push(recorded);
+                    let extra: String = headers
+                        .iter()
+                        .map(|(name, value)| format!("{name}: {value}\r\n"))
+                        .collect();
                     // A redirect's body is its target.
                     let (location, body) = if (300..400).contains(&status) {
                         (format!("Location: {body}\r\n"), String::new())
@@ -102,7 +143,7 @@ impl MockServer {
                         "application/json"
                     };
                     let response = format!(
-                        "HTTP/1.1 {status} X\r\n{location}Content-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        "HTTP/1.1 {status} X\r\n{location}{extra}Content-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len()
                     );
                     let _ = socket.write_all(response.as_bytes()).await;

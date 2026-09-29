@@ -148,6 +148,19 @@ pub fn update(conn: &Connection, id: i64, config: &McpConfig, now: i64) -> AppRe
     Ok(())
 }
 
+/// Switches a server's authentication (a server added by URL that turned
+/// out to require sign-in becomes an OAuth server).
+pub fn set_auth(conn: &Connection, id: i64, auth: McpAuth, now: i64) -> AppResult<()> {
+    let updated = conn.execute(
+        "UPDATE mcp_servers SET auth = ?2, updated_at = ?3 WHERE id = ?1",
+        params![id, auth.as_str(), now],
+    )?;
+    if updated == 0 {
+        return Err(AppError::not_found("MCP server not found"));
+    }
+    Ok(())
+}
+
 pub fn set_enabled(conn: &Connection, id: i64, enabled: bool, now: i64) -> AppResult<()> {
     let updated = conn.execute(
         "UPDATE mcp_servers SET enabled = ?2, updated_at = ?3 WHERE id = ?1",

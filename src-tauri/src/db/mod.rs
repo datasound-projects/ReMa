@@ -47,6 +47,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0017_message_context.sql"),
     include_str!("migrations/0018_mcp_sse_transport.sql"),
     include_str!("migrations/0019_portfolio_documents.sql"),
+    include_str!("migrations/0020_connection_runtime.sql"),
 ];
 
 #[derive(Clone)]

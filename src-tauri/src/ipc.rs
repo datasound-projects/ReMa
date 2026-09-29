@@ -64,6 +64,9 @@ pub fn builder() -> Builder<tauri::Wry> {
             // Connectors (Gmail, Google Calendar, Outlook Mail, Outlook Calendar)
             commands::connectors::get_connectors,
             commands::connectors::connect_connector,
+            commands::connectors::connect_provider_account,
+            commands::connectors::disconnect_provider_account,
+            commands::connectors::set_connection_preferences,
             commands::connectors::cancel_connector_sign_in,
             commands::connectors::disconnect_connector,
             commands::connectors::set_background_settings,

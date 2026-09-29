@@ -18,6 +18,8 @@ tauri-build = { version = "2", features = [] }
 toml = "1"
 
 [dependencies]
+# Public OAuth client configuration a development build reads at run time.
+toml = "1"
 # `unstable`: child webviews for the built-in browser workspace.
 tauri = { version = "2", features = ["unstable", "tray-icon"] }
 tauri-plugin-opener = "2"
@@ -83,8 +85,8 @@ gtk = "0.18"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util"] }
-# Checks the committed connectors.toml.
-toml = "1"
+# Opens the system browser in the interactive live sign-in tests.
+open = "5"
 
 # Small, fast release binaries.
 [profile.release]

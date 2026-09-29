@@ -1,4 +1,4 @@
-import type { ConnectorId } from '../../services/connectorService';
+import type { ConnectorId, ProviderId } from '../../services/connectorService';
 
 interface LogoProps {
   size?: number;
@@ -106,6 +106,44 @@ function XingLogo({ size = 32 }: LogoProps) {
       <path fill="#fff" d="M19.4 6.8h3.7l-5.6 9.9 3.6 6.5h-3.7l-3.6-6.5z" />
     </svg>
   );
+}
+
+/** Google's "G" mark. */
+function GoogleLogo({ size = 32 }: LogoProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 32 32" aria-hidden="true">
+      <path fill="#4285f4" d="M28.6 16.3c0-.9-.1-1.8-.2-2.6H16v5h7.1a6.1 6.1 0 0 1-2.6 4v3.3h4.2c2.5-2.3 3.9-5.7 3.9-9.7z" />
+      <path fill="#34a853" d="M16 29c3.5 0 6.5-1.2 8.7-3.1l-4.2-3.3c-1.2.8-2.7 1.3-4.5 1.3-3.4 0-6.3-2.3-7.4-5.4H4.3v3.4A13 13 0 0 0 16 29z" />
+      <path fill="#fbbc04" d="M8.6 18.5a7.8 7.8 0 0 1 0-5V10H4.3a13 13 0 0 0 0 11.7l4.3-3.3z" />
+      <path fill="#ea4335" d="M16 8.2c1.9 0 3.6.7 5 1.9l3.7-3.7A13 13 0 0 0 4.3 10l4.3 3.4c1-3 3.9-5.3 7.4-5.3z" />
+    </svg>
+  );
+}
+
+/** Microsoft's four squares. */
+function MicrosoftLogo({ size = 32 }: LogoProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 32 32" aria-hidden="true">
+      <rect x="4" y="4" width="11" height="11" fill="#f25022" />
+      <rect x="17" y="4" width="11" height="11" fill="#7fba00" />
+      <rect x="4" y="17" width="11" height="11" fill="#00a4ef" />
+      <rect x="17" y="17" width="11" height="11" fill="#ffb900" />
+    </svg>
+  );
+}
+
+/** The mark of an account provider (Settings → Connectors account cards). */
+export function ProviderLogo({ id, size }: { id: ProviderId; size?: number }) {
+  switch (id) {
+    case 'google':
+      return <GoogleLogo size={size} />;
+    case 'microsoft':
+      return <MicrosoftLogo size={size} />;
+    case 'linkedin':
+      return <LinkedinLogo size={size} />;
+    case 'xing':
+      return <XingLogo size={size} />;
+  }
 }
 
 /** The official product icon of a connector. */

@@ -44,6 +44,22 @@ export const commands = {
 	 *  was cancelled or timed out).
 	 */
 	connectConnector: (id: ConnectorId) => __TAURI_INVOKE<ConnectorsOverview>("connect_connector", { id }),
+	/**
+	 *  Connects a provider account with every capability ReMa offers for it
+	 *  (Settings → Connectors → Google → Connect): one browser sign-in.
+	 */
+	connectProviderAccount: (provider: ProviderId) => __TAURI_INVOKE<ConnectorsOverview>("connect_provider_account", { provider }),
+	/**
+	 *  Signs a provider account out entirely: every connector of the provider
+	 *  is removed, access is revoked where the provider allows it and the
+	 *  stored grant is deleted. Application history is kept.
+	 */
+	disconnectProviderAccount: (provider: ProviderId) => __TAURI_INVOKE<ConnectorsOverview>("disconnect_provider_account", { provider }),
+	/**
+	 *  How connections meet chats (new accounts and chats with their own
+	 *  connector choice).
+	 */
+	setConnectionPreferences: (preferences: ConnectionPreferences) => __TAURI_INVOKE<ConnectorsOverview>("set_connection_preferences", { preferences }),
 	cancelConnectorSignIn: (provider: ProviderId) => __TAURI_INVOKE<null>("cancel_connector_sign_in", { provider }),
 	/**
 	 *  Stops the connector's sync; the last connector of an account also signs
@@ -971,6 +987,22 @@ export type CapabilityItem = {
 	reason: string,
 };
 
+/**
+ *  One capability of a provider account as the account card lists it
+ *  ("✓ Gmail"): a connector of the provider.
+ */
+export type CapabilityView = {
+	connector: ConnectorId,
+	name: string,
+	/**
+	 *  The user added this connector and the provider granted what it
+	 *  needs.
+	 */
+	granted: boolean,
+	/**  The connector's own state (sync, permissions). */
+	state: ConnectorState,
+};
+
 /**  Settings → Career Search. */
 export type CareerSearchStatus = {
 	/**  Always true: career search needs no setup. */
@@ -1213,6 +1245,44 @@ export type ConnectionMethod =
  */
 "claude_console";
 
+/**  Settings that decide how connections meet chats. */
+export type ConnectionPreferences = {
+	/**
+	 *  A newly connected account is also added to chats that chose their
+	 *  own connectors (off: only chats using "all connected" see it).
+	 */
+	newAccountsInChats: boolean,
+};
+
+/**
+ *  The state of one provider account's connection (the account-level
+ *  state machine behind every connector of that provider).
+ */
+export type ConnectionState = 
+/**  No account is connected. */
+"disconnected" | 
+/**  Waiting for the browser sign-in. */
+"connecting" | 
+/**  Connected; requests get a valid access token. */
+"connected" | 
+/**  A renewal of the access token is in flight. */
+"refreshing" | 
+/**  The provider ended the grant; the user must sign in again. */
+"reauth_required" | 
+/**  Connected, but a permission a connector needs was not granted. */
+"permission_denied" | 
+/**  An organization's policy requires an administrator's approval. */
+"admin_approval_required" | 
+/**
+ *  The provider rejected ReMa (configuration, API not enabled, an
+ *  unverified app) or the last sign-in failed for another reason.
+ */
+"provider_error" | 
+/**  The provider could not be reached (or the keychain did not answer). */
+"offline" | 
+/**  This build of ReMa has no public app configuration for the provider. */
+"unavailable";
+
 /**  Whether a saved connection works. */
 export type ConnectionStatus = "disconnected" | "connected" | 
 /**  The sign-in expired and could not be renewed. */
@@ -1347,9 +1417,12 @@ export type ConnectorsChanged = null;
 
 export type ConnectorsOverview = {
 	connectors: ConnectorStatus[],
+	/**  One per provider, in [`ProviderId::ALL`] order. */
+	accounts: ProviderAccount[],
 	background: BackgroundSettings,
 	/**  None until a model is connected. */
 	mailProcessing: MailProcessing | null,
+	preferences: ConnectionPreferences,
 };
 
 /**  A person or role at the buyer (permitted public professional data only). */
@@ -2435,6 +2508,11 @@ export type McpTestResult = {
 	ok: boolean,
 	message: string,
 	tools: McpToolInfo[],
+	/**
+	 *  The server answered with an authorization challenge: it is an OAuth
+	 *  server, and the user has to sign in (in the browser) first.
+	 */
+	requiresSignIn: boolean,
 };
 
 /**  A tool the server offers. */
@@ -3118,6 +3196,37 @@ export type ProviderAccess =
 "not_available" | "not_connected" | "connected" | 
 /**  Signed in before; the access expired or was revoked. */
 "reconnect_needed";
+
+/**
+ *  A provider account as Settings → Connectors shows it: one card per
+ *  provider (Google, Microsoft), with the connectors it enables. Nothing
+ *  here carries a token.
+ */
+export type ProviderAccount = {
+	provider: ProviderId,
+	name: string,
+	state: ConnectionState,
+	/**
+	 *  A stable id of the connection (`<provider>:<account id>`), for
+	 *  diagnostics; never a token.
+	 */
+	connectionId: string | null,
+	email: string | null,
+	displayName: string | null,
+	capabilities: CapabilityView[],
+	/**  A short user-readable explanation for the current state. */
+	message: string | null,
+	/**  Technical details for "Show details" (no secrets). */
+	detail: string | null,
+	errorCode: ConnectorErrorCode | null,
+	connectedAt: number | null,
+	/**  When the grant was last renewed (None: not since the sign-in). */
+	lastRefreshedAt: number | null,
+	/**  See [`ConnectorStatus::sign_in_ends_at`]. */
+	signInEndsAt: number | null,
+	/**  This build has the provider's public app configuration. */
+	available: boolean,
+};
 
 export type ProviderCapabilities = {
 	provider: ProviderId,

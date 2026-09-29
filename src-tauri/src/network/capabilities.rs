@@ -360,6 +360,7 @@ mod tests {
             status_cause: None,
             connected_at: 1,
             updated_at: 1,
+            last_refreshed_at: None,
         }
     }
 

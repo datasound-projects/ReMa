@@ -3691,6 +3691,7 @@ dependencies = [
  "gtk",
  "jiff",
  "keyring",
+ "open",
  "pdf-extract",
  "process-wrap",
  "quick-xml 0.38.4",

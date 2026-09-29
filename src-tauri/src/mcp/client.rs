@@ -459,18 +459,28 @@ async fn open_legacy(
     }
 }
 
+/// What a server answers when it wants a sign-in first (a 401 with a
+/// `WWW-Authenticate` challenge): the sign-in is ReMa's to make, in the
+/// browser, once the user clicks Sign in.
+pub const REQUIRES_SIGN_IN: &str = "This server requires sign-in. Sign in to connect.";
+
 fn describe_failure(error: &str, auth: McpAuth) -> ConnectError {
     if is_unauthorized(error) {
         return match auth {
             McpAuth::Oauth => ConnectError::NeedsSignIn("Sign in to connect.".into()),
-            McpAuth::None => ConnectError::Failed(
-                "The server requires authentication. Choose OAuth or a token in its settings."
-                    .into(),
-            ),
+            // A server added by URL alone that asks for authorization: the
+            // standard MCP sign-in (OAuth) applies, no token to paste.
+            McpAuth::None => ConnectError::NeedsSignIn(REQUIRES_SIGN_IN.into()),
             _ => ConnectError::Failed("The server rejected the token.".into()),
         };
     }
     ConnectError::Failed(format!("Could not connect: {}", short(error)))
+}
+
+/// Whether a tool call failed because the server no longer accepts ReMa's
+/// sign-in (its stored credentials were revoked or could not be renewed).
+pub fn call_needs_sign_in(error: &str) -> bool {
+    is_unauthorized(error)
 }
 
 /// Starts (stdio) or opens (HTTP) a connection and lists the server's tools.

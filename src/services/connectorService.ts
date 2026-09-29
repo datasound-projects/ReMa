@@ -1,9 +1,18 @@
-import { commands, type ConnectorId, type ConnectorsOverview, type ProviderId } from '../generated/bindings';
+import {
+  commands,
+  type ConnectionPreferences,
+  type ConnectorId,
+  type ConnectorsOverview,
+  type ProviderId,
+} from '../generated/bindings';
 import { callBackend } from './ipc';
 
 export type {
   BackgroundSettings,
   Capability,
+  CapabilityView,
+  ConnectionPreferences,
+  ConnectionState,
   ConnectorErrorCode,
   ConnectorId,
   ConnectorKind,
@@ -12,6 +21,7 @@ export type {
   ConnectorsOverview,
   MailProcessing,
   PermissionView,
+  ProviderAccount,
   ProviderId,
 } from '../generated/bindings';
 
@@ -26,6 +36,24 @@ export function getConnectors(): Promise<ConnectorsOverview> {
  */
 export function connectConnector(id: ConnectorId): Promise<ConnectorsOverview> {
   return callBackend(() => commands.connectConnector(id));
+}
+
+/**
+ * Connects a provider account with every capability ReMa offers for it
+ * (Google: Gmail and Google Calendar) in one browser sign-in.
+ */
+export function connectProviderAccount(provider: ProviderId): Promise<ConnectorsOverview> {
+  return callBackend(() => commands.connectProviderAccount(provider));
+}
+
+/** Signs the account out entirely: revokes where possible and deletes the stored sign-in. */
+export function disconnectProviderAccount(provider: ProviderId): Promise<ConnectorsOverview> {
+  return callBackend(() => commands.disconnectProviderAccount(provider));
+}
+
+/** How connections meet chats. */
+export function setConnectionPreferences(preferences: ConnectionPreferences): Promise<ConnectorsOverview> {
+  return callBackend(() => commands.setConnectionPreferences(preferences));
 }
 
 export function cancelConnectorSignIn(provider: ProviderId): Promise<null> {

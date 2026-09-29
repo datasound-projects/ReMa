@@ -336,12 +336,27 @@ pub async fn connect_server(
         .map_err(|e| ConnectError::Failed(e.to_string()))?;
     let store = (row.auth == McpAuth::Oauth).then(|| oauth_store(state, id));
     let events = state.events.clone();
-    state
+    let result = state
         .mcp
         .connect(&config, &state.info.version, store, &move || {
             events.mcp_changed()
         })
-        .await
+        .await;
+    // A server added by URL alone that asks for authorization is an OAuth
+    // server from now on: Sign in appears on its row, and the sign-in runs
+    // only when the user clicks it.
+    if let (Err(ConnectError::NeedsSignIn(_)), McpAuth::None, true) =
+        (&result, row.auth, row.transport.is_remote())
+    {
+        if let Err(error) = state
+            .db
+            .call(|c| repo::set_auth(c, id, McpAuth::Oauth, now_ms()))
+        {
+            eprintln!("[mcp] could not switch {} to OAuth: {error}", row.name);
+        }
+        state.events.mcp_changed();
+    }
+    result
 }
 
 /// Connect / Reconnect in Settings.
@@ -406,17 +421,28 @@ pub async fn test(
                         if tools.len() == 1 { "" } else { "s" }
                     ),
                     tools,
+                    requires_sign_in: false,
                 }
             }
             Err(ConnectError::NeedsSignIn(_)) if id.is_none() => McpTestResult {
                 ok: false,
-                message: "Save the server, then sign in to test it.".into(),
+                message: "This server requires sign-in. Save it, then click Sign in: the \
+                          sign-in opens in your browser."
+                    .into(),
                 tools: Vec::new(),
+                requires_sign_in: true,
+            },
+            Err(ConnectError::NeedsSignIn(message)) => McpTestResult {
+                ok: false,
+                message,
+                tools: Vec::new(),
+                requires_sign_in: true,
             },
             Err(error) => McpTestResult {
                 ok: false,
                 message: error.to_string(),
                 tools: Vec::new(),
+                requires_sign_in: false,
             },
         },
     )
@@ -428,7 +454,14 @@ pub async fn sign_in(
     id: i64,
     open: impl Fn(&str) -> AppResult<()>,
 ) -> AppResult<McpServer> {
-    let row = state.db.call(|c| repo::get(c, id))?;
+    let mut row = state.db.call(|c| repo::get(c, id))?;
+    if row.auth == McpAuth::None && row.transport == McpTransport::Http {
+        // Sign in on a server added by URL alone: it is an OAuth server.
+        state
+            .db
+            .call(|c| repo::set_auth(c, id, McpAuth::Oauth, now_ms()))?;
+        row.auth = McpAuth::Oauth;
+    }
     if row.auth != McpAuth::Oauth {
         return Err(AppError::validation("This server does not use OAuth."));
     }

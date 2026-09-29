@@ -1032,7 +1032,7 @@ async fn access_tokens_are_refreshed_silently_before_they_expire() {
 }
 
 #[tokio::test]
-async fn connected_accounts_are_kept_signed_in_without_reading_anything() {
+async fn unused_grants_are_renewed_for_a_reason_without_reading_anything() {
     let providers = providers().await;
     let (state, events) = state_for(&providers, apps());
     connect(
@@ -1042,18 +1042,30 @@ async fn connected_accounts_are_kept_signed_in_without_reading_anything() {
     )
     .await
     .unwrap();
-    // Connecting checked the mailbox; keeping alive reads nothing.
+    // Connecting checked the mailbox; a renewal reads nothing.
     let mailbox = providers.requests("/gmail").len();
-    // A valid access token: nothing to renew.
-    tokens::keep_alive(&state).await;
+    // A grant made just now is in use: nothing to renew, even after a
+    // restart (no token in memory). ReMa makes no daily refresh.
+    expire(&state, ProviderId::Google).await;
+    assert!(tokens::renew_unused(&state).await.is_empty());
     assert_eq!(providers.requests("/token").len(), 1);
 
-    // After a restart (no token in memory) the grant is renewed once: a
-    // grant that is used does not expire. No mailbox request is made.
+    // Unused for a month: the one proactive renewal, so the provider does
+    // not expire the grant from inactivity. No mailbox request is made.
+    let month_ago = now_ms() - tokens::RENEW_UNUSED_AFTER_MS - 1;
+    state
+        .db
+        .call(move |c| {
+            c.execute(
+                "UPDATE connector_accounts SET connected_at = ?1 WHERE provider = 'google'",
+                [month_ago],
+            )?;
+            Ok(())
+        })
+        .unwrap();
     let before = providers.server.requests().len();
     let logged_before = diag_lines().lock().unwrap().len();
-    expire(&state, ProviderId::Google).await;
-    tokens::keep_alive(&state).await;
+    assert_eq!(tokens::renew_unused(&state).await, [ProviderId::Google]);
     assert_eq!(providers.requests("/token").len(), 2);
     assert_eq!(providers.requests("/gmail").len(), mailbox);
     // Everything the renewal sent: one POST to the token endpoint of the
@@ -1072,7 +1084,7 @@ async fn connected_accounts_are_kept_signed_in_without_reading_anything() {
     );
     assert!(renewal.body.contains("grant_type=refresh_token"));
     let logs = diag_lines().lock().unwrap()[logged_before..].join("\n");
-    assert!(logs.contains("phase=token_refreshed") && logs.contains("keep_alive=ok"));
+    assert!(logs.contains("phase=token_refreshed") && logs.contains("renew_unused=ok"));
     let notices = events.shown.lock().unwrap().clone();
     let notice_text = format!("{notices:?}");
     for secret in ["g-rt-1", "g-at-1", "g-at-2", "Bearer", "Authorization"] {
@@ -1080,20 +1092,30 @@ async fn connected_accounts_are_kept_signed_in_without_reading_anything() {
         assert!(!notice_text.contains(secret), "{secret} in a notification");
     }
     assert!(notices.is_empty(), "a renewal notifies nobody: {notices:?}");
+    // The renewal is recorded, so the next check leaves the grant alone.
+    let account = state
+        .db
+        .call(|c| repo::account(c, ProviderId::Google))
+        .unwrap()
+        .unwrap();
+    assert!(account.last_refreshed_at.is_some_and(|at| at > month_ago));
+    assert!(tokens::renew_unused(&state).await.is_empty());
+    assert_eq!(providers.requests("/token").len(), 2);
 
     // An account that needs reconnecting is left alone.
     state
         .db
         .call(|c| {
             c.execute(
-                "UPDATE connector_accounts SET status = 'reauth_required' WHERE provider = 'google'",
+                "UPDATE connector_accounts SET status = 'reauth_required', last_refreshed_at = NULL \
+                 WHERE provider = 'google'",
                 [],
             )?;
             Ok(())
         })
         .unwrap();
     expire(&state, ProviderId::Google).await;
-    tokens::keep_alive(&state).await;
+    assert!(tokens::renew_unused(&state).await.is_empty());
     assert_eq!(providers.requests("/token").len(), 2);
 }
 
@@ -2060,6 +2082,7 @@ async fn grants_move_from_the_provider_key_to_the_account_key() {
                     status_cause: None,
                     connected_at: now,
                     updated_at: now,
+                    last_refreshed_at: None,
                 },
             )?;
             repo::set_enabled(c, ConnectorId::Gmail, true, now)
@@ -2361,5 +2384,349 @@ fn a_card_opening_the_browser_says_so_before_it_asks_to_finish_there() {
     assert_eq!(
         waiting.message.as_deref(),
         Some("Finish signing in with Google in your browser.")
+    );
+}
+
+// ── Account-level connections (the connection runtime) ──────────────
+
+async fn account(state: &AppState, provider: ProviderId) -> ProviderAccount {
+    overview(state)
+        .await
+        .unwrap()
+        .accounts
+        .into_iter()
+        .find(|a| a.provider == provider)
+        .unwrap()
+}
+
+#[tokio::test]
+async fn connecting_a_provider_asks_for_every_capability_in_one_sign_in() {
+    let providers = providers().await;
+    *providers.grants.google_scope.lock().unwrap() =
+        google::scopes(&[ConnectorId::Gmail, ConnectorId::GoogleCalendar]).join(" ");
+    let (state, _) = state_for(&providers, apps());
+    assert_eq!(
+        account(&state, ProviderId::Google).await.state,
+        ConnectionState::Disconnected
+    );
+    let browser = Browser::default();
+    connect_provider(&state, ProviderId::Google, browser.open(Consent::Allow))
+        .await
+        .unwrap();
+    // One consent screen listing mail and calendar.
+    assert_eq!(browser.opened.lock().unwrap().len(), 1);
+    let query = params(&browser.last_url());
+    assert!(query["scope"].contains("gmail.readonly"));
+    assert!(query["scope"].contains("calendar.events"));
+    assert_eq!(query["access_type"], "offline");
+
+    let google = account(&state, ProviderId::Google).await;
+    assert_eq!(google.state, ConnectionState::Connected);
+    assert_eq!(google.email.as_deref(), Some("ana@gmail.com"));
+    assert_eq!(google.display_name.as_deref(), Some("Ana Example"));
+    assert_eq!(google.connection_id.as_deref(), Some("google:g-123"));
+    assert!(google.available);
+    assert_eq!(
+        google
+            .capabilities
+            .iter()
+            .map(|c| (c.name.as_str(), c.granted))
+            .collect::<Vec<_>>(),
+        [("Gmail", true), ("Google Calendar", true)]
+    );
+    assert!(google.message.is_none());
+    // Nothing account-level carries a token.
+    let text = format!("{google:?}");
+    for secret in ["g-at-1", "g-rt-1", "auth-code-123"] {
+        assert!(!text.contains(secret), "{secret} in the account view");
+    }
+
+    // Disconnecting the account removes every connector, revokes the grant
+    // and deletes it.
+    disconnect_provider(&state, ProviderId::Google)
+        .await
+        .unwrap();
+    let google = account(&state, ProviderId::Google).await;
+    assert_eq!(google.state, ConnectionState::Disconnected);
+    assert!(google.email.is_none());
+    assert!(google.capabilities.iter().all(|c| !c.granted));
+    assert_eq!(providers.requests("/revoke").len(), 1);
+    assert!(stored(&state, ProviderId::Google).await.is_none());
+    assert_eq!(
+        card(&state, ConnectorId::Gmail).await.state,
+        ConnectorState::Disconnected
+    );
+}
+
+#[tokio::test]
+async fn the_account_state_machine_names_each_situation() {
+    let providers = providers().await;
+    let (state, _) = state_for(&providers, apps());
+
+    // No public configuration for the provider in this build.
+    let (bare, _) = state_for(&providers, Apps::default());
+    let google = account(&bare, ProviderId::Google).await;
+    assert_eq!(google.state, ConnectionState::Unavailable);
+    assert!(!google.available);
+    assert!(google
+        .message
+        .as_deref()
+        .unwrap()
+        .contains("[google] desktop_client_id"));
+
+    // An organization's policy: admin approval required.
+    let error = connect(
+        &state,
+        ConnectorId::OutlookMail,
+        Browser::default().open(Consent::Error(
+            "access_denied",
+            "AADSTS90094: An administrator of Contoso has set a policy that prevents you from granting ReMa the permissions it is requesting.",
+        )),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, AppError::Permission(_)));
+    let microsoft = account(&state, ProviderId::Microsoft).await;
+    assert_eq!(microsoft.state, ConnectionState::AdminApprovalRequired);
+    assert_eq!(
+        microsoft.error_code,
+        Some(ConnectorErrorCode::ProviderAdminPolicy)
+    );
+    assert!(microsoft
+        .message
+        .as_deref()
+        .unwrap()
+        .contains("administrator approval"));
+
+    // The provider cannot be reached during the exchange: offline.
+    *providers.grants.token_down.lock().unwrap() = true;
+    let _ = connect(
+        &state,
+        ConnectorId::Gmail,
+        Browser::default().open(Consent::Allow),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        account(&state, ProviderId::Google).await.state,
+        ConnectionState::Offline
+    );
+    *providers.grants.token_down.lock().unwrap() = false;
+
+    // A permission left unticked: permission denied.
+    *providers.grants.google_scope.lock().unwrap() = "openid email profile".into();
+    let _ = connect(
+        &state,
+        ConnectorId::Gmail,
+        Browser::default().open(Consent::Allow),
+    )
+    .await;
+    let google = account(&state, ProviderId::Google).await;
+    assert_eq!(google.state, ConnectionState::PermissionDenied);
+    assert_eq!(google.error_code, Some(ConnectorErrorCode::ScopeNotGranted));
+    assert!(google.capabilities.iter().all(|c| !c.granted));
+
+    // Granted now: connected, then reauth required once the provider
+    // rejects the refresh token.
+    *providers.grants.google_scope.lock().unwrap() =
+        google::scopes(&[ConnectorId::Gmail]).join(" ");
+    connect(
+        &state,
+        ConnectorId::Gmail,
+        Browser::default().open(Consent::Allow),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        account(&state, ProviderId::Google).await.state,
+        ConnectionState::Connected
+    );
+    *providers.grants.refresh_ok.lock().unwrap() = false;
+    expire(&state, ProviderId::Google).await;
+    let _ = tokens::get_valid_access_token(&state, ProviderId::Google).await;
+    let google = account(&state, ProviderId::Google).await;
+    assert_eq!(google.state, ConnectionState::ReauthRequired);
+    assert_eq!(google.error_code, Some(ConnectorErrorCode::ReauthRequired));
+    assert!(google.message.is_some());
+
+    // While a sign-in waits for the browser: connecting.
+    let (seq, _cancel) = state
+        .connectors
+        .begin_sign_in(ProviderId::Google, vec![ConnectorId::Gmail])
+        .unwrap();
+    assert_eq!(
+        account(&state, ProviderId::Google).await.state,
+        ConnectionState::Connecting
+    );
+    state.connectors.end_sign_in(ProviderId::Google, seq);
+
+    // While a refresh is in flight: refreshing.
+    *providers.grants.refresh_ok.lock().unwrap() = true;
+    connect(
+        &state,
+        ConnectorId::Gmail,
+        Browser::default().open(Consent::Allow),
+    )
+    .await
+    .unwrap();
+    let guard = state.connectors.begin_refresh(ProviderId::Google);
+    assert_eq!(
+        account(&state, ProviderId::Google).await.state,
+        ConnectionState::Refreshing
+    );
+    drop(guard);
+    assert_eq!(
+        account(&state, ProviderId::Google).await.state,
+        ConnectionState::Connected
+    );
+}
+
+#[tokio::test]
+async fn a_new_account_joins_chats_with_their_own_connector_choice_only_when_asked() {
+    use crate::{db::conversations as chats, models::chat::ChatConnector};
+    let providers = providers().await;
+    let (state, _) = state_for(&providers, apps());
+    let model = crate::models::provider::ModelRef {
+        provider_id: "openai".into(),
+        model_id: "gpt-5".into(),
+    };
+    let (chosen, all) = state
+        .db
+        .call(|c| {
+            let chosen = chats::create(c, "chosen", &model, 1)?;
+            chats::set_connectors(c, chosen.id, Some(&[ChatConnector::Applications]))?;
+            let all = chats::create(c, "all connected", &model, 1)?;
+            Ok((chosen.id, all.id))
+        })
+        .unwrap();
+    assert!(!preferences(&state).unwrap().new_accounts_in_chats);
+
+    // Default (privacy-conscious): the chat with its own choice is left
+    // as it is; the chat using "all connected" sees the account anyway.
+    connect(
+        &state,
+        ConnectorId::Gmail,
+        Browser::default().open(Consent::Allow),
+    )
+    .await
+    .unwrap();
+    let (chosen_list, all_list) = state
+        .db
+        .call(|c| {
+            Ok((
+                chats::get(c, chosen)?.connectors,
+                chats::get(c, all)?.connectors,
+            ))
+        })
+        .unwrap();
+    assert_eq!(chosen_list, Some(vec![ChatConnector::Applications]));
+    assert_eq!(all_list, None);
+
+    // Opted in: a newly connected capability is added to such chats.
+    set_preferences(
+        &state,
+        ConnectionPreferences {
+            new_accounts_in_chats: true,
+        },
+    )
+    .unwrap();
+    assert!(
+        overview(&state)
+            .await
+            .unwrap()
+            .preferences
+            .new_accounts_in_chats
+    );
+    *providers.grants.microsoft_scope.lock().unwrap() =
+        "Mail.Read User.Read openid profile email".into();
+    connect(
+        &state,
+        ConnectorId::OutlookMail,
+        Browser::default().open(Consent::Allow),
+    )
+    .await
+    .unwrap();
+    let chosen_list = state
+        .db
+        .call(|c| Ok(chats::get(c, chosen)?.connectors))
+        .unwrap();
+    assert_eq!(
+        chosen_list,
+        Some(vec![
+            ChatConnector::Applications,
+            ChatConnector::OutlookMail
+        ])
+    );
+    // Reconnecting an account that is already there adds nothing twice.
+    connect(
+        &state,
+        ConnectorId::OutlookMail,
+        Browser::default().open(Consent::Allow),
+    )
+    .await
+    .unwrap();
+    let chosen_list = state
+        .db
+        .call(|c| Ok(chats::get(c, chosen)?.connectors))
+        .unwrap();
+    assert_eq!(chosen_list.map(|l| l.len()), Some(2));
+}
+
+#[test]
+fn public_configuration_can_come_from_the_data_folder_in_development() {
+    let apps = Apps::from_toml(
+        "[google]\ndesktop_client_id = \"123-abc.apps.googleusercontent.com\"\n\
+         [microsoft]\npublic_client_id = \"00000000-1111-2222-3333-444444444444\"\n",
+    )
+    .unwrap();
+    assert_eq!(
+        apps.google.as_ref().map(|a| a.client_id.as_str()),
+        Some("123-abc.apps.googleusercontent.com")
+    );
+    assert!(apps.google.unwrap().client_secret.is_none());
+    assert_eq!(
+        apps.microsoft.map(|a| a.client_id),
+        Some("00000000-1111-2222-3333-444444444444".into())
+    );
+
+    // Malformed values are refused by key, never echoed.
+    let errors = Apps::from_toml("[microsoft]\npublic_client_id = \"not-a-guid\"\n").unwrap_err();
+    assert!(
+        errors[0].contains("MICROSOFT_PUBLIC_CLIENT_ID"),
+        "{errors:?}"
+    );
+    assert!(!errors[0].contains("not-a-guid"));
+    assert!(Apps::from_toml("not toml [").is_err());
+
+    // The file completes what the build lacks and never overrides it.
+    let dir = std::env::temp_dir().join(format!("rema-config-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join(RUNTIME_CONFIG_FILE),
+        "[google]\ndesktop_client_id = \"123-abc.apps.googleusercontent.com\"\n",
+    )
+    .unwrap();
+    let loaded = Apps::load(&dir);
+    assert_eq!(
+        loaded.google.map(|a| a.client_id),
+        google::app()
+            .map(|a| a.client_id)
+            .or(Some("123-abc.apps.googleusercontent.com".into()))
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // The message for a missing registration names the file and the key.
+    let context = ConnectorsContext::new(
+        GoogleEndpoints::at("http://127.0.0.1:9"),
+        MicrosoftEndpoints::at("http://127.0.0.1:9", "http://127.0.0.1:9"),
+        Apps::default(),
+    )
+    .with_runtime_config(std::path::Path::new("/data/ReMa"));
+    let reason = context.unavailable_reason(ProviderId::Microsoft);
+    assert!(reason.contains("[microsoft] public_client_id"), "{reason}");
+    assert!(reason.contains("connectors.toml"), "{reason}");
+    assert!(
+        reason.contains("users of a release never enter it"),
+        "{reason}"
     );
 }
