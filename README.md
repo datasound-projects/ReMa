@@ -33,7 +33,7 @@
 ReMa is a lightweight desktop app (Tauri 2) with a deterministic **Rust core** and an **AI layer** you control. Rust owns your data, schedules, credentials and every decision about *when* something happens; the model only reasons about your prompts and writes the answers.
 
 - **Bring your own model.** OpenAI (with a ChatGPT account or an API key), Anthropic (Claude account or API key), Google Gemini, or any OpenAI-compatible endpoint such as Ollama, LM Studio or vLLM.
-- **Your data stays local.** Chats, applications, profile and documents live in a SQLite database on your computer. There is no ReMa server.
+- **Your data stays local.** Chats, applications, profile and documents live in a SQLite database on your computer. There is no ReMa server. Your conversations howevere are processed by the provider of your choice.
 - **Credentials stay in the system keychain.** API keys and sign-in tokens go to macOS Keychain, Windows Credential Manager or Secret Service on Linux, never into the database, logs or a model's context.
 
 ## Key features (current version)
