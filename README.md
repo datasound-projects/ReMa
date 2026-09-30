@@ -8,8 +8,7 @@
 <h1 align="center">Your AI powered Career Harness</h1>
 
 <p align="center">
-  A desktop app that searches jobs, tracks your applications and interviews from your mailbox,<br>
-  keeps your CV in shape and talks to the AI model <em>you</em> choose. Everything stays on your computer.
+  An all-in-one AI desktop workspace built around your career goals, profile, and preferences.
 </p>
 
 <p align="center">
