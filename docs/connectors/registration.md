@@ -1,8 +1,48 @@
-# Connectors — app registration (for whoever builds and publishes ReMa)
+# Connectors — app registration
 
 ReMa signs users in with **its own** Google, Microsoft and LinkedIn app registrations.
-Users never create OAuth clients, never see a client ID or secret, and never
-open a cloud console. This page is for the publisher of a ReMa build.
+Official builds carry them, so users of a release never create OAuth clients,
+never see a client ID or secret, and never open a cloud console. This page is
+for whoever publishes a build, and for anyone running a copy of ReMa that was
+built without a registration (a development build, for example): such a copy
+takes the registration **inside the app**, no terminal needed.
+
+## Setting it up inside ReMa (Settings → Connectors → Set up)
+
+A card whose provider this copy of ReMa has no registration for says so and
+shows **Set up** instead of Connect. The dialog lists the steps for the
+provider's console (they are the same as in the sections below), takes the
+values, checks their format and makes the sign-in available at once: Connect
+appears, and the account is connected in the browser as usual.
+
+| Provider | What Set up asks for |
+|---|---|
+| Google | the client ID of an OAuth client of type **Desktop app**; optionally its client secret; optionally the app's publishing status (Testing or Production) |
+| Microsoft | the Application (client) ID of a public-client app registration (the tenant is always `common`: any organization and personal accounts) |
+| LinkedIn | the client ID of an app with native PKCE enabled; optionally the restricted scopes LinkedIn approved (`r_1st_connections`) |
+
+Where it goes: the public values in `connectors.toml` in ReMa's data folder
+(macOS: `~/Library/Application Support/cloud.datasound.rema/connectors.toml`;
+Linux: `~/.local/share/cloud.datasound.rema/connectors.toml`; the same tables
+and keys as `src-tauri/connectors.toml`, so the file can also be written by
+hand), and the Google client secret in the **system keychain** (account
+`connector-app:google:client_secret`), never in a file, a log or the
+interface. A registration in the build always wins; Set up never overrides
+it, and a build that carries a provider's registration offers no Set up for
+it. **App registration** on a card opens the same dialog again to change the
+secret or the publishing status, or to remove the registration; a connected
+account keeps its registration (its sign-in belongs to that client ID), so
+changing the client ID or removing it asks for a disconnect first. What the
+provider itself refuses (a wrong secret, an unverified app, a missing API)
+shows on the card at the first sign-in, as for any registration.
+
+![Set up on the connector cards](../media/settings-set-up-cards.png)
+
+![The Set up dialog for Google](../media/settings-set-up.png)
+
+Implementation: `src-tauri/src/connectors/registrations.rs`; commands
+`set_app_registration` and `remove_app_registration`; the interface's
+`AppRegistrationDialog`.
 
 > These steps follow Google's and Microsoft's documentation for installed
 > apps. The documentation hosts (`developers.google.com`,
@@ -50,16 +90,13 @@ Pushing a Google client secret into a public repository can trip GitHub's
 secret scanning even though Google treats it as non-confidential; keeping
 it in the Actions secret avoids that.
 
-**Development builds can also read the public configuration at run time**
-from `connectors.toml` in ReMa's data folder (macOS:
-`~/Library/Application Support/cloud.datasound.rema/connectors.toml`; Linux:
-`~/.local/share/cloud.datasound.rema/connectors.toml`), with the same tables
-and keys as `src-tauri/connectors.toml`. It completes what the build lacks
-and never overrides it; a malformed file is reported by key in the log and
-ignored. Release builds carry every registration already and read no file.
-A development build without a registration says so on the card, naming the
-key, the build variable and the file (`connectors::unavailable_reason_at`);
-that message is for developers, users of a release never see it.
+**Every build also reads `connectors.toml` in ReMa's data folder** (the
+file Set up writes, see above), with the same tables and keys as
+`src-tauri/connectors.toml`. It completes what the build lacks and never
+overrides it; a malformed file is reported by key in the log and ignored.
+Release builds carry every registration already, so for them the file
+changes nothing. A build without a registration says so on the card and
+offers Set up (`connectors::unavailable_reason`).
 
 **Development only** (ignored by release builds): `REMA_DEV_GOOGLE_CLIENT_ID`,
 `REMA_DEV_GOOGLE_CLIENT_SECRET`, `REMA_DEV_MICROSOFT_CLIENT_ID`,

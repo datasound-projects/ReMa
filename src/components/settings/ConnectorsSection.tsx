@@ -10,6 +10,7 @@ import { useConnectors } from '../../hooks/useConnectors';
 import { useTasks } from '../../hooks/useTasks';
 import { formatDateTime, formatRelative } from '../../lib/format';
 import {
+  type AppRegistration,
   cancelConnectorSignIn,
   connectConnector,
   connectProviderAccount,
@@ -30,6 +31,7 @@ import { Dialog } from '../ui/Dialog';
 import { IconButton } from '../ui/IconButton';
 import { StatusIndicator } from '../ui/StatusIndicator';
 import { Switch } from '../ui/Switch';
+import { AppRegistrationDialog } from './AppRegistrationDialog';
 import { ConnectorLogo, ProviderLogo } from './ConnectorIcons';
 import { NetworkContactsCard } from './NetworkContactsCard';
 
@@ -107,7 +109,12 @@ export function ConnectorsSection({ focus = false }: { focus?: boolean }) {
             {overview.accounts
               .filter((a) => a.provider === 'google' || a.provider === 'microsoft')
               .map((account) => (
-                <AccountCard key={account.provider} account={account} onManage={() => setManaging(account.provider)} />
+                <AccountCard
+                  key={account.provider}
+                  account={account}
+                  registration={registrationOf(overview, account.provider)}
+                  onManage={() => setManaging(account.provider)}
+                />
               ))}
           </div>
           <h3 className="connectors__group">Professional networks</h3>
@@ -115,7 +122,12 @@ export function ConnectorsSection({ focus = false }: { focus?: boolean }) {
             {overview.connectors
               .filter((c) => c.kind === 'network')
               .map((connector) => (
-                <ConnectorCard key={connector.id} connector={connector} onOpen={() => setOpenId(connector.id)} />
+                <ConnectorCard
+                  key={connector.id}
+                  connector={connector}
+                  registration={registrationOf(overview, connector.provider)}
+                  onOpen={() => setOpenId(connector.id)}
+                />
               ))}
           </div>
           <NetworkContactsCard />
@@ -179,12 +191,27 @@ const needsAttention = (a: ProviderAccount) =>
   a.state === 'provider_error' ||
   a.state === 'offline';
 
+/** ReMa's app registration for a provider, as the backend reports it. */
+function registrationOf(overview: ConnectorsOverview, provider: ProviderId): AppRegistration | null {
+  return overview.registrations?.find((r) => r.provider === provider) ?? null;
+}
+
 /** One provider account: Google or Microsoft (Settings → Connectors). */
-function AccountCard({ account: a, onManage }: { account: ProviderAccount; onManage: () => void }) {
+function AccountCard({
+  account: a,
+  registration,
+  onManage,
+}: {
+  account: ProviderAccount;
+  registration: AppRegistration | null;
+  onManage: () => void;
+}) {
   const connect = useConnectAccount(a.provider);
   const action = useAction();
   const [confirming, setConfirming] = useState(false);
   const [showDetail, setShowDetail] = useState(false);
+  const [settingUp, setSettingUp] = useState(false);
+  const canSetUp = registration?.editable === true;
   const status = ACCOUNT_STATUS[a.state];
   const hasAccount = a.email !== null || a.connectionId !== null;
   const attention = needsAttention(a);
@@ -253,7 +280,13 @@ function AccountCard({ account: a, onManage }: { account: ProviderAccount; onMan
           <button type="button" className="button button--ghost button--small" onClick={connect.cancel}>
             Cancel
           </button>
-        ) : a.state === 'unavailable' ? null : !hasAccount ? (
+        ) : a.state === 'unavailable' ? (
+          canSetUp && (
+            <button type="button" className="button button--primary button--small" onClick={() => setSettingUp(true)}>
+              Set up
+            </button>
+          )
+        ) : !hasAccount ? (
           <button
             type="button"
             className="button button--primary button--small"
@@ -289,7 +322,18 @@ function AccountCard({ account: a, onManage }: { account: ProviderAccount; onMan
             </button>
           </>
         )}
+        {a.state !== 'unavailable' && registration?.source === 'settings' && (
+          <button
+            type="button"
+            className="button button--ghost button--small"
+            title={`The ${a.name} app registration entered in Settings`}
+            onClick={() => setSettingUp(true)}
+          >
+            App registration
+          </button>
+        )}
       </div>
+      {settingUp && registration && <AppRegistrationDialog registration={registration} onClose={() => setSettingUp(false)} />}
       {(connect.error ?? action.error) && a.errorCode === null && a.state !== 'connecting' && (
         <p className="form-error" role="alert">
           {connect.error ?? action.error}
@@ -618,9 +662,18 @@ function useConnect(connector: ConnectorStatus) {
   return { ...action, connect, cancel };
 }
 
-function ConnectorCard({ connector: c, onOpen }: { connector: ConnectorStatus; onOpen: () => void }) {
+function ConnectorCard({
+  connector: c,
+  registration = null,
+  onOpen,
+}: {
+  connector: ConnectorStatus;
+  registration?: AppRegistration | null;
+  onOpen: () => void;
+}) {
   const connect = useConnect(c);
   const [showDetail, setShowDetail] = useState(false);
+  const [settingUp, setSettingUp] = useState(false);
   const isAdded = added(c);
   const needsReconnect = c.state === 'reauth_required' || c.state === 'permission_missing';
 
@@ -698,7 +751,14 @@ function ConnectorCard({ connector: c, onOpen }: { connector: ConnectorStatus; o
       }
       break;
     case 'unavailable':
-      status = <StatusIndicator tone="idle" label="Unavailable" />;
+      status =
+        registration?.editable === true ? (
+          <button type="button" className="button button--secondary button--small" onClick={() => setSettingUp(true)}>
+            Set up
+          </button>
+        ) : (
+          <StatusIndicator tone="idle" label="Unavailable" />
+        );
       break;
   }
 
@@ -769,6 +829,14 @@ function ConnectorCard({ connector: c, onOpen }: { connector: ConnectorStatus; o
           {connect.error}
         </p>
       )}
+      {c.state !== 'unavailable' && registration?.source === 'settings' && (
+        <p className="connector-card__meta">
+          <button type="button" className="link-button" onClick={() => setSettingUp(true)}>
+            App registration
+          </button>
+        </p>
+      )}
+      {settingUp && registration && <AppRegistrationDialog registration={registration} onClose={() => setSettingUp(false)} />}
     </div>
   );
 }

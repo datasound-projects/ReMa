@@ -29,6 +29,7 @@ pub mod linkedin;
 pub mod mail;
 pub mod microsoft;
 pub mod oauth;
+pub mod registrations;
 pub mod sync;
 pub mod tokens;
 pub mod validate;
@@ -107,8 +108,8 @@ pub struct SigningIn {
 }
 
 /// ReMa's app registrations: public OAuth client configuration (client
-/// IDs, never a user's token). Compiled in at build time; a development
-/// build may also read them at run time from the data folder.
+/// IDs, never a user's token), as compiled in at build time. What a build
+/// lacks can be entered in Settings (see [`registrations`]).
 #[derive(Debug, Clone, Default)]
 pub struct Apps {
     pub google: Option<OAuthApp>,
@@ -116,8 +117,9 @@ pub struct Apps {
     pub linkedin: Option<OAuthApp>,
 }
 
-/// The public configuration file a development build reads at run time
-/// (same tables and keys as `src-tauri/connectors.toml`).
+/// The public configuration file in ReMa's data folder (same tables and
+/// keys as `src-tauri/connectors.toml`): registrations entered in Settings,
+/// or written by hand (see [`registrations`]).
 pub const RUNTIME_CONFIG_FILE: &str = "connectors.toml";
 
 impl Apps {
@@ -127,42 +129,6 @@ impl Apps {
             microsoft: microsoft::app(),
             linkedin: linkedin::app(),
         }
-    }
-
-    /// The build's registrations, completed from `<data_dir>/connectors.toml`
-    /// where the build has none (public client IDs only; the file is
-    /// validated like the build's, and an invalid file is reported and
-    /// ignored). Release builds carry every registration already and read
-    /// no file.
-    pub fn load(data_dir: &Path) -> Self {
-        let mut apps = Self::from_build();
-        if !cfg!(debug_assertions) {
-            return apps;
-        }
-        let path = data_dir.join(RUNTIME_CONFIG_FILE);
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            return apps;
-        };
-        match Self::from_toml(&text) {
-            Ok(file) => {
-                diag(format!(
-                    "[connector] config runtime_file={} google={} microsoft={} linkedin={}",
-                    path.display(),
-                    file.google.is_some(),
-                    file.microsoft.is_some(),
-                    file.linkedin.is_some()
-                ));
-                apps.google = apps.google.or(file.google);
-                apps.microsoft = apps.microsoft.or(file.microsoft);
-                apps.linkedin = apps.linkedin.or(file.linkedin);
-            }
-            Err(errors) => eprintln!(
-                "[connector] {} ignored:\n  - {}",
-                path.display(),
-                errors.join("\n  - ")
-            ),
-        }
-        apps
     }
 
     /// Registrations from the text of a `connectors.toml` (values are
@@ -204,7 +170,11 @@ pub struct ConnectorsContext {
     pub google: Arc<GoogleEndpoints>,
     pub microsoft: Arc<MicrosoftEndpoints>,
     pub linkedin: Arc<LinkedinEndpoints>,
+    /// The build's registrations (never changed while ReMa runs).
     apps: Arc<Apps>,
+    /// Registrations entered in Settings (or read from the data folder),
+    /// used where the build has none.
+    entered: Arc<Mutex<registrations::EnteredRegistrations>>,
     pub http: reqwest::Client,
     sign_ins: Arc<Mutex<HashMap<ProviderId, SignIn>>>,
     /// Why the last sign-in of a provider failed, for the card it started
@@ -224,9 +194,8 @@ pub struct ConnectorsContext {
     grant_generation: Arc<Mutex<HashMap<ProviderId, u64>>>,
     /// Refreshes in flight per provider (the account shows "Refreshing").
     refreshing: Arc<Mutex<HashMap<ProviderId, usize>>>,
-    /// Where a development build looks for public configuration at run
-    /// time, for the message that says what is missing.
-    runtime_config: Option<PathBuf>,
+    /// ReMa's data folder, where entered registrations are kept.
+    data_dir: Option<PathBuf>,
     /// Microsoft accounts whose calendar cannot answer `getSchedule`
     /// (personal accounts): availability comes from `calendarView` instead.
     /// Learnt at sign-in or from the first refusal, for this run of ReMa.
@@ -247,6 +216,7 @@ impl ConnectorsContext {
             microsoft: Arc::new(microsoft),
             linkedin: Arc::new(LinkedinEndpoints::from_env()),
             apps: Arc::new(apps),
+            entered: Arc::default(),
             http: crate::llm::http::client(),
             sign_ins: Arc::default(),
             failures: Arc::default(),
@@ -256,7 +226,7 @@ impl ConnectorsContext {
             grant_locks: Arc::default(),
             grant_generation: Arc::default(),
             refreshing: Arc::default(),
-            runtime_config: None,
+            data_dir: None,
             microsoft_schedule_unsupported: Arc::default(),
             syncs: Arc::default(),
             shutdown: CancellationToken::new(),
@@ -270,8 +240,14 @@ impl ConnectorsContext {
         self
     }
 
+    /// Whether Google is expected to end sign-ins after about 7 days (the
+    /// app is in Testing): what the build says, or, when the build has no
+    /// Google registration, what the entered one says.
     pub fn google_in_testing(&self) -> Option<bool> {
-        self.google_in_testing
+        if self.apps.google.is_some() || self.google_in_testing.is_some() {
+            return self.google_in_testing;
+        }
+        self.entered.lock().unwrap().google_in_testing()
     }
 
     /// LinkedIn at other endpoints (tests).
@@ -280,15 +256,63 @@ impl ConnectorsContext {
         self
     }
 
-    /// Names the run-time configuration file in "unavailable" messages.
-    pub fn with_runtime_config(mut self, data_dir: &Path) -> Self {
-        self.runtime_config = Some(data_dir.join(RUNTIME_CONFIG_FILE));
+    /// ReMa's data folder: registrations entered in Settings are read from
+    /// its `connectors.toml` (public values; the Google secret follows from
+    /// the keychain, see [`registrations::load_secret`]) and written there.
+    pub fn with_data_dir(mut self, data_dir: &Path) -> Self {
+        self.data_dir = Some(data_dir.to_path_buf());
+        match registrations::EnteredRegistrations::read(data_dir) {
+            Ok(entered) => {
+                diag(format!(
+                    "[connector] config entered_file={} google={} microsoft={} linkedin={}",
+                    data_dir.join(RUNTIME_CONFIG_FILE).display(),
+                    entered.google.is_some(),
+                    entered.microsoft.is_some(),
+                    entered.linkedin.is_some()
+                ));
+                *self.entered.lock().unwrap() = entered;
+            }
+            Err(errors) => eprintln!(
+                "[connector] {} ignored:\n  - {}",
+                data_dir.join(RUNTIME_CONFIG_FILE).display(),
+                errors.join("\n  - ")
+            ),
+        }
         self
     }
 
     /// Why a provider cannot be connected in this copy of ReMa.
     pub fn unavailable_reason(&self, provider: ProviderId) -> String {
-        unavailable_reason_at(provider, self.runtime_config.as_deref())
+        unavailable_reason(provider)
+    }
+
+    /// The registrations entered in Settings.
+    pub fn entered(&self) -> registrations::EnteredRegistrations {
+        self.entered.lock().unwrap().clone()
+    }
+
+    pub(crate) fn set_entered(&self, entered: registrations::EnteredRegistrations) {
+        *self.entered.lock().unwrap() = entered;
+    }
+
+    /// The build's registration of a provider (what Settings cannot change).
+    pub fn build_app(&self, provider: ProviderId) -> Option<OAuthApp> {
+        match provider {
+            ProviderId::Google => self.apps.google.clone(),
+            ProviderId::Microsoft => self.apps.microsoft.clone(),
+            ProviderId::Linkedin => self.apps.linkedin.clone(),
+            ProviderId::Xing => None,
+        }
+    }
+
+    /// The scopes a provider sign-in asks for.
+    pub fn sign_in_scopes(&self, provider: ProviderId, connectors: &[ConnectorId]) -> Vec<String> {
+        match provider {
+            ProviderId::Linkedin if self.apps.linkedin.is_none() => {
+                linkedin::scopes_with(&self.entered.lock().unwrap().linkedin_scopes())
+            }
+            _ => provider_scopes(provider, connectors),
+        }
     }
 
     /// Marks a refresh of the provider's grant as in flight until the guard
@@ -309,14 +333,11 @@ impl ConnectorsContext {
             .is_some_and(|n| *n > 0)
     }
 
+    /// The registration a sign-in uses: the build's, else the one entered
+    /// in Settings. XING has no desktop sign-in (see `xing`).
     pub fn app(&self, provider: ProviderId) -> Option<OAuthApp> {
-        match provider {
-            ProviderId::Google => self.apps.google.clone(),
-            ProviderId::Microsoft => self.apps.microsoft.clone(),
-            ProviderId::Linkedin => self.apps.linkedin.clone(),
-            // No desktop sign-in exists (see `xing`).
-            ProviderId::Xing => None,
-        }
+        self.build_app(provider)
+            .or_else(|| self.entered.lock().unwrap().app(provider))
     }
 
     pub fn token_url(&self, provider: ProviderId) -> &str {
@@ -530,52 +551,29 @@ pub fn unavailable_error(provider: ProviderId) -> AppError {
     AppError::configuration(unavailable_reason(provider))
 }
 
-/// Why a provider cannot be connected. Release builds always include
-/// Google and Microsoft (`build.rs` fails without them), so for them this
-/// is a development build's diagnostic, saying how to add the registration.
-/// LinkedIn is optional (it needs LinkedIn's approval); XING has no sign-in.
+/// Why a provider cannot be connected in this copy of ReMa: it carries no
+/// registration for it, and none was entered in Settings yet. (Official
+/// builds always include Google and Microsoft: `build.rs` fails a release
+/// without them.) LinkedIn is optional; XING has no sign-in.
 pub fn unavailable_reason(provider: ProviderId) -> String {
-    unavailable_reason_at(provider, None)
-}
-
-/// [`unavailable_reason`], naming the run-time configuration file a
-/// development build also reads.
-pub fn unavailable_reason_at(provider: ProviderId, runtime_config: Option<&Path>) -> String {
-    let (setting, key) = match provider {
-        ProviderId::Google => (build_setting::GOOGLE, "[google] desktop_client_id"),
-        ProviderId::Microsoft => (build_setting::MICROSOFT, "[microsoft] public_client_id"),
-        ProviderId::Linkedin => (build_setting::LINKEDIN, "[linkedin] client_id"),
-        ProviderId::Xing => return xing::UNAVAILABLE.to_string(),
-    };
-    if cfg!(debug_assertions) {
-        let runtime = match runtime_config {
-            Some(path) => format!(" or put {key} in {}", path.display()),
-            None => String::new(),
-        };
-        format!(
-            "Development build without ReMa's {} public app configuration ({key}): add it to \
-             src-tauri/connectors.toml, set {setting} when building{runtime} (see \
-             docs/connectors/registration.md). This is a developer setting: users of a release \
-             never enter it.",
-            provider.name()
-        )
-    } else if provider == ProviderId::Linkedin {
-        "LinkedIn sign-in is not part of this version of ReMa. Company, job and public people \
-         research work without it."
-            .to_string()
-    } else {
-        format!(
-            "{} sign-in is missing from this copy of ReMa.",
-            provider.name()
-        )
+    match provider {
+        ProviderId::Google => "Google sign-in is not set up in this copy of ReMa. Choose Set up \
+                               and enter the client ID of a Google OAuth client of type Desktop \
+                               app (ReMa's own app registration); Google accounts connect \
+                               normally after that."
+            .to_string(),
+        ProviderId::Microsoft => "Microsoft sign-in is not set up in this copy of ReMa. Choose \
+                                  Set up and enter the application (client) ID of a Microsoft \
+                                  Entra app registration (a public client); Microsoft accounts \
+                                  connect normally after that."
+            .to_string(),
+        ProviderId::Linkedin => "LinkedIn sign-in is not set up in this copy of ReMa. Choose Set \
+                                 up and enter the client ID of a LinkedIn app with native PKCE \
+                                 enabled, or use Your contacts below: company, job and public \
+                                 people research work without it."
+            .to_string(),
+        ProviderId::Xing => xing::UNAVAILABLE.to_string(),
     }
-}
-
-/// The build settings that hold each registration (for diagnostics).
-mod build_setting {
-    pub const GOOGLE: &str = "GOOGLE_DESKTOP_CLIENT_ID (GOOGLE_DESKTOP_CLIENT_SECRET is optional)";
-    pub const MICROSOFT: &str = "MICROSOFT_PUBLIC_CLIENT_ID";
-    pub const LINKEDIN: &str = "LINKEDIN_CLIENT_ID";
 }
 
 /// Whether a provider issues refresh tokens to ReMa. LinkedIn's
@@ -785,7 +783,7 @@ async fn connect_wanted(
         .connectors
         .app(provider)
         .ok_or_else(|| AppError::configuration(state.connectors.unavailable_reason(provider)))?;
-    let scopes = provider_scopes(provider, &wanted);
+    let scopes = state.connectors.sign_in_scopes(provider, &wanted);
     let pkce = Pkce::new()?;
     let csrf = oauth::random_token(24)?;
     let (seq, cancel) = state.connectors.begin_sign_in(provider, wanted.clone())?;
@@ -1376,6 +1374,7 @@ pub async fn overview(state: &AppState) -> AppResult<ConnectorsOverview> {
         background: crate::services::background::settings(state)?,
         mail_processing: mail_processing(state)?,
         preferences: preferences(state)?,
+        registrations: registrations::overview(state),
     })
 }
 

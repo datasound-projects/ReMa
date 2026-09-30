@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { NavigationContext, type View } from '../../app/navigation';
 import type {
+  AppRegistration,
   ConnectorStatus,
   ConnectorsOverview,
   ProviderAccount,
@@ -17,6 +18,8 @@ import { testingNote } from '../../lib/connectorNotes';
 
 const mocks = vi.hoisted(() => ({
   getConnectors: vi.fn(),
+  setAppRegistration: vi.fn(),
+  removeAppRegistration: vi.fn(),
   connectConnector: vi.fn(),
   connectProviderAccount: vi.fn(),
   cancelConnectorSignIn: vi.fn(),
@@ -119,6 +122,24 @@ function account(provider: ProviderId, connectors: ConnectorStatus[], patch: Par
   };
 }
 
+/** A registration compiled into the build (the usual case). */
+function registration(provider: ProviderId, patch: Partial<AppRegistration> = {}): AppRegistration {
+  return {
+    provider,
+    source: 'build',
+    clientId: `${provider}-client`,
+    clientSecretSet: false,
+    publishingStatus: '',
+    approvedScopes: '',
+    editable: false,
+    ...patch,
+  };
+}
+
+/** A copy of ReMa built without the registration: Settings can enter one. */
+const missingRegistration = (provider: ProviderId) =>
+  registration(provider, { source: 'none', clientId: null, editable: true });
+
 function overview(
   connectors: ConnectorStatus[],
   patch: Partial<ConnectorsOverview> = {},
@@ -130,6 +151,7 @@ function overview(
     background: { runInBackground: false, startAtLogin: false, trayAvailable: true },
     mailProcessing: null,
     preferences: { newAccountsInChats: false },
+    registrations: [registration('google'), registration('microsoft'), registration('linkedin')],
     ...patch,
   };
 }
@@ -352,20 +374,63 @@ describe('Settings → Connectors', () => {
     expect(screen.queryByText('access_denied: AADSTS90094')).toBeNull();
   });
 
-  it('tells a developer build what public configuration is missing, without a Connect button', async () => {
-    mocks.getConnectors.mockResolvedValue(
-      overview([card({ id: 'gmail', state: 'unavailable' })], {}, {
-        google: {
-          state: 'unavailable',
-          available: false,
-          message: 'Development build without ReMa’s Google public app configuration ([google] desktop_client_id).',
-        },
-      }),
+  it('offers Set up instead of Connect when this copy of ReMa has no registration for the provider', async () => {
+    const message = 'Google sign-in is not set up in this copy of ReMa. Choose Set up and enter the client ID.';
+    const unavailable = overview(
+      [card({ id: 'gmail', state: 'unavailable' })],
+      { registrations: [missingRegistration('google'), registration('microsoft'), registration('linkedin')] },
+      { google: { state: 'unavailable', available: false, message } },
     );
+    mocks.getConnectors.mockResolvedValue(unavailable);
+    mocks.setAppRegistration.mockResolvedValue(unavailable);
     render(<ConnectorsSection />);
-    expect(await screen.findByText(/\[google\] desktop_client_id/)).toBeTruthy();
+    expect(await screen.findByText(message)).toBeTruthy();
     expect(screen.getAllByRole('button', { name: 'Connect' })).toHaveLength(1);
     expect(screen.getByText('Unavailable')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Set up' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Set up Google sign-in' });
+    const id = '123456789012-abcdefghijklmnop.apps.googleusercontent.com';
+    fireEvent.change(within(dialog).getByPlaceholderText(/apps\.googleusercontent\.com/), { target: { value: id } });
+    fireEvent.change(within(dialog).getByPlaceholderText(/Desktop client has one/), { target: { value: 'desktop-secret-1' } });
+    fireEvent.change(within(dialog).getByRole('combobox'), { target: { value: 'testing' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+    await waitFor(() =>
+      expect(mocks.setAppRegistration).toHaveBeenCalledWith('google', {
+        clientId: id,
+        clientSecret: 'desktop-secret-1',
+        publishingStatus: 'testing',
+        approvedScopes: '',
+      }),
+    );
+    // A secret is typed once and never shown back.
+    expect(screen.queryByText('desktop-secret-1')).toBeNull();
+  });
+
+  it('keeps a stored secret when the field is left empty, and can remove the registration', async () => {
+    const entered = registration('google', { source: 'settings', clientSecretSet: true, editable: true });
+    mocks.getConnectors.mockResolvedValue(
+      overview(disconnected.connectors, { registrations: [entered, registration('microsoft'), registration('linkedin')] }),
+    );
+    mocks.setAppRegistration.mockResolvedValue(disconnected);
+    mocks.removeAppRegistration.mockResolvedValue(disconnected);
+    render(<ConnectorsSection />);
+    fireEvent.click(await screen.findByRole('button', { name: 'App registration' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Google app registration' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+    await waitFor(() =>
+      expect(mocks.setAppRegistration).toHaveBeenCalledWith('google', {
+        clientId: 'google-client',
+        clientSecret: null,
+        publishingStatus: '',
+        approvedScopes: '',
+      }),
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: 'App registration' }));
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Remove' }));
+    fireEvent.click(within(await screen.findByRole('dialog', { name: 'Remove the Google registration?' })).getByRole('button', { name: 'Remove' }));
+    await waitFor(() => expect(mocks.removeAppRegistration).toHaveBeenCalledWith('google'));
   });
 
   it('says plainly where job mail is read: a cloud provider or this computer', async () => {

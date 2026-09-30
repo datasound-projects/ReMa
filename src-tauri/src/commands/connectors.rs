@@ -5,7 +5,9 @@ use tauri_plugin_opener::OpenerExt;
 use crate::{
     connectors,
     error::{AppError, AppResult},
-    models::connectors::{ConnectionPreferences, ConnectorId, ConnectorsOverview, ProviderId},
+    models::connectors::{
+        AppRegistrationInput, ConnectionPreferences, ConnectorId, ConnectorsOverview, ProviderId,
+    },
     services::background,
     state::AppState,
 };
@@ -76,6 +78,33 @@ pub async fn set_connection_preferences(
     preferences: ConnectionPreferences,
 ) -> AppResult<ConnectorsOverview> {
     connectors::set_preferences(&state, preferences)?;
+    connectors::overview(&state).await
+}
+
+/// Enters (or changes) ReMa's app registration for a provider whose
+/// registration this copy of ReMa was built without (Settings → Connectors
+/// → Set up). Public client IDs go to the data folder, a Google client
+/// secret to the system keychain; the sign-in works right away.
+#[tauri::command]
+#[specta::specta]
+pub async fn set_app_registration(
+    state: State<'_, AppState>,
+    provider: ProviderId,
+    input: AppRegistrationInput,
+) -> AppResult<ConnectorsOverview> {
+    connectors::registrations::set(&state, provider, input).await?;
+    connectors::overview(&state).await
+}
+
+/// Removes a registration entered in Settings (the account is disconnected
+/// first).
+#[tauri::command]
+#[specta::specta]
+pub async fn remove_app_registration(
+    state: State<'_, AppState>,
+    provider: ProviderId,
+) -> AppResult<ConnectorsOverview> {
+    connectors::registrations::remove(&state, provider).await?;
     connectors::overview(&state).await
 }
 

@@ -358,8 +358,9 @@ Settings → Connectors (React)          src/components/settings/ConnectorsSecti
 connectors/mod.rs      Connection Manager: connect_provider / connect (one sign-in, the union of
                        scopes), disconnect_provider / disconnect, require, ready, overview
                        (ConnectorsOverview.accounts: the account state machine, `account_of`)
-                       Apps::load: public configuration (compiled in, or a development build's
-                       <data dir>/connectors.toml); ConnectorsContext::unavailable_reason
+                       Apps::from_build: the build's public configuration; registrations.rs:
+                       what Settings → Set up enters (<data dir>/connectors.toml, the Google
+                       secret in the keychain); ConnectorsContext::unavailable_reason
 connectors/oauth.rs    OAuth Manager: PKCE S256, random state, loopback redirect, token requests
 connectors/tokens.rs   token lifecycle: get_valid_access_token (cache → refresh), refresh_access_token
                        (after a 401, then the request is retried once by api.rs), mark_reauth_required,

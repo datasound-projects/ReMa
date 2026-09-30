@@ -67,6 +67,8 @@ pub fn builder() -> Builder<tauri::Wry> {
             commands::connectors::connect_provider_account,
             commands::connectors::disconnect_provider_account,
             commands::connectors::set_connection_preferences,
+            commands::connectors::set_app_registration,
+            commands::connectors::remove_app_registration,
             commands::connectors::cancel_connector_sign_in,
             commands::connectors::disconnect_connector,
             commands::connectors::set_background_settings,

@@ -173,7 +173,12 @@ pub fn run() {
             scheduler::start(state.clone());
             analytics::enrich::start(state.clone());
             mail_monitor::start(state.clone());
-            // Connected accounts stay signed in (no data is read).
+            // A Google client secret entered in Settings lives in the
+            // keychain; connected accounts stay signed in (no data is read).
+            let registrations = state.clone();
+            tauri::async_runtime::spawn(async move {
+                connectors::registrations::load_secret(&registrations).await;
+            });
             connectors::tokens::start_renewal(state.clone());
             // Career search needs no setup: its parts are checked, an old
             // search-service setting is moved out of the way, and what the
@@ -290,14 +295,15 @@ pub(crate) fn build_state(
         info.version.clone(),
     ));
     let claude_console = Arc::new(ClaudeConsole::new(runtimes.join("anthropic")));
-    // Public OAuth client configuration: compiled in, and for development
-    // builds also read from the data folder.
+    // Public OAuth client configuration: compiled in, completed by what was
+    // entered in Settings (the data folder's connectors.toml; the Google
+    // secret follows from the keychain once the state exists).
     let connectors = ConnectorsContext::new(
         GoogleEndpoints::from_env(),
         MicrosoftEndpoints::from_env(),
-        Apps::load(&data_dir),
+        Apps::from_build(),
     )
-    .with_runtime_config(&data_dir);
+    .with_data_dir(&data_dir);
 
     Ok(AppState {
         info: Arc::new(info),

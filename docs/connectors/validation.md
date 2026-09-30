@@ -210,3 +210,30 @@ directory (database and WAL, webview storage) or any app log; the Google
 Desktop client secret is only in the binary (public configuration). After
 the run the provider host names were removed from `/etc/hosts`, the
 stand-ins stopped and the package removed.
+
+## 5. App registration entered in Settings (Set up)
+
+A copy of ReMa built without any registration (debug build, no
+`REMA_DEV_*` client IDs, no compiled-in IDs) takes the registration inside
+the app. Run on the debug build with the mock providers
+(`scripts/e2e/mock-providers.mjs`, whose Google token endpoint refuses a
+request without `client_secret`) and an unlocked GNOME keyring, in a
+scratch home. Screenshots: `docs/media/settings-set-up-cards.png`,
+`docs/media/settings-set-up.png`.
+
+| # | Scenario | Result |
+|---|---|---|
+| 1 | Settings → Connectors on a build without registrations | Google and Microsoft "Unavailable" with "… is not set up in this copy of ReMa. Choose Set up …" and a **Set up** button; no Connect; accounts left over from an earlier build listed but not usable |
+| 2 | Google → Set up: client ID `123456789012-e2etestclient.apps.googleusercontent.com`, a secret, publishing status Testing; Save | Card "Connected" (leftover account) with the Testing note; `<data dir>/connectors.toml` holds `[google] desktop_client_id` and `publishing_status = "testing"` and **no secret**; log `[connector] registration provider=google source=settings secret=stored`; the secret is in the keychain (`connector-app:google:client_secret`) |
+| 3 | Disconnect Google, Connect | Browser opened with `client_id=123456789012-e2etestclient.apps.googleusercontent.com`; token exchange `ok:true, pkce: S256 verified` (the mock requires the secret, so the keychain secret reached the request); card "Connected", ana@gmail.com |
+| 4 | Microsoft → Set up with `not-a-guid`; Save | Dialog stays open: "The Microsoft application (client) ID is a GUID, like 12345678-1234-1234-1234-123456789abc."; nothing written |
+| 5 | Microsoft → Set up with `11111111-2222-3333-4444-555555555556`; Save; Disconnect; Connect | `[microsoft] public_client_id` written; browser opened with `client_id=11111111-2222-3333-4444-555555555556`; exchange `ok:true`; card "Connected", ana@outlook.com |
+| 6 | Quit ReMa, start again (still no compiled-in IDs) | Log `[connector] config entered_file=… google=true microsoft=true linkedin=false` and `registration provider=google secret=loaded`; both cards "Connected" without any sign-in; **App registration** on each card reopens the dialog |
+
+Automated: `connectors::tests::a_registration_entered_in_settings_makes_the_sign_in_work`
+(format checks, file without secret, keychain secret, sign-in with the
+entered secret, connected-account rule, restart, removal, build-provided
+registration refused) and
+`connectors::tests::microsoft_and_linkedin_registrations_can_be_entered_too`;
+interface: `ConnectorsSection.test.tsx` ("offers Set up instead of
+Connect…", "keeps a stored secret…").

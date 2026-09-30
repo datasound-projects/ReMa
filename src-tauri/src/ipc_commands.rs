@@ -32,6 +32,8 @@ pub const APP_COMMANDS: &[&str] = &[
     "connect_provider_account",
     "disconnect_provider_account",
     "set_connection_preferences",
+    "set_app_registration",
+    "remove_app_registration",
     "cancel_connector_sign_in",
     "disconnect_connector",
     "set_background_settings",

@@ -352,6 +352,69 @@ pub struct ConnectorsOverview {
     /// None until a model is connected.
     pub mail_processing: Option<MailProcessing>,
     pub preferences: ConnectionPreferences,
+    /// ReMa's app registration per sign-in provider (Google, Microsoft,
+    /// LinkedIn): where it comes from and whether Settings can enter one.
+    pub registrations: Vec<AppRegistration>,
+}
+
+/// Where a provider's app registration (ReMa's public OAuth client) comes
+/// from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum RegistrationSource {
+    /// Compiled into this copy of ReMa.
+    Build,
+    /// Entered in Settings → Connectors → Set up, kept on this computer.
+    Settings,
+    /// None: the provider's sign-in is unavailable until one is entered.
+    None,
+}
+
+/// A provider's app registration as Settings shows it. Client IDs are
+/// public identifiers; a client secret is never included.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct AppRegistration {
+    pub provider: ProviderId,
+    pub source: RegistrationSource,
+    /// The client ID in use, when there is one.
+    pub client_id: Option<String>,
+    /// Google: a Desktop client secret is stored (its value is never shown).
+    pub client_secret_set: bool,
+    /// Google: "testing", "production" or "" (not said).
+    pub publishing_status: String,
+    /// LinkedIn: approved restricted scopes, space-separated.
+    pub approved_scopes: String,
+    /// Settings can enter, change or remove it (the build carries none).
+    pub editable: bool,
+}
+
+/// What Settings → Connectors → Set up sends.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct AppRegistrationInput {
+    pub client_id: String,
+    /// Google only. `None` keeps the stored secret; an empty string removes
+    /// it; anything else replaces it.
+    pub client_secret: Option<String>,
+    /// Google: "testing", "production" or "".
+    pub publishing_status: String,
+    /// LinkedIn: approved restricted scopes, space-separated.
+    pub approved_scopes: String,
+}
+
+impl std::fmt::Debug for AppRegistrationInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppRegistrationInput")
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "<redacted>"),
+            )
+            .field("publishing_status", &self.publishing_status)
+            .field("approved_scopes", &self.approved_scopes)
+            .finish()
+    }
 }
 
 /// Connectors changed (state, account, sync).

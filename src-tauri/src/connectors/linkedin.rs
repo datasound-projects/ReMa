@@ -95,7 +95,7 @@ pub fn approved_scopes() -> Vec<String> {
     known(super::config::LINKEDIN_APPROVED_SCOPES)
 }
 
-fn known(scopes: &str) -> Vec<String> {
+pub(crate) fn known(scopes: &str) -> Vec<String> {
     scopes
         .split_whitespace()
         .filter(|s| *s == SCOPE_FIRST_DEGREE)
@@ -103,15 +103,20 @@ fn known(scopes: &str) -> Vec<String> {
         .collect()
 }
 
-/// The scopes a sign-in asks for: identity, plus approved extras.
+/// The scopes a sign-in asks for: identity, plus the build's approved extras.
 pub fn scopes() -> Vec<String> {
+    scopes_with(&approved_scopes())
+}
+
+/// The scopes a sign-in asks for: identity, plus the given approved extras.
+pub fn scopes_with(approved: &[String]) -> Vec<String> {
     let mut scopes: Vec<String> = [SCOPE_OPENID, SCOPE_PROFILE, SCOPE_EMAIL]
         .iter()
         .map(|s| s.to_string())
         .collect();
-    for extra in approved_scopes() {
-        if !scopes.contains(&extra) {
-            scopes.push(extra);
+    for extra in approved {
+        if !scopes.contains(extra) {
+            scopes.push(extra.clone());
         }
     }
     scopes

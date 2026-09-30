@@ -1,5 +1,6 @@
 import {
   commands,
+  type AppRegistrationInput,
   type ConnectionPreferences,
   type ConnectorId,
   type ConnectorsOverview,
@@ -8,6 +9,8 @@ import {
 import { callBackend } from './ipc';
 
 export type {
+  AppRegistration,
+  AppRegistrationInput,
   BackgroundSettings,
   Capability,
   CapabilityView,
@@ -23,6 +26,7 @@ export type {
   PermissionView,
   ProviderAccount,
   ProviderId,
+  RegistrationSource,
 } from '../generated/bindings';
 
 /** Every connector's state. Tokens never leave the Rust core. */
@@ -67,4 +71,18 @@ export function disconnectConnector(id: ConnectorId): Promise<ConnectorsOverview
 
 export function setBackgroundSettings(runInBackground: boolean, startAtLogin: boolean): Promise<ConnectorsOverview> {
   return callBackend(() => commands.setBackgroundSettings(runInBackground, startAtLogin));
+}
+
+/**
+ * Enters ReMa's app registration for a provider this copy was built without
+ * (Settings → Connectors → Set up). Client IDs stay on this computer, a
+ * Google client secret in the system keychain; the sign-in works right away.
+ */
+export function setAppRegistration(provider: ProviderId, input: AppRegistrationInput): Promise<ConnectorsOverview> {
+  return callBackend(() => commands.setAppRegistration(provider, input));
+}
+
+/** Removes a registration entered in Settings (the account is disconnected first). */
+export function removeAppRegistration(provider: ProviderId): Promise<ConnectorsOverview> {
+  return callBackend(() => commands.removeAppRegistration(provider));
 }

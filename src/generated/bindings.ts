@@ -60,6 +60,18 @@ export const commands = {
 	 *  connector choice).
 	 */
 	setConnectionPreferences: (preferences: ConnectionPreferences) => __TAURI_INVOKE<ConnectorsOverview>("set_connection_preferences", { preferences }),
+	/**
+	 *  Enters (or changes) ReMa's app registration for a provider whose
+	 *  registration this copy of ReMa was built without (Settings → Connectors
+	 *  → Set up). Public client IDs go to the data folder, a Google client
+	 *  secret to the system keychain; the sign-in works right away.
+	 */
+	setAppRegistration: (provider: ProviderId, input: AppRegistrationInput) => __TAURI_INVOKE<ConnectorsOverview>("set_app_registration", { provider, input }),
+	/**
+	 *  Removes a registration entered in Settings (the account is disconnected
+	 *  first).
+	 */
+	removeAppRegistration: (provider: ProviderId) => __TAURI_INVOKE<ConnectorsOverview>("remove_app_registration", { provider }),
 	cancelConnectorSignIn: (provider: ProviderId) => __TAURI_INVOKE<null>("cancel_connector_sign_in", { provider }),
 	/**
 	 *  Stops the connector's sync; the last connector of an account also signs
@@ -658,6 +670,39 @@ export type AnswerMode =
 "model_search" | 
 /**  ReMa searches and checks every posting first. */
 "verified";
+
+/**
+ *  A provider's app registration as Settings shows it. Client IDs are
+ *  public identifiers; a client secret is never included.
+ */
+export type AppRegistration = {
+	provider: ProviderId,
+	source: RegistrationSource,
+	/**  The client ID in use, when there is one. */
+	clientId: string | null,
+	/**  Google: a Desktop client secret is stored (its value is never shown). */
+	clientSecretSet: boolean,
+	/**  Google: "testing", "production" or "" (not said). */
+	publishingStatus: string,
+	/**  LinkedIn: approved restricted scopes, space-separated. */
+	approvedScopes: string,
+	/**  Settings can enter, change or remove it (the build carries none). */
+	editable: boolean,
+};
+
+/**  What Settings → Connectors → Set up sends. */
+export type AppRegistrationInput = {
+	clientId: string,
+	/**
+	 *  Google only. `None` keeps the stored secret; an empty string removes
+	 *  it; anything else replaces it.
+	 */
+	clientSecret: string | null,
+	/**  Google: "testing", "production" or "". */
+	publishingStatus: string,
+	/**  LinkedIn: approved restricted scopes, space-separated. */
+	approvedScopes: string,
+};
 
 /**  Response of the `get_app_status` command. */
 export type AppStatus = {
@@ -1423,6 +1468,11 @@ export type ConnectorsOverview = {
 	/**  None until a model is connected. */
 	mailProcessing: MailProcessing | null,
 	preferences: ConnectionPreferences,
+	/**
+	 *  ReMa's app registration per sign-in provider (Google, Microsoft,
+	 *  LinkedIn): where it comes from and whether Settings can enter one.
+	 */
+	registrations: AppRegistration[],
 };
 
 /**  A person or role at the buyer (permitted public professional data only). */
@@ -3353,6 +3403,18 @@ export type Redaction = {
 	detail: string,
 	createdAt: number,
 };
+
+/**
+ *  Where a provider's app registration (ReMa's public OAuth client) comes
+ *  from.
+ */
+export type RegistrationSource = 
+/**  Compiled into this copy of ReMa. */
+"build" | 
+/**  Entered in Settings → Connectors → Set up, kept on this computer. */
+"settings" | 
+/**  None: the provider's sign-in is unavailable until one is entered. */
+"none";
 
 /**  A file that could not be added, and why. */
 export type RejectedFile = {

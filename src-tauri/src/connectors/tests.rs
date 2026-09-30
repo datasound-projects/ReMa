@@ -15,7 +15,10 @@ use crate::{
     db::{connectors::ReauthCause, jobs as jobs_repo, providers as settings_repo},
     events::RecordingEvents,
     llm::fake::FakeLanguageModel,
-    models::jobs::ApplicationStatus,
+    models::{
+        connectors::{AppRegistrationInput, RegistrationSource},
+        jobs::ApplicationStatus,
+    },
     secrets::Credential,
     state::testing,
     test_support::{MockServer, Recorded},
@@ -2468,11 +2471,7 @@ async fn the_account_state_machine_names_each_situation() {
     let google = account(&bare, ProviderId::Google).await;
     assert_eq!(google.state, ConnectionState::Unavailable);
     assert!(!google.available);
-    assert!(google
-        .message
-        .as_deref()
-        .unwrap()
-        .contains("[google] desktop_client_id"));
+    assert!(google.message.as_deref().unwrap().contains("Set up"));
 
     // An organization's policy: admin approval required.
     let error = connect(
@@ -2698,35 +2697,291 @@ fn public_configuration_can_come_from_the_data_folder_in_development() {
     assert!(!errors[0].contains("not-a-guid"));
     assert!(Apps::from_toml("not toml [").is_err());
 
-    // The file completes what the build lacks and never overrides it.
+    // The data folder's file completes what the build lacks and never
+    // overrides it; a secret written there by hand is honored.
     let dir = std::env::temp_dir().join(format!("rema-config-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join(RUNTIME_CONFIG_FILE),
-        "[google]\ndesktop_client_id = \"123-abc.apps.googleusercontent.com\"\n",
+        "[google]\ndesktop_client_id = \"123-abc.apps.googleusercontent.com\"\n\
+         desktop_client_secret = \"hand-written-secret\"\npublishing_status = \"testing\"\n",
     )
     .unwrap();
-    let loaded = Apps::load(&dir);
-    assert_eq!(
-        loaded.google.map(|a| a.client_id),
-        google::app()
-            .map(|a| a.client_id)
-            .or(Some("123-abc.apps.googleusercontent.com".into()))
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-
-    // The message for a missing registration names the file and the key.
     let context = ConnectorsContext::new(
         GoogleEndpoints::at("http://127.0.0.1:9"),
         MicrosoftEndpoints::at("http://127.0.0.1:9", "http://127.0.0.1:9"),
         Apps::default(),
     )
-    .with_runtime_config(std::path::Path::new("/data/ReMa"));
-    let reason = context.unavailable_reason(ProviderId::Microsoft);
-    assert!(reason.contains("[microsoft] public_client_id"), "{reason}");
-    assert!(reason.contains("connectors.toml"), "{reason}");
-    assert!(
-        reason.contains("users of a release never enter it"),
-        "{reason}"
+    .with_data_dir(&dir);
+    let google = context.app(ProviderId::Google).unwrap();
+    assert_eq!(google.client_id, "123-abc.apps.googleusercontent.com");
+    assert_eq!(google.client_secret.as_deref(), Some("hand-written-secret"));
+    assert_eq!(context.google_in_testing(), Some(true));
+    assert!(context.app(ProviderId::Microsoft).is_none());
+    let built = ConnectorsContext::new(
+        GoogleEndpoints::at("http://127.0.0.1:9"),
+        MicrosoftEndpoints::at("http://127.0.0.1:9", "http://127.0.0.1:9"),
+        self::apps(),
+    )
+    .with_data_dir(&dir);
+    assert_eq!(
+        built.app(ProviderId::Google).unwrap().client_id,
+        GOOGLE_CLIENT
     );
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // A missing registration points at Set up, never at a terminal.
+    let reason = context.unavailable_reason(ProviderId::Microsoft);
+    assert!(reason.contains("Set up"), "{reason}");
+    assert!(reason.contains("application (client) ID"), "{reason}");
+    assert!(!reason.contains("connectors.toml"), "{reason}");
+}
+
+/// Settings → Connectors → Set up: a copy of ReMa built without a
+/// registration takes one in the app, keeps the client ID on disk and the
+/// Google secret in the keychain, and signs in with it right away.
+#[tokio::test]
+async fn a_registration_entered_in_settings_makes_the_sign_in_work() {
+    use registrations::{EnteredRegistrations, GOOGLE_SECRET_ACCOUNT};
+    let providers = providers().await;
+    let (state, _) = state_for(&providers, Apps::default());
+    let google = account(&state, ProviderId::Google).await;
+    assert_eq!(google.state, ConnectionState::Unavailable);
+    let before = overview(&state).await.unwrap().registrations;
+    assert_eq!(before.len(), 3);
+    assert!(before
+        .iter()
+        .all(|r| r.source == RegistrationSource::None && r.editable && r.client_id.is_none()));
+
+    // Malformed values are refused with a plain message; nothing is written.
+    let input = |client_id: &str, secret: Option<&str>| AppRegistrationInput {
+        client_id: client_id.into(),
+        client_secret: secret.map(str::to_string),
+        publishing_status: "testing".into(),
+        approved_scopes: String::new(),
+    };
+    let error = registrations::set(&state, ProviderId::Google, input("not-a-client", None))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, AppError::Validation(_)), "{error}");
+    assert!(error.to_string().contains("apps.googleusercontent.com"));
+    let error = registrations::set(&state, ProviderId::Microsoft, input("not-a-guid", None))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("GUID"), "{error}");
+    let error = registrations::set(&state, ProviderId::Xing, input("x", None))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("no sign-in"), "{error}");
+    assert!(!state.data_dir.join(RUNTIME_CONFIG_FILE).exists());
+
+    // Entered: available at once, the file holds the public values only,
+    // the keychain the secret.
+    registrations::set(
+        &state,
+        ProviderId::Google,
+        input(GOOGLE_CLIENT, Some(GOOGLE_SECRET)),
+    )
+    .await
+    .unwrap();
+    let google = account(&state, ProviderId::Google).await;
+    assert_eq!(google.state, ConnectionState::Disconnected);
+    assert!(google.available);
+    let entered = state.connectors.registration(ProviderId::Google);
+    assert_eq!(entered.source, RegistrationSource::Settings);
+    assert_eq!(entered.client_id.as_deref(), Some(GOOGLE_CLIENT));
+    assert!(entered.client_secret_set && entered.editable);
+    assert_eq!(entered.publishing_status, "testing");
+    assert_eq!(state.connectors.google_in_testing(), Some(true));
+    let file = std::fs::read_to_string(state.data_dir.join(RUNTIME_CONFIG_FILE)).unwrap();
+    assert!(file.contains(GOOGLE_CLIENT), "{file}");
+    assert!(
+        !file.contains(GOOGLE_SECRET),
+        "the secret is never written to disk"
+    );
+    assert_eq!(
+        state
+            .vault
+            .get_text(GOOGLE_SECRET_ACCOUNT)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(GOOGLE_SECRET)
+    );
+    for line in diag_lines().lock().unwrap().iter() {
+        assert!(!line.contains(GOOGLE_SECRET), "{line}");
+    }
+
+    // The sign-in uses it: the token request carries the entered secret.
+    connect(
+        &state,
+        ConnectorId::Gmail,
+        Browser::default().open(Consent::Allow),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        account(&state, ProviderId::Google).await.state,
+        ConnectionState::Connected
+    );
+    let exchange = form(&providers.requests("/token")[0].body);
+    assert_eq!(exchange["client_id"], GOOGLE_CLIENT);
+    assert_eq!(exchange["client_secret"], GOOGLE_SECRET);
+
+    // A connected account keeps its registration: another client ID, or
+    // removing it, waits for a disconnect. The secret alone may change.
+    let error = registrations::set(
+        &state,
+        ProviderId::Google,
+        input("other-client.apps.googleusercontent.com", None),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("Disconnect"), "{error}");
+    let error = registrations::remove(&state, ProviderId::Google)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("Disconnect"), "{error}");
+    registrations::set(&state, ProviderId::Google, input(GOOGLE_CLIENT, None))
+        .await
+        .unwrap();
+    assert!(
+        state
+            .connectors
+            .registration(ProviderId::Google)
+            .client_secret_set
+    );
+
+    // A restart reads the file back and the secret from the keychain.
+    let (mut restarted, _) = state_for(&providers, Apps::default());
+    restarted.vault = state.vault.clone();
+    restarted.connectors = ConnectorsContext::new(
+        GoogleEndpoints::at(&providers.server.base_url),
+        MicrosoftEndpoints::at(&providers.server.base_url, &providers.server.base_url),
+        Apps::default(),
+    )
+    .with_data_dir(&state.data_dir);
+    assert!(restarted
+        .connectors
+        .app(ProviderId::Google)
+        .unwrap()
+        .client_secret
+        .is_none());
+    registrations::load_secret(&restarted).await;
+    let app = restarted.connectors.app(ProviderId::Google).unwrap();
+    assert_eq!(app.client_id, GOOGLE_CLIENT);
+    assert_eq!(app.client_secret.as_deref(), Some(GOOGLE_SECRET));
+    assert_eq!(
+        EnteredRegistrations::read(&state.data_dir)
+            .unwrap()
+            .google
+            .unwrap()
+            .publishing_status,
+        "testing"
+    );
+
+    // Removed after a disconnect: unavailable again, nothing left behind.
+    disconnect_provider(&state, ProviderId::Google)
+        .await
+        .unwrap();
+    registrations::remove(&state, ProviderId::Google)
+        .await
+        .unwrap();
+    assert_eq!(
+        account(&state, ProviderId::Google).await.state,
+        ConnectionState::Unavailable
+    );
+    assert!(!state.data_dir.join(RUNTIME_CONFIG_FILE).exists());
+    assert!(state
+        .vault
+        .get_text(GOOGLE_SECRET_ACCOUNT)
+        .await
+        .unwrap()
+        .is_none());
+
+    // A build that carries the registration takes no other.
+    let (built, _) = state_for(&providers, apps());
+    let error = registrations::set(&built, ProviderId::Google, input(GOOGLE_CLIENT, None))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("already includes"), "{error}");
+    assert_eq!(
+        built.connectors.registration(ProviderId::Google).source,
+        RegistrationSource::Build
+    );
+    assert!(!built.connectors.registration(ProviderId::Google).editable);
+}
+
+/// Microsoft and LinkedIn registrations entered in Settings: a public
+/// client without a secret, and LinkedIn's approved scopes in the sign-in.
+#[tokio::test]
+async fn microsoft_and_linkedin_registrations_can_be_entered_too() {
+    let providers = providers().await;
+    let (state, _) = state_for(&providers, Apps::default());
+    registrations::set(
+        &state,
+        ProviderId::Microsoft,
+        AppRegistrationInput {
+            client_id: MICROSOFT_CLIENT.into(),
+            client_secret: None,
+            publishing_status: String::new(),
+            approved_scopes: String::new(),
+        },
+    )
+    .await
+    .unwrap();
+    connect(
+        &state,
+        ConnectorId::OutlookMail,
+        Browser::default().open(Consent::Allow),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        account(&state, ProviderId::Microsoft).await.state,
+        ConnectionState::Connected
+    );
+    let exchange = form(&providers.requests("/common/oauth2/v2.0/token")[0].body);
+    assert_eq!(exchange["client_id"], MICROSOFT_CLIENT);
+    assert!(!exchange.contains_key("client_secret"), "public client");
+
+    let error = registrations::set(
+        &state,
+        ProviderId::Linkedin,
+        AppRegistrationInput {
+            client_id: "86abcdefghij12".into(),
+            client_secret: None,
+            publishing_status: String::new(),
+            approved_scopes: "r_1st_connections w_member_social".into(),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("w_member_social"), "{error}");
+    registrations::set(
+        &state,
+        ProviderId::Linkedin,
+        AppRegistrationInput {
+            client_id: "86abcdefghij12".into(),
+            client_secret: None,
+            publishing_status: String::new(),
+            approved_scopes: "r_1st_connections".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let scopes = state
+        .connectors
+        .sign_in_scopes(ProviderId::Linkedin, &[ConnectorId::Linkedin]);
+    assert!(
+        scopes.contains(&"r_1st_connections".to_string()),
+        "{scopes:?}"
+    );
+    let file = std::fs::read_to_string(state.data_dir.join(RUNTIME_CONFIG_FILE)).unwrap();
+    assert!(
+        file.contains("[microsoft]") && file.contains("[linkedin]"),
+        "{file}"
+    );
+    assert!(file.contains("r_1st_connections"), "{file}");
+    let _ = std::fs::remove_file(state.data_dir.join(RUNTIME_CONFIG_FILE));
 }

@@ -10,7 +10,9 @@
 #
 # Release builds FAIL when the Google or Microsoft client IDs are missing, so
 # a release can never ship with "sign-in is not available in this build".
-# Debug builds without them show a developer diagnostic on the cards.
+# Debug builds without them offer "Set up" on the cards: the registration is
+# then entered inside the app (Settings → Connectors) and kept in the data
+# folder's connectors.toml, the Google secret in the system keychain.
 #
 # An environment variable with the name in the comment overrides a value
 # (for example a CI release job that keeps them in repository variables).

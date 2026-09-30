@@ -263,7 +263,8 @@ pub fn to_rust(config: &ConnectorConfig) -> String {
     )
 }
 
-fn valid_google_client_id(v: &str) -> bool {
+#[allow(dead_code)]
+pub fn valid_google_client_id(v: &str) -> bool {
     v.len() <= 200
         && v.strip_suffix(".apps.googleusercontent.com")
             .is_some_and(|prefix| {
@@ -274,11 +275,13 @@ fn valid_google_client_id(v: &str) -> bool {
             })
 }
 
-fn valid_google_client_secret(v: &str) -> bool {
+#[allow(dead_code)]
+pub fn valid_google_client_secret(v: &str) -> bool {
     (8..=128).contains(&v.len()) && v.chars().all(|c| c.is_ascii_graphic() && c != '"')
 }
 
-fn valid_guid(v: &str) -> bool {
+#[allow(dead_code)]
+pub fn valid_guid(v: &str) -> bool {
     v.len() == 36
         && v.char_indices().all(|(i, c)| match i {
             8 | 13 | 18 | 23 => c == '-',
@@ -295,7 +298,8 @@ fn valid_tenant(v: &str) -> bool {
                 .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.'))
 }
 
-fn valid_linkedin_client_id(v: &str) -> bool {
+#[allow(dead_code)]
+pub fn valid_linkedin_client_id(v: &str) -> bool {
     (8..=64).contains(&v.len()) && v.chars().all(|c| c.is_ascii_alphanumeric())
 }
 

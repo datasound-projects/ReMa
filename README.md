@@ -152,7 +152,7 @@ pnpm tauri dev
 
 Then open **Settings**, connect a model provider (or add a local endpoint such as `http://localhost:11434/v1` for Ollama) and start chatting.
 
-Google and Microsoft connectors use ReMa's own app registrations. A development build without them shows the connector as unavailable and says why; [docs/connectors/registration.md](docs/connectors/registration.md) explains how to register them once.
+Google and Microsoft connectors use ReMa's own app registrations. A build made without them shows **Set up** on the connector card: enter the registration once inside the app and the sign-in works right away. [docs/connectors/registration.md](docs/connectors/registration.md) explains how to create the registrations.
 
 ## Documentation
 
