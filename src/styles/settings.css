@@ -407,6 +407,7 @@
 .connector-card__note {
   font-size: var(--text-sm);
   color: var(--color-accent);
+  overflow-wrap: anywhere;
 }
 
 .connector-card__problem {
@@ -416,6 +417,7 @@
   font-size: var(--text-sm);
   line-height: var(--leading-snug);
   color: var(--color-danger);
+  overflow-wrap: anywhere;
 }
 
 .connector-card__problem-icon {
@@ -760,6 +762,8 @@
 /* ── Connector account cards (Google, Microsoft) ─────────── */
 
 .account-card__email {
+  margin-top: calc(-1 * var(--space-1));
+  font-size: var(--text-sm);
   overflow-wrap: anywhere;
 }
 

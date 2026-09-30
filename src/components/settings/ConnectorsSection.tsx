@@ -198,10 +198,10 @@ function AccountCard({ account: a, onManage }: { account: ProviderAccount; onMan
         </span>
         <span className="connector-card__text">
           <span className="connector-card__name">{a.name}</span>
-          {hasAccount && a.email && <span className="connector-card__by account-card__email">{a.email}</span>}
         </span>
         <StatusIndicator tone={status.tone} label={status.label} live={a.state === 'connecting' || a.state === 'refreshing'} />
       </div>
+      {hasAccount && a.email && <p className="connector-card__meta account-card__email">{a.email}</p>}
       {!hasAccount && a.state !== 'connecting' && a.state !== 'unavailable' && (
         <p className="connector-card__description">{accountPitch(a.provider)}</p>
       )}

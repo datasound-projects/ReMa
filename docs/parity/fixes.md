@@ -102,7 +102,7 @@ browser and other tools are off: `accounts/codex.rs` `DISABLED_FEATURES`).
 | L9 | The user's Mac has a debug build without IDs; nothing to change in code. | blocked | BLOCKED | — | rebuild with the IDs: `GOOGLE_DESKTOP_CLIENT_ID=… MICROSOFT_PUBLIC_CLIENT_ID=… GOOGLE_PUBLISHING_STATUS=testing pnpm build:app` |
 | L10 | Unchanged: imported exports only, labelled as such; no partner API bypass. | unsupported (by policy) | VERIFIED (second pass, imports) | second pass | LinkedIn partner approval; XING has no API |
 | L11 | Windows-native program lookup and shim launching added (B7); nothing run on Windows. | fixed | BLOCKED | `windows_programs_take_the_launchable_pathext_extensions_in_order`, `cmd_wrappers_run_through_cmd_exe_with_the_quoted_path_only` | A Windows PC |
-| L12 | Signing and notarization configured from secrets, unsigned artifacts marked; the Google secret no longer blocks a build. | fixed | BLOCKED (a real run of the workflow) | `.github/workflows/release.yml` validated; README "Building and signing" | Certificates and credentials (owner) |
+| L12 | Signing and notarization configured from secrets, unsigned artifacts marked; the Google secret no longer blocks a build. | fixed | BLOCKED (a real run of the workflow) | `.github/workflows/release.yml` validated; `docs/handbook.md` "Building and signing" | Certificates and credentials (owner) |
 
 ## Owner checklist
 

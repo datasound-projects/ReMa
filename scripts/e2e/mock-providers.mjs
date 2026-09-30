@@ -161,6 +161,7 @@ const events = [
 ];
 let eventSeq = 1;
 let replyDelay = 0;
+const streamPaceMs = Number(process.env.REMA_E2E_STREAM_MS) || 0;
 // Event ids stay unique across mock sessions, as real calendars' ids do.
 const session = Date.now().toString(36);
 const outlookEvents = [
@@ -659,9 +660,25 @@ function openaiResponses(body, res) {
     sse({ type: 'response.output_item.done', output_index: 0, item: { type: 'web_search_call', id: 'ws_1', status: 'completed',
       action: { type: 'search', query: step === 'jobs' ? 'AI engineer jobs Vienna' : 'Nordlicht AI recruiters', sources: sources.map((s) => ({ type: 'url', url: s.url })) } } });
   }
-  sse({ type: 'response.output_text.delta', item_id: 'msg_1', output_index: 1, delta: own ? ownSearchAnswer() : modelText(step) });
-  sse({ type: 'response.completed', response: { status: 'completed' } });
-  res.end();
+  const text = own ? ownSearchAnswer() : modelText(step);
+  const finish = () => {
+    sse({ type: 'response.completed', response: { status: 'completed' } });
+    res.end();
+  };
+  // REMA_E2E_STREAM_MS=<ms>: stream the answer word by word at that pace (for recordings).
+  if (streamPaceMs > 0) {
+    const words = text.split(/(?<=\s)/);
+    let i = 0;
+    const tick = () => {
+      if (i >= words.length) return finish();
+      sse({ type: 'response.output_text.delta', item_id: 'msg_1', output_index: 1, delta: words[i++] });
+      setTimeout(tick, streamPaceMs);
+    };
+    setTimeout(tick, step === 'answer' && !own ? streamPaceMs : 1500);
+    return;
+  }
+  sse({ type: 'response.output_text.delta', item_id: 'msg_1', output_index: 1, delta: text });
+  finish();
 }
 
 // The Codex runtime's Responses backend (ChatGPT sign-in). ReMa's
