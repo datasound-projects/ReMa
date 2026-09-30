@@ -5,7 +5,7 @@
   </picture>
 </p>
 
-<h1 align="center">Your AI powered Career Desk</h1>
+<h1 align="center">Your AI powered Career Harness</h1>
 
 <p align="center">
   A desktop app that searches jobs, tracks your applications and interviews from your mailbox,<br>
